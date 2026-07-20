@@ -114,5 +114,12 @@ GitHub: haizarakun/koetomoProject
 
 公式サポートDiscord: Join Discord
 
-📄 ライセンス
-MIT License
+＃＃ライセンス
+
+このソフトウェアは学習目的として公開されています。
+
+＃＃⚠️免責事項
+このソフトウェアは開発者のリバースエンジニアリング学習を目的として作成されています。
+
+ツールの利用はすべてユーザー自身の責任
+https://koetomo.fun/termの利用規約を遵守
