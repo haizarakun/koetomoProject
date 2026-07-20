@@ -1,4 +1,3 @@
-Markdown
 # Koetomo Project
 
 Koetomo (koetomo.fun) の非公式デスクトップクライアント、APIラッパー、および専用Chrome拡張機能をまとめたプロジェクトです。
