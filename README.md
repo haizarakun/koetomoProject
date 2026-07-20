@@ -111,9 +111,9 @@ DOM構造のハッシュ化対策: クラス名等がビルド毎に変更され
 
 GitHub: haizarakun/koetomoProject
 
-公式サポートDiscord: Join Discord
+公式サポート　https://discord.gg/wETHFNZSXU
 
-＃＃ライセンス
+ライセンス
 
 このソフトウェアは学習目的として公開されています。
 
