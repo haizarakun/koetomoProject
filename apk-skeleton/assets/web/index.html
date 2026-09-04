@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="object-src 'none'; base-uri 'self'; frame-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' https: data: blob:; media-src 'self' https: data: blob:; connect-src 'self' https: wss: blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-src 'none'; form-action 'none'">
 <title>KoeTomo+</title>
 <link rel="stylesheet" href="style.css">
 </head>
@@ -201,10 +201,17 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <section id="page-call" class="page">
 <p class="page-desc">自分の通話ルーム(枠)を開く、または下の一覧から開いているルームに参加します。</p>
 <button id="openNewCallBtn" class="btn-primary join-own-btn"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg> 自分の通話を開く</button>
+<button id="koeRandomBtn" class="btn-secondary join-own-btn" style="margin-top:8px;"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h4l3 10h5"/><path d="M16 5l4 2-4 2"/><path d="M4 17h4l2-6"/><path d="M16 15l4 2-4 2"/></svg> ランダム通話（マッチング）</button>
 <div id="createRoomRow" class="create-room-row" style="display:none; flex-direction:column; gap:8px; align-items:stretch;">
 <input id="createRoomDesc" type="text" placeholder="枠名(ルームの説明)">
 <label class="check-row"><input type="checkbox" id="createRoomPublic" checked> 公開する(誰でも参加OK)</label>
 <label class="check-row"><input type="checkbox" id="createRoomComment" checked> コメント(チャット)を許可</label>
+<label class="field-label" style="margin-top:6px;">枠のサイズ</label>
+<div id="roomSizeRow" class="call-tabs" style="margin:2px 0 4px;">
+<button type="button" class="chip room-size-chip active" data-ct="1">大人数</button>
+<button type="button" class="chip room-size-chip" data-ct="2">少人数</button>
+</div>
+<div id="roomSizeDesc" class="card-sub" style="margin-bottom:4px;"></div>
 <button id="createRoomBtn" class="btn-secondary">この設定で枠を作る</button>
 </div>
 <div id="raiseHandRow" style="display:none;">
@@ -437,9 +444,76 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <div id="heatmapTotal" class="card-sub" style="text-align:center; margin-top:4px;"></div>
 <div id="heatmapStats" class="heatmap-stats"></div>
 </details>
+<details class="mypage-section" id="koeDiscoverSection">
+<summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg> ユーザーを探す</summary>
+<div class="talk-src-row" style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0;">
+<button type="button" class="theme-btn koe-disc-chip active" data-disc="hima" style="width:auto;">ひま</button>
+<button type="button" class="theme-btn koe-disc-chip" data-disc="recommended" style="width:auto;">おすすめ</button>
+<button type="button" class="theme-btn koe-disc-chip" data-disc="birthday" style="width:auto;">今日誕生日</button>
+<button type="button" class="theme-btn koe-disc-chip" data-disc="requests" style="width:auto;">フォロー申請</button>
+</div>
+<div id="koeDiscoverList" class="card-list"></div>
+</details>
+<details class="mypage-section" id="koeEnqueteSection">
+<summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 5h6M5 8h14v12H5zM9 12h6M9 16h4"/></svg> 運営アンケート</summary>
+<p class="page-desc">公式が配信しているアンケートに回答できます。</p>
+<div id="koeEnqueteList" class="card-list"></div>
+<div id="koeEnqueteForm" style="display:none;margin-top:8px;"></div>
+</details>
+<details class="mypage-section" id="koeStorageSection">
+<summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/></svg> キャッシュ / 保存データ</summary>
+<p class="page-desc" style="white-space:normal;">キャッシュとは、表示を速くするために端末へ一時的に置いているデータ（画像・アイコン・タイムラインの控えなど）です。KoeTomo+ は<b>できるだけキャッシュを使わない設定</b>で動いていて、上限（画像など約16MB）を超えた分は自動で捨てています。それでも気になるときは、下のボタンでいつでも全部消せます。</p>
+<p class="page-desc" style="white-space:normal;opacity:.85;"><b>消えるもの</b>：画像・アイコンの一時ファイル、タイムラインの表示用の控え、既読・いいねの記録。<br><b>消えないもの</b>：ログイン情報、保存したアカウント、フォント・テーマなどの設定、下書き、BANリストの設定。<br>削除しても失われるデータはありません。次の表示が一度だけ少し遅くなるだけです。</p>
+<div id="koeStorageBox"></div>
+</details>
+<details class="mypage-section" id="koeLimitSection">
+<summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg> 制限にかかった記録</summary>
+<p class="page-desc">投稿・枠作成などがサーバー側の制限で弾かれたとき、その時刻・前回成功からの秒数・サーバーの文言を記録します（この端末内だけ）。公式アプリにもアプリ内のクールタイムは無く、制限はサーバー判定のみです。</p>
+<div id="koeLimitLog" class="card-list"></div>
+</details>
+<details class="mypage-section" id="koeQrSection">
+<summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM19 14h2M14 19h3M19 19h2"/></svg> 自分のQRコード</summary>
+<p class="page-desc">友だち追加用のQRコードです。相手のカメラで読み取ってもらえます。</p>
+<div id="koeQrBox" style="text-align:center;padding:8px;"></div>
+</details>
+<details class="mypage-section">
+<summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M5 20h14"/></svg> 保存(ダウンロード)</summary>
+<p class="page-desc" style="white-space:normal;">保存ボタンを押したときに<b>形式をきくかどうか</b>と、<b>保存先フォルダ</b>をここで決められます。</p>
+
+<label class="field-label">保存先フォルダ</label>
+<div style="display:flex;flex-direction:column;gap:6px;">
+<button type="button" class="btn-secondary koe-folder-opt" data-folder="std">KoeTomo フォルダ（おすすめ・従来どおり）</button>
+<button type="button" class="btn-secondary koe-folder-opt" data-folder="app">ダウンロード内の KoeTomo 専用フォルダ</button>
+<button type="button" class="btn-secondary koe-folder-opt" data-folder="dl">ダウンロードフォルダの直下</button>
+</div>
+<p class="card-sub" id="koeFolderDesc" style="white-space:normal;margin:6px 2px 0;"></p>
+<p class="page-desc" style="white-space:normal;margin-top:4px;">・<b>KoeTomo フォルダ（おすすめ）</b>… 画像は 画像/KoeTomo、音声は 音楽/KoeTomo。ギャラリーや音楽アプリの一覧にそのまま出るので、いちばん見つけやすいやり方です。<br>・<b>ダウンロード内の KoeTomo 専用フォルダ</b>… ダウンロードの中に KoeTomo フォルダを作り、音声は Audio、画像は Images へ自動で振り分けます。1か所にまとめたい人向け。<br>・<b>ダウンロード直下</b>… 他のアプリと同じ場所にそのまま置きます。</p>
+
+<label class="field-label" style="margin-top:12px;">保存するときに形式をきく</label>
+<label class="check-row"><input type="checkbox" id="dlAskAudioChk"> 音声：毎回きく</label>
+<label class="check-row"><input type="checkbox" id="dlAskImgChk"> 画像：毎回きく</label>
+<p class="page-desc" style="white-space:normal;margin-top:4px;">オフにすると、下で選んだ形式ですぐ保存します。オフのままでも保存ボタンを<b>長押し</b>すればその場で形式を選べます。</p>
+
+<label class="field-label" style="margin-top:12px;">きかないときの音声の形式</label>
+<select id="dlFmtAudioSel">
+<option value="original">元の形式のまま(速い・おすすめ)</option>
+<option value="mp3">MP3 (128kbps)</option>
+<option value="mp3hq">MP3 (320kbps・高音質)</option>
+<option value="wav">WAV (無圧縮)</option>
+</select>
+<label class="field-label" style="margin-top:8px;">きかないときの画像の形式</label>
+<select id="dlFmtImgSel">
+<option value="original">元の形式のまま(速い・おすすめ)</option>
+<option value="jpg">JPEG</option>
+<option value="png">PNG</option>
+<option value="webp">WebP</option>
+</select>
+<p class="page-desc" style="white-space:normal;margin-top:8px;">保存が終わると、保存先つきの通知が出ます。</p>
+</details>
 <details class="mypage-section" id="koeActSection">
 <summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg> フォロー中の活動時間帯</summary>
-<p class="page-desc">フォロー中の人の「最終オンライン」から、何時ごろオンラインが多いかを集計します（この端末内で時間帯ごとの件数だけを保存。誰がいつ、は記録しません）。</p>
+<p class="page-desc">フォロー中の人の「最終オンライン」から、何時ごろオンラインが多いかを集計します（この端末内で時間帯ごとの件数だけを保存。誰がいつ、は記録しません）。<br><b>初期状態はオフ</b>で、ログインしたときに集計するかどうかを選べます。ここでいつでも切り替えられます。</p>
+<label class="check-row"><input type="checkbox" id="koeActOnChk"> この端末で集計する</label>
 <div style="display:flex;gap:8px;align-items:center;margin:6px 0;"><button type="button" class="theme-btn" id="koeActCollectBtn" style="width:auto;">いま集計</button><button type="button" class="theme-btn" id="koeActClearBtn" style="width:auto;opacity:.7;">リセット</button></div>
 <div id="koeActHoursBox"></div>
 </details>
@@ -636,56 +710,14 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <input id="fontSizeRange" type="range" min="90" max="120" step="5" value="100" style="width:100%;">
 <div id="fontSizeLabel" class="card-sub" style="text-align:center;">100%</div>
 <label class="field-label" style="margin-top:10px;">フォント</label>
-<select id="fontSelect">
-<option value="system">標準(普通)</option>
-<optgroup label="定番">
-<option value="gothic">ゴシック(くっきり)</option>
-<option value="round">丸ゴシック(まるまる)</option>
-<option value="mincho">明朝(きちんと)</option>
-<option value="dot">ドット(レトロ)</option>
-</optgroup>
-<optgroup label="かわいい系">
-<option value="maru">丸ゴシック(やさしい)</option>
-<option value="kosugi">まるもじ(ころん)</option>
-<option value="mochi">もちもちポップ</option>
-<option value="hachi">はちまるポップ(ゆるかわ)</option>
-<option value="yomogi">よもぎ(手書き)</option>
-<option value="kurenaido">やさしい手書き</option>
-<option value="klee">万年筆っぽい手書き</option>
-<option value="yusei">ふつうの手書き</option>
-<option value="serifpop">レゲエポップ(インパクト)</option>
-<option value="kiwi">キウイ丸(まろやか)</option>
-</optgroup>
-<optgroup label="個性派">
-<option value="kaisei">海星(上品な明朝)</option>
-<option value="shippori">しっぽり明朝(文学的)</option>
-<option value="delagothic">デラゴシック(極太インパクト)</option>
-<option value="rocknroll">ロックンロール(モダン)</option>
-<option value="yuji">遊字宿(筆文字)</option>
-<option value="hina">ひな明朝(繊細)</option>
-<option value="newtegomin">手毬明朝(温かみ)</option>
-</optgroup>
-<optgroup label="ゴシック系(追加)">
-<option value="zenkaku">Zen角ゴシック(モダン)</option>
-<option value="biz">UDゴシック(読みやすい)</option>
-<option value="murecho">ムレチョ(やわらか)</option>
-</optgroup>
-<optgroup label="明朝系(追加)">
-<option value="zenold">Zen旧明朝(趣)</option>
-<option value="zenantique">Zenアンティーク(活版風)</option>
-</optgroup>
-<optgroup label="デザイン系">
-<option value="stick">スティック(角サインペン)</option>
-<option value="rampart">ランパート(立体)</option>
-<option value="train">トレイン(方向幕風)</option>
-<option value="chokokutai">彫刻体(超極太装飾)</option>
-</optgroup>
-<option value="custom">カスタム(インポート・下に入力)</option>
-</select>
-<input id="fontCustomInput" type="text" placeholder="Googleフォント名 例: Rampart One / Klee One" style="width:100%;margin-top:6px;display:none;">
-<input id="fontFileInput" type="file" accept=".ttf,.otf,.woff,.woff2,font/*" style="width:100%;margin-top:6px;">
-<div class="card-sub" style="margin-top:4px;">かわいい系フォントはインターネットから読み込みます(初回のみ)。手持ちのフォントファイルも上のボタンから読み込めます。</div>
-<div class="card-sub" style="margin-top:4px;">※Web フォントは初回のみ通信で読み込みます</div>
+<div class="ios-search"><input id="fontSearch" type="search" placeholder="フォントを検索" autocomplete="off"></div>
+<div id="fontList" class="ios-list"></div>
+<details class="ios-more">
+<summary>自分のフォントを使う</summary>
+<input id="fontCustomInput" type="text" placeholder="Google フォント名（例: Klee One）">
+<input id="fontFileInput" type="file" accept=".ttf,.otf,.woff,.woff2,font/*">
+<p class="ios-note">Web フォントは初回だけ通信で読み込みます。</p>
+</details>
 </details>
 <details class="mypage-section">
 <summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1" stroke-linecap="round"/></svg> 詳細設定</summary>
@@ -763,6 +795,8 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <summary><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M4 3l16 16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg> フィルター</summary>
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" id="spamMarkChk" checked> 業者っぽいアカウントに「⚠ 業者?」マークを表示</label>
 <p class="page-desc" style="margin-top:4px;">判定は量産型アイコン名・「単語＋3桁数字」の名前・フォロー0などの特徴からの推定です。マークをタップすると理由が出て、業者垢だと確認できたら「BANリストに申請する」で共有BANリストに申請できます（承認制）。</p>
+<label class="check-row" style="margin-top:8px;"><input type="checkbox" id="botAutoChk" checked> 明らかな業者アカウントを見つけたら自動でBANリストに申請</label>
+<p class="page-desc" style="margin-top:4px;white-space:normal;">必須条件（16文字ランダムのアイコン名・フォロー/フォロワー/友達/いいねが全て0・自己紹介なし・年齢確認なし）を<b>すべて</b>満たし、さらに「単語＋3桁数字」の名前・既知botとID連番・直近1時間に5件以上投稿などの加点が一定を超えたときだけ申請します。判定と証拠はアプリがAPIから取り直して作るので偽造できません。<b>自動で申請するだけで、ブロックはしません</b>（ブロックは管理者が承認してから）。申請は30秒あけて1時間3件・1日10件まで、同じ相手は1回だけです。</p>
 <label class="field-label" style="margin-top:8px;">NGワード(1行に1つ。含む投稿を非表示)</label>
 <textarea id="ngWordsInput" rows="4" placeholder="例:&#10;宣伝&#10;スパム" style="width:100%;resize:vertical;"></textarea>
 <label class="field-label" style="margin-top:10px;">ミュート中のユーザー</label>
@@ -798,19 +832,10 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 </details>
 <details class="mypage-section">
 <summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg> データ・履歴</summary>
-<p class="page-desc">公式の各種データを表示します。</p>
+<p class="page-desc">ここには、専用の画面がまだない公式データだけを置いています。<br>友達の投稿・録音一覧・ポイント履歴・サブスク・所有コミュニティ・友達・バッジ・マッチング・受け取った投げ銭は、それぞれの画面から見られるのでここからは外しました。</p>
 <div style="display:flex;flex-wrap:wrap;gap:6px;">
-<button class="btn-secondary koe-data-btn" data-cmd="get_friend_posts" data-key="posts" data-title="友達の投稿" style="width:auto;">友達の投稿</button>
-<button class="btn-secondary koe-data-btn" data-cmd="get_recording_entries" data-key="recordings" data-title="録音一覧" style="width:auto;">録音一覧</button>
-<button class="btn-secondary koe-data-btn" data-cmd="get_daily_point_histories" data-key="histories" data-title="ポイント履歴" style="width:auto;">ポイント履歴</button>
 <button class="btn-secondary koe-data-btn" data-cmd="get_item_histories" data-key="items" data-title="アイテム履歴" style="width:auto;">アイテム履歴</button>
 <button class="btn-secondary koe-data-btn" data-cmd="get_coin_packs" data-key="coin_packs" data-title="コインパック" style="width:auto;">コインパック</button>
-<button class="btn-secondary koe-data-btn" data-cmd="get_subscription_menus" data-key="menus" data-title="サブスクプラン" style="width:auto;">サブスク</button>
-<button class="btn-secondary koe-data-btn" data-cmd="get_owned_communities" data-key="communities" data-title="所有コミュニティ" style="width:auto;">所有コミュニティ</button>
-<button class="btn-secondary koe-data-btn" data-cmd="get_receive_tippings" data-key="tippings" data-title="受け取った投げ銭" style="width:auto;">受け取った投げ銭</button>
-<button class="btn-secondary koe-data-btn" data-cmd="get_dive_target_friends" data-key="friends" data-title="dive 友達" style="width:auto;">dive友達</button>
-<button class="btn-secondary koe-data-btn" data-cmd="get_badge_users" data-key="users" data-title="バッジユーザー" style="width:auto;">バッジユーザー</button>
-<button class="btn-secondary koe-data-btn" data-cmd="get_matching" data-key="matchings" data-title="マッチング" style="width:auto;">マッチング</button>
 </div>
 </details>
 <details class="mypage-section">
@@ -894,10 +919,25 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <div class="modal-header"><h3>保存する形式</h3><button id="dlFormatClose" class="modal-close">✕</button></div>
 <div style="display:flex;flex-direction:column;gap:8px;padding:6px 0;">
 <button class="btn-secondary dl-fmt-btn" data-fmt="original">元の形式のまま(速い・おすすめ)</button>
-<button class="btn-secondary dl-fmt-btn" data-fmt="mp3">MP3 に変換して保存</button>
-<button class="btn-secondary dl-fmt-btn" data-fmt="wav">WAV に変換して保存</button>
+<button class="btn-secondary dl-fmt-btn" data-fmt="mp3">MP3 (128kbps・どこでも再生できる)</button>
+<button class="btn-secondary dl-fmt-btn" data-fmt="mp3hq">MP3 (320kbps・高音質)</button>
+<button class="btn-secondary dl-fmt-btn" data-fmt="wav">WAV (無圧縮・編集向き)</button>
 </div>
-<p style="font-size:11px;color:var(--text-muted,#888);margin:4px 2px 0;">変換は端末上で行うため、長い音声は少し時間がかかります(10分まで)。</p>
+<label class="check-row"><input type="checkbox" id="dlFmtRemember"> 次回から聞かずにこの形式で保存する</label>
+<p style="font-size:11px;color:var(--text-muted,#888);margin:4px 2px 0;">チェックを入れて選ぶと、次からは聞かずにその形式で保存します（マイページ →「保存(ダウンロード)」でいつでも戻せます。聞かない設定でも保存ボタンの<b>長押し</b>でこの画面を開けます）。<br>元の形式はふつう M4A(AAC)です。変換は端末上で行うため、長い音声は少し時間がかかります(10分まで)。</p>
+</div>
+</div>
+<div id="imgFormatSheet" class="modal" style="display:none;">
+<div class="modal-content" style="max-width:340px;">
+<div class="modal-header"><h3>保存する形式</h3><button id="imgFormatClose" class="modal-close">✕</button></div>
+<div style="display:flex;flex-direction:column;gap:8px;padding:6px 0;">
+<button class="btn-secondary img-fmt-btn" data-fmt="original">元の形式のまま(速い・おすすめ)</button>
+<button class="btn-secondary img-fmt-btn" data-fmt="jpg">JPEG (写真向き・軽い)</button>
+<button class="btn-secondary img-fmt-btn" data-fmt="png">PNG (画質そのまま・透過対応)</button>
+<button class="btn-secondary img-fmt-btn" data-fmt="webp">WebP (いちばん軽い)</button>
+</div>
+<label class="check-row"><input type="checkbox" id="imgFmtRemember"> 次回から聞かずにこの形式で保存する</label>
+<p style="font-size:11px;color:var(--text-muted,#888);margin:4px 2px 0;">チェックを入れて選ぶと、次からは聞かずにその形式で保存します（マイページ →「保存(ダウンロード)」でいつでも戻せます。聞かない設定でも保存ボタンの<b>長押し</b>でこの画面を開けます）。<br>元の形式のままなら、JPEG・PNG・WebP・GIF などを判別して正しい拡張子で保存します。JPEG は透過を保てないため白で埋めます。</p>
 </div>
 </div>
 <div id="recordCommentModal" class="modal" style="display:none;">
@@ -1134,14 +1174,19 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 </div>
 <div id="chatMessages" class="chat-messages"></div>
 <div id="chatImagePreviewRow" style="display:none;align-items:center;gap:8px;padding:6px 10px;border-top:1px solid var(--border,#333);">
-<img id="chatImagePreview" style="max-height:64px;border-radius:8px;">
+<img id="chatImagePreview" style="max-height:64px;border-radius:8px;cursor:zoom-in" onclick="if(this.src)openLightbox(this.src)" title="タップで拡大">
 <span id="chatImageName" style="font-size:12px;color:var(--text-muted,#888);flex:1;">写真を送信します</span>
 <button id="chatImageClear" class="modal-close" type="button">✕</button>
 </div>
+<div id="chatVoiceRow" style="display:none;align-items:center;gap:8px;padding:6px 10px;border-top:1px solid var(--border,#333);">
+<audio id="chatVoicePreview" controls style="flex:1;max-width:100%;"></audio>
+<button id="chatVoiceClear" class="modal-close" type="button">✕</button>
+</div>
 <div class="chat-input-row">
 <input id="chatImageInput" type="file" accept="image/*" style="display:none;">
+<button id="chatVoiceBtn" class="chat-img-btn" title="音声を送る" type="button"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><rect x="11" y="18" width="2" height="3.4" rx="1"/></svg></button>
 <button id="chatImageBtn" class="chat-img-btn" title="写真を送る" type="button"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="9" cy="10" r="2"/><path d="M4 17l5-4 4 3 3-2 4 3" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-<textarea id="chatInput" rows="1" placeholder="メッセージを入力(改行OK)"></textarea>
+<textarea id="chatInput" rows="1" placeholder="メッセージ"></textarea>
 <button id="chatSendBtn" class="btn-primary">送信</button>
 </div>
 </div>
@@ -1271,6 +1316,14 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <select id="callMicSelect"></select>
 <label class="field-label">スピーカー(出力)</label>
 <select id="callSpeakerSelect"></select>
+<div id="callRecRow" style="margin-top:8px;">
+<label class="field-label">通話の録音（運営のキャンペーン機能）</label>
+<div style="display:flex; gap:6px;">
+<button id="callRecStartBtn" class="btn-secondary" style="width:auto;">録音開始</button>
+<button id="callRecStopBtn" class="btn-secondary" style="width:auto;">停止</button>
+</div>
+<p class="callv2-note" id="callRecNote">枠主のみ・サーバー側で録音されます。参加者に知らせてから使ってください。</p>
+</div>
 <div id="callOwnerControls" style="display:none; margin-top:8px;">
 <label class="field-label">ルームタイトル変更(オーナーのみ)</label>
 <div style="display:flex; gap:6px;">

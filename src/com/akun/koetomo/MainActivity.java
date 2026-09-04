@@ -131,7 +131,7 @@ public class MainActivity extends Activity {
     /* access modifiers changed from: protected */
     // ==== 不正防止: 改変・再署名された APK / デバッグ可能ビルドでは起動させない ====
     // リリース署名証明書の SHA-256(apksigner verify --print-certs と同じ値)
-    private static final String RELEASE_CERT_SHA256 = "8d638778babadabfa3f90cec5fbf0429db8cb595a4fd732bc02d99a79993f292";
+    static final String RELEASE_CERT_SHA256 = "8d638778babadabfa3f90cec5fbf0429db8cb595a4fd732bc02d99a79993f292";
 
     private boolean integrityOk() {
         try {
@@ -145,6 +145,76 @@ public class MainActivity extends Activity {
             return RELEASE_CERT_SHA256.equalsIgnoreCase(sb.toString());
         } catch (Throwable t) {
             return false;
+        }
+    }
+
+    private View splashView;
+    private static final long BOOT_T0 = android.os.SystemClock.elapsedRealtime();
+    private long tCreated = 0;
+
+    /** 起動の内訳を診断ログに残す(遅い箇所の切り分け用) */
+    private void bootLog(String phase) {
+        try {
+            long proc = BOOT_T0;
+            long now = android.os.SystemClock.elapsedRealtime();
+            final String line = "[BOOT] " + phase + " proc+" + (now - proc) + "ms create+" + (tCreated > 0 ? (now - tCreated) : 0) + "ms";
+            if (this.apiBridge != null) this.apiBridge.session.dispatch("js_diag_log", new org.json.JSONArray().put(line));
+        } catch (Throwable ig) {}
+    }
+
+    /** 起動直後に即描画する簡易スプラッシュ(画像デコードなしで軽い) */
+    private View buildSplash() {
+        try {
+            LinearLayout box = new LinearLayout(this);
+            box.setOrientation(LinearLayout.VERTICAL);
+            box.setGravity(android.view.Gravity.CENTER);
+            box.setBackgroundColor(0xFF111111);
+            TextView t = new TextView(this);
+            t.setText("KoeTomo+");
+            t.setTextSize(26);
+            t.setTextColor(0xFFEDEFF5);
+            t.setGravity(android.view.Gravity.CENTER);
+            box.addView(t);
+            TextView s = new TextView(this);
+            s.setText("読み込み中…");
+            s.setTextSize(12);
+            s.setTextColor(0xFF8B93A7);
+            s.setGravity(android.view.Gravity.CENTER);
+            s.setPadding(0, 18, 0, 0);
+            box.addView(s);
+            return box;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** WebView 側の描画準備ができたらスプラッシュを消す(JS から uiReady() で呼ばれる) */
+    public void hideSplash() {
+        try {
+            final View v = this.splashView;
+            if (v == null) return;
+            bootLog("画面表示");
+            this.splashView = null;
+            runOnUiThread(new Runnable() {
+                public void run() {
+                    try {
+                        v.animate().alpha(0f).setDuration(160).withEndAction(new Runnable() {
+                            public void run() {
+                                try {
+                                    android.view.ViewParent p = v.getParent();
+                                    if (p instanceof android.view.ViewGroup) ((android.view.ViewGroup) p).removeView(v);
+                                } catch (Exception e) {}
+                            }
+                        }).start();
+                    } catch (Exception e) {
+                        try {
+                            android.view.ViewParent p = v.getParent();
+                            if (p instanceof android.view.ViewGroup) ((android.view.ViewGroup) p).removeView(v);
+                        } catch (Exception ig) {}
+                    }
+                }
+            });
+        } catch (Exception e) {
         }
     }
 
@@ -179,8 +249,27 @@ public class MainActivity extends Activity {
                 requestPermissions((String[]) arrayList.toArray(new String[0]), 1);
             }
         }
+        // 起動直後の白い画面をなくす: ウィンドウとWebViewの地色を先にアプリの背景色にして、
+        // 画面が用意できるまでネイティブ側の簡易スプラッシュを重ねる(体感速度)。
+        try {
+            getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(0xFF111111));
+        } catch (Exception e) {
+        }
         this.webView = new WebView(this);
-        setContentView(this.webView);
+        try { this.webView.setBackgroundColor(0xFF14161C); } catch (Exception e) {}
+        android.widget.FrameLayout rootLayout = new android.widget.FrameLayout(this);
+        rootLayout.setBackgroundColor(0xFF111111);
+        rootLayout.addView(this.webView, new android.widget.FrameLayout.LayoutParams(-1, -1));
+        this.splashView = buildSplash();
+        if (this.splashView != null) {
+            rootLayout.addView(this.splashView, new android.widget.FrameLayout.LayoutParams(-1, -1));
+        }
+        setContentView(rootLayout);
+        // 画面が出ないまま取り残されないよう、合図が来なくても6秒で必ず消す
+        try {
+            this.webView.postDelayed(new Runnable() { public void run() { hideSplash(); } }, 6000);
+        } catch (Exception e) {
+        }
         WebSettings settings = this.webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
@@ -194,6 +283,10 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
         }
         try {
+            settings.setAllowContentAccess(false); // content:// 経由で他アプリのProviderを読ませない
+        } catch (Exception e) {
+        }
+        try {
             settings.setSaveFormData(false);
         } catch (Exception e) {
         }
@@ -203,6 +296,18 @@ public class MainActivity extends Activity {
         }
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         settings.setDatabaseEnabled(true);
+        // キャッシュは溜め込まない方針: 起動時に一時ファイルが上限を超えていたら古い順に捨てる。
+        // あわせて Keystore を裏で温めておく(JS からの secureLoad が同期呼び出しで待たされるのを防ぐ)
+        try {
+            final android.content.Context cctx = getApplicationContext();
+            new Thread(new Runnable() {
+                public void run() {
+                    try { new SecureStore(cctx).encrypt("w"); } catch (Throwable ig) {}
+                    try { KoeApiBridge.trimCache(cctx, KoeApiBridge.CACHE_LIMIT_BYTES); } catch (Throwable ig) {}
+                }
+            }).start();
+        } catch (Exception e) {
+        }
         // どんな画面サイズ/密度の端末(タブレット・折りたたみ・Meta Questの2Dパネル等)でも
         // CSSのviewportメタタグ通りに正しく表示させるため、WebViewの幅計算をwide viewport方式にする。
         try {
@@ -240,6 +345,7 @@ public class MainActivity extends Activity {
             @Override public boolean shouldOverrideUrlLoading(WebView v, String url) { return handleNav(url); }
             @Override public void onPageFinished(WebView v, String url) {
                 super.onPageFinished(v, url);
+                MainActivity.this.bootLog("ページ読み込み完了");
                 MainActivity.this.handleIncomingIntent(MainActivity.this.getIntent());
             }
         });
@@ -247,6 +353,16 @@ public class MainActivity extends Activity {
             public void onPermissionRequest(final PermissionRequest permissionRequest) {
                 MainActivity.this.runOnUiThread(new Runnable() {
                     public void run() {
+                        // 許可するのは同梱アセット(file://)から出た要求だけ。多層防御。
+                        try {
+                            android.net.Uri org = permissionRequest.getOrigin();
+                            String o = org == null ? "" : org.toString();
+                            if (!(o.startsWith("file://") || o.length() == 0)) {
+                                permissionRequest.deny();
+                                return;
+                            }
+                        } catch (Exception ig) {
+                        }
                         String[] res = permissionRequest.getResources();
                         java.util.ArrayList<String> allow = new java.util.ArrayList<String>();
                         if (res != null) {
@@ -284,6 +400,8 @@ public class MainActivity extends Activity {
         });
         this.apiBridge = new KoeApiBridge(this.webView, new KoeSession(getApplicationContext()));
         this.webView.addJavascriptInterface(this.apiBridge, "AndroidApi");
+        this.tCreated = android.os.SystemClock.elapsedRealtime();
+        bootLog("onCreate完了(WebView生成済み)");
         this.webView.loadUrl("file:///android_asset/web/index.html");
     }
 
@@ -324,7 +442,9 @@ public class MainActivity extends Activity {
             // 通知タップ: 通知ページを開く
             String openPage = intent.getStringExtra("koe_open_page");
             if (openPage != null && openPage.length() > 0) {
-                final String js = "window.__koeOpenPageFromNotif && window.__koeOpenPageFromNotif('" + openPage.replace("'", "") + "')";
+                // 他アプリからも startActivity できるため、渡された値は既知のページ名だけに限定する
+            if (!openPage.matches("[a-z_]{1,24}")) return;
+            final String js = "window.__koeOpenPageFromNotif && window.__koeOpenPageFromNotif(" + org.json.JSONObject.quote(openPage) + ")";
                 this.webView.post(new Runnable() {
                     public void run() {
                         try {
@@ -410,6 +530,12 @@ public class MainActivity extends Activity {
     /* access modifiers changed from: protected */
     public void onDestroy() {
         try { stopBgNotifPoller(); } catch (Exception e) {}
+        // アプリを閉じたときに、自分が開いたままの枠を閉じる（残ると次回の枠作成が拒否される）
+        try {
+            if (isFinishing() && this.apiBridge != null && this.apiBridge.session != null) {
+                this.apiBridge.session.closeMyRoomOnExit();
+            }
+        } catch (Exception e) {}
         try {
             if (this.speakerOverlayView != null) {
                 ((WindowManager) getSystemService("window")).removeView(this.speakerOverlayView);
@@ -453,7 +579,7 @@ public class MainActivity extends Activity {
                     int n = 0;
                     while (bgNotifRunning) {
                         try {
-                            Thread.sleep(n == 0 ? 20000 : 60000);
+                            Thread.sleep(n == 0 ? 6000 : 12000); // 通知の反映を早める(60秒→30秒)
                         } catch (InterruptedException e) {
                             return;
                         }
@@ -535,13 +661,15 @@ public class MainActivity extends Activity {
                 if (shown >= 5) break;
                 String name = n.optString("name", "");
                 String msg = n.optString("message", "");
+                // 見出しは相手の名前、本文は内容。以前は見出しが全部「声とも+ 通知」で
+                // 区別がつかなかったため、通知欄で誰から何が来たか読めるようにする。
                 String title = name.length() > 0 ? name : "声とも+";
-                String text = (name.length() > 0 && msg.startsWith("さん")) ? name + msg : (name.length() > 0 && msg.length() > 0 ? name + " " + msg : (msg.length() > 0 ? msg : "新しい通知があります"));
-                bridge.showKoetomoNotification("声とも+ 通知", text);
+                String text = msg.length() > 0 ? (msg.startsWith("さん") ? name + msg : msg) : "新しい通知があります";
+                bridge.showKoetomoNotification(title, text);
                 shown++;
             }
             if (fresh.size() > shown) {
-                bridge.showKoetomoNotification("声とも+ 通知", "ほか " + (fresh.size() - shown) + " 件の新しい通知");
+                bridge.showKoetomoNotification("声とも+", "ほか " + (fresh.size() - shown) + " 件の新しい通知");
             }
         } catch (Exception e) {
         }
@@ -555,6 +683,20 @@ public class MainActivity extends Activity {
             this.webView.pauseTimers();
         }
         startBgNotifPoller();
+        // 画面を離れたタイミングで一時ファイル(画像キャッシュ)が上限を超えていたら古い順に捨てる
+        try {
+            final android.content.Context c = getApplicationContext();
+            new Thread(new Runnable() { public void run() { KoeApiBridge.trimCache(c, KoeApiBridge.CACHE_LIMIT_BYTES); } }).start();
+        } catch (Exception e) {}
+    }
+
+    public void onTrimMemory(int level) {
+        try { super.onTrimMemory(level); } catch (Exception e) {}
+        try {
+            if (level >= 40 && this.webView != null) this.webView.clearMatches();
+            final android.content.Context c = getApplicationContext();
+            new Thread(new Runnable() { public void run() { KoeApiBridge.trimCache(c, KoeApiBridge.CACHE_LIMIT_BYTES / 2); } }).start();
+        } catch (Exception e) {}
     }
 
     public void onUserLeaveHint() {

@@ -8,6 +8,8 @@ import android.content.ContentValues;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
@@ -77,6 +79,80 @@ public class KoeApiBridge {
         });
     }
 
+    /* ===== 通知アイコン =====
+     * これまでは android.R.drawable.ic_menu_call(受話器)を全部の通知に使っていたため、
+     * 保存完了もお知らせも通話中も、すべて「📞」に見えていた。
+     * アプリ自身のロゴ(assets/web/logo.png)から白いシルエットを作って小アイコンにする。
+     * 小アイコンは alpha しか使われないので、明るい部分だけを不透明にして作る。
+     * Icon は API23 から。それ未満は受話器ではない無難な枠アイコンにする。 */
+    static final int FALLBACK_SMALL_ICON = 17301659; // android.R.drawable.ic_dialog_info
+
+    private static Object cachedSmallIcon = null;
+    private static boolean smallIconTried = false;
+    private static android.graphics.Bitmap cachedLogo = null;
+    private static boolean logoTried = false;
+
+    /** assets/web/logo.png をそのまま(カラーで)読む。通知の大アイコン用。 */
+    static android.graphics.Bitmap appLogoBitmap(Context c) {
+        if (logoTried) return cachedLogo;
+        logoTried = true;
+        InputStream in = null;
+        try {
+            in = c.getAssets().open("web/logo.png");
+            cachedLogo = BitmapFactory.decodeStream(in);
+        } catch (Throwable t) {
+            cachedLogo = null;
+        } finally {
+            try { if (in != null) in.close(); } catch (Exception ig) {}
+        }
+        return cachedLogo;
+    }
+
+    /** ロゴの明るい部分だけを残した白いシルエット Icon を作る(API23+)。失敗したら null。 */
+    static Object appSmallIcon(Context c) {
+        if (smallIconTried) return cachedSmallIcon;
+        smallIconTried = true;
+        try {
+            if (Build.VERSION.SDK_INT < 23) return null;
+            android.graphics.Bitmap src = appLogoBitmap(c);
+            if (src == null) return null;
+            int n = 96;
+            android.graphics.Bitmap small = android.graphics.Bitmap.createScaledBitmap(src, n, n, true);
+            int[] px = new int[n * n];
+            small.getPixels(px, 0, n, 0, 0, n, n);
+            for (int i = 0; i < px.length; i++) {
+                int p = px[i];
+                int a = (p >>> 24) & 255;
+                int r = (p >> 16) & 255, g = (p >> 8) & 255, b = p & 255;
+                int lum = (r * 30 + g * 59 + b * 11) / 100;
+                // 明るいところを不透明、暗い背景を透明にする(0..255 に伸ばす)
+                int outA = lum <= 96 ? 0 : (lum >= 200 ? 255 : ((lum - 96) * 255) / 104);
+                if (a < 255) outA = (outA * a) / 255;
+                px[i] = (outA << 24) | 0x00FFFFFF;
+            }
+            android.graphics.Bitmap sil = android.graphics.Bitmap.createBitmap(n, n, android.graphics.Bitmap.Config.ARGB_8888);
+            sil.setPixels(px, 0, n, 0, 0, n, n);
+            if (small != src) small.recycle();
+            cachedSmallIcon = android.graphics.drawable.Icon.createWithBitmap(sil);
+        } catch (Throwable t) {
+            cachedSmallIcon = null;
+        }
+        return cachedSmallIcon;
+    }
+
+    /** 小アイコンを Builder に設定する。アプリのロゴが使えないときだけ既定の枠アイコン。 */
+    static void applySmallIcon(Context c, Notification.Builder b) {
+        try {
+            Object ic = appSmallIcon(c);
+            if (ic != null) {
+                b.setSmallIcon((android.graphics.drawable.Icon) ic);
+                return;
+            }
+        } catch (Throwable t) {
+        }
+        try { b.setSmallIcon(FALLBACK_SMALL_ICON); } catch (Throwable t) {}
+    }
+
     // チャンネルは作成後に重要度/音を変更できないため、音+バイブを付けるにあたりIDを _v2 に更新する
     static final String DOWNLOAD_CHANNEL_ID = "koetomo_download_v2";
     private static int downloadNotiId = 2001;
@@ -91,8 +167,23 @@ public class KoeApiBridge {
         postSystemNotification(DOWNLOAD_CHANNEL_ID, "ダウンロード", title, text, downloadNotiId++, true, null);
     }
 
-    static final String NOTIF_CHANNEL_ID = "koetomo_notify_v1";
+    // 音が鳴らない端末があったため v2 に更新（既存チャンネルは作成後に重要度/音を変えられない）
+    static final String NOTIF_CHANNEL_ID = "koetomo_notify_v2";
     private static int notifNotiId = 3001;
+    private static boolean oldChannelsCleaned = false;
+
+    /** 音の設定を変えられない古いチャンネルを消す（設定画面に残骸を残さない） */
+    private static void cleanOldChannels(NotificationManager nm) {
+        if (oldChannelsCleaned || Build.VERSION.SDK_INT < 26) return;
+        oldChannelsCleaned = true;
+        String[] old = {"koetomo_download", "koetomo_notify_v1", "koetomo_notify"};
+        for (int i = 0; i < old.length; i++) {
+            try {
+                NotificationManager.class.getMethod("deleteNotificationChannel", String.class).invoke(nm, old[i]);
+            } catch (Exception ig) {
+            }
+        }
+    }
 
     /*
      * koetomo の通知(いいね/コメント/フォロー等)を Android の通知としても出す。
@@ -111,6 +202,119 @@ public class KoeApiBridge {
             l = l.replace('\n', ' ');
             session.dispatch("js_diag_log", new org.json.JSONArray().put(l));
         } catch (Exception ignored) {}
+    }
+
+    /** 画面の描画準備ができたことを知らせる(起動スプラッシュを消す) */
+    @JavascriptInterface
+    public void uiReady() {
+        try {
+            android.content.Context c = webView.getContext();
+            if (c instanceof MainActivity) ((MainActivity) c).hideSplash();
+        } catch (Exception ignored) {}
+    }
+
+    /** アプリの一時ファイル使用量（バイト）を返す */
+    @JavascriptInterface
+    public String appStorageInfo() {
+        try {
+            android.content.Context c = webView.getContext();
+            long cache = dirSize(c.getCacheDir()) + dirSize(c.getExternalCacheDir());
+            long files = dirSize(c.getFilesDir());
+            return new org.json.JSONObject().put("ok", true).put("cache", cache).put("files", files).toString();
+        } catch (Exception e) {
+            try { return new org.json.JSONObject().put("ok", false).toString(); } catch (Exception ig) { return "{\"ok\":false}"; }
+        }
+    }
+
+    private long dirSize(java.io.File f) {
+        try {
+            if (f == null || !f.exists()) return 0;
+            if (f.isFile()) return f.length();
+            java.io.File[] fs = f.listFiles();
+            long n = 0;
+            for (int i = 0; fs != null && i < fs.length; i++) n += dirSize(fs[i]);
+            return n;
+        } catch (Exception e) { return 0; }
+    }
+
+    /** 一時ファイル(画像など)の上限。これを超えたら古いものから捨てる。 */
+    public static final long CACHE_LIMIT_BYTES = 16L * 1024 * 1024;
+
+    /** 上限を超えていたら古い一時ファイルから削除する（キャッシュを溜め込まないための自動整理） */
+    @JavascriptInterface
+    public String trimAppCache() {
+        try {
+            long freed = trimCache(webView.getContext(), CACHE_LIMIT_BYTES);
+            return new org.json.JSONObject().put("ok", true).put("freed", freed).toString();
+        } catch (Exception e) {
+            return "{\"ok\":false}";
+        }
+    }
+
+    /** 一時ファイルの合計が limit を超えていたら、古い順に limit の半分まで削る。 */
+    public static long trimCache(android.content.Context c, long limit) {
+        try {
+            if (c == null) return 0;
+            java.io.File dir = c.getCacheDir();
+            java.util.ArrayList<java.io.File> all = new java.util.ArrayList<java.io.File>();
+            collectFiles(dir, all);
+            long total = 0;
+            for (int i = 0; i < all.size(); i++) total += all.get(i).length();
+            if (total <= limit) return 0;
+            java.util.Collections.sort(all, new java.util.Comparator<java.io.File>() {
+                public int compare(java.io.File a, java.io.File b) {
+                    long d = a.lastModified() - b.lastModified();
+                    return d < 0 ? -1 : (d > 0 ? 1 : 0);
+                }
+            });
+            long target = limit / 2, freed = 0;
+            for (int i = 0; i < all.size() && total > target; i++) {
+                java.io.File f = all.get(i);
+                long n = f.length();
+                if (f.delete()) { total -= n; freed += n; }
+            }
+            return freed;
+        } catch (Exception e) { return 0; }
+    }
+
+    private static void collectFiles(java.io.File f, java.util.ArrayList<java.io.File> out) {
+        try {
+            if (f == null || !f.exists()) return;
+            if (f.isFile()) { out.add(f); return; }
+            java.io.File[] fs = f.listFiles();
+            for (int i = 0; fs != null && i < fs.length; i++) collectFiles(fs[i], out);
+        } catch (Exception e) {}
+    }
+
+    /** WebView と一時ファイルのキャッシュを削除する（ログイン状態や設定は消さない） */
+    @JavascriptInterface
+    public String clearAppCache() {
+        try {
+            final android.content.Context c = webView.getContext();
+            webView.post(new Runnable() {
+                public void run() {
+                    try { webView.clearCache(true); } catch (Exception e) {}
+                }
+            });
+            long before = dirSize(c.getCacheDir());
+            deleteDir(c.getCacheDir(), false);
+            deleteDir(c.getExternalCacheDir(), false);
+            long after = dirSize(c.getCacheDir());
+            return new org.json.JSONObject().put("ok", true).put("freed", Math.max(0, before - after)).toString();
+        } catch (Exception e) {
+            try { return new org.json.JSONObject().put("ok", false).toString(); } catch (Exception ig) { return "{\"ok\":false}"; }
+        }
+    }
+
+    private void deleteDir(java.io.File f, boolean self) {
+        try {
+            if (f == null || !f.exists()) return;
+            if (f.isDirectory()) {
+                java.io.File[] fs = f.listFiles();
+                for (int i = 0; fs != null && i < fs.length; i++) deleteDir(fs[i], true);
+            }
+            if (self) f.delete();
+        } catch (Exception e) {}
     }
 
     @JavascriptInterface
@@ -175,6 +379,7 @@ public class KoeApiBridge {
             if (notificationManager == null) {
                 return;
             }
+            cleanOldChannels(notificationManager);
             if (Build.VERSION.SDK_INT >= 26) {
                 // チャンネル作成に失敗するとAndroidが通知を黙って捨てるため、
                 // 装飾(音/バイブ)付きで失敗しても必ず素のチャンネルは作る。
@@ -239,7 +444,20 @@ public class KoeApiBridge {
             if (builder == null) {
                 builder = new Notification.Builder(context);
             }
-            builder.setContentTitle(title).setContentText(text).setSmallIcon(17301558).setAutoCancel(true).setContentIntent(activity);
+            builder.setContentTitle(title).setContentText(text).setAutoCancel(true).setContentIntent(activity);
+            applySmallIcon(context, builder);
+            try {
+                android.graphics.Bitmap logo = appLogoBitmap(context);
+                if (logo != null) builder.setLargeIcon(logo);
+            } catch (Throwable ig) {
+            }
+            // 長い本文が「…」で切れないように展開表示にする
+            try {
+                if (text != null && text.length() > 34) {
+                    builder.setStyle(new Notification.BigTextStyle().bigText(text));
+                }
+            } catch (Throwable ig) {
+            }
             // API26未満はチャンネルが無いので、通知自体に音とバイブを設定する
             if (Build.VERSION.SDK_INT < 26) {
                 try {
@@ -701,6 +919,130 @@ public class KoeApiBridge {
         }
     }
 
+    /* ===== 保存先フォルダ =====
+     * app … Download/KoeTomo の下に Audio / Images を作って自動で振り分ける(おすすめ)
+     * std … 画像は Pictures/KoeTomo、音声は Music/KoeTomo(ギャラリー・音楽アプリに出る)
+     * dl  … ダウンロードフォルダの直下(他のアプリと同じ場所)
+     * Android は MediaStore の都合で「最上位に KoeTomo」は作れないため、
+     * 専用フォルダは Download の下に作る。 */
+    static final String SAVE_PREF = "koe_save";
+    // MediaStore.Downloads.EXTERNAL_CONTENT_URI(API29+)。ビルド用 android.jar が API23 のため定数で持つ。
+    private static final String DOWNLOADS_URI = "content://media/external/downloads";
+
+    static String saveFolderMode(Context c) {
+        try {
+            String m = c.getSharedPreferences(SAVE_PREF, 0).getString("folder", "std");
+            if ("app".equals(m) || "dl".equals(m)) return m;
+            return "std"; // 既定は従来どおり Pictures/KoeTomo・Music/KoeTomo
+        } catch (Exception e) {
+            return "std";
+        }
+    }
+
+    @JavascriptInterface
+    public void setSaveFolder(String mode) {
+        try {
+            String m = ("app".equals(mode) || "dl".equals(mode)) ? mode : "std";
+            this.webView.getContext().getSharedPreferences(SAVE_PREF, 0).edit().putString("folder", m).apply();
+        } catch (Exception e) {
+        }
+    }
+
+    @JavascriptInterface
+    public String getSaveFolder() {
+        try {
+            return saveFolderMode(this.webView.getContext());
+        } catch (Exception e) {
+            return "std";
+        }
+    }
+
+    /** 保存先の決定結果。collection は API29+ の MediaStore 用、dir は API28以下のファイル用。 */
+    static final class SaveTarget {
+        Uri collection;
+        String relativePath; // 例 "Download/KoeTomo/Audio"
+        File dir;            // API28以下のときの実フォルダ
+        String label;        // 画面に出す説明
+    }
+
+    static SaveTarget saveTargetFor(Context c, boolean isImage) {
+        String mode = saveFolderMode(c);
+        SaveTarget t = new SaveTarget();
+        if ("std".equals(mode)) {
+            if (isImage) {
+                t.collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+                t.relativePath = "Pictures/KoeTomo";
+                t.dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "KoeTomo");
+            } else {
+                t.collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
+                t.relativePath = "Music/KoeTomo";
+                t.dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "KoeTomo");
+            }
+        } else if ("dl".equals(mode)) {
+            t.collection = Uri.parse(DOWNLOADS_URI);
+            t.relativePath = "Download";
+            t.dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+        } else { // app: ダウンロード内の専用フォルダ
+            String sub = isImage ? "Images" : "Audio";
+            t.collection = Uri.parse(DOWNLOADS_URI);
+            t.relativePath = "Download/KoeTomo/" + sub;
+            t.dir = new File(new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "KoeTomo"), sub);
+        }
+        t.label = t.relativePath;
+        return t;
+    }
+
+    /**
+     * 実際にファイルを書き出す。API29+ は MediaStore、それ未満は直接ファイル。
+     * 保存できたら画面に出す保存先(例 "Download/KoeTomo/Audio")を返し、失敗したら null。
+     */
+    static String writeToTarget(Context c, boolean isImage, String name, String mime, byte[] data) {
+        try {
+            SaveTarget t = saveTargetFor(c, isImage);
+            if (Build.VERSION.SDK_INT >= 29) {
+                ContentValues v = new ContentValues();
+                v.put("_display_name", name);
+                v.put("mime_type", mime);
+                v.put("relative_path", t.relativePath);
+                Uri uri = null;
+                try {
+                    uri = c.getContentResolver().insert(t.collection, v);
+                } catch (Exception e) {
+                    uri = null;
+                }
+                if (uri == null && !"std".equals(saveFolderMode(c))) {
+                    // Downloads コレクションが使えない端末向けに、標準フォルダへ退避する
+                    ContentValues v2 = new ContentValues();
+                    v2.put("_display_name", name);
+                    v2.put("mime_type", mime);
+                    v2.put("relative_path", isImage ? "Pictures/KoeTomo" : "Music/KoeTomo");
+                    uri = c.getContentResolver().insert(
+                            isImage ? MediaStore.Images.Media.EXTERNAL_CONTENT_URI : MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, v2);
+                    if (uri != null) t.label = isImage ? "Pictures/KoeTomo" : "Music/KoeTomo";
+                }
+                if (uri == null) return null;
+                OutputStream os = c.getContentResolver().openOutputStream(uri);
+                os.write(data);
+                os.flush();
+                os.close();
+                return t.label;
+            }
+            t.dir.mkdirs();
+            File f = new File(t.dir, name);
+            FileOutputStream fo = new FileOutputStream(f);
+            fo.write(data);
+            fo.flush();
+            fo.close();
+            try {
+                c.sendBroadcast(new Intent("android.intent.action.MEDIA_SCANNER_SCAN_FILE", Uri.fromFile(f)));
+            } catch (Exception ig) {
+            }
+            return t.label;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     @JavascriptInterface
     public void saveAudio(final String str) {
         if (str == null || !str.toLowerCase().startsWith("https://")) { toastOnJs("保存元URLが不正です"); return; }
@@ -741,32 +1083,13 @@ public class KoeApiBridge {
                     }
                     String str3 = str2.equals("webm") ? "audio/webm" : str2.equals("mp3") ? "audio/mpeg" : str2.equals("ogg") ? "audio/ogg" : str2.equals("wav") ? "audio/wav" : "audio/mp4";
                     String str4 = "KoeTomo_" + System.currentTimeMillis() + "." + str2;
-                    if (Build.VERSION.SDK_INT >= 29) {
-                        ContentValues contentValues = new ContentValues();
-                        contentValues.put("_display_name", str4);
-                        contentValues.put("mime_type", str3);
-                        contentValues.put("relative_path", "Music/KoeTomo");
-                        Uri insert = context.getContentResolver().insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, contentValues);
-                        if (insert == null) {
-                            KoeApiBridge.this.toastOnJs("保存に失敗しました");
-                            return;
-                        }
-                        OutputStream openOutputStream = context.getContentResolver().openOutputStream(insert);
-                        openOutputStream.write(byteArray);
-                        openOutputStream.flush();
-                        openOutputStream.close();
-                    } else {
-                        File file = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "KoeTomo");
-                        file.mkdirs();
-                        File file2 = new File(file, str4);
-                        FileOutputStream fileOutputStream = new FileOutputStream(file2);
-                        fileOutputStream.write(byteArray);
-                        fileOutputStream.flush();
-                        fileOutputStream.close();
-                        context.sendBroadcast(new Intent("android.intent.action.MEDIA_SCANNER_SCAN_FILE", Uri.fromFile(file2)));
+                    String where = KoeApiBridge.writeToTarget(context, false, str4, str3, byteArray);
+                    if (where == null) {
+                        KoeApiBridge.this.toastOnJs("保存に失敗しました");
+                        return;
                     }
-                    KoeApiBridge.this.toastOnJs("音声を保存しました");
-                    KoeApiBridge.this.showDownloadNotification("ダウンロード完了", "音声を保存しました");
+                    KoeApiBridge.this.toastOnJs("音声を保存しました → " + where);
+                    KoeApiBridge.this.showDownloadNotification("音声を保存しました", str4 + "\n保存先: 内部ストレージ/" + where);
                 } catch (Exception e) {
                     KoeApiBridge.this.toastOnJs("保存に失敗しました");
                 }
@@ -787,34 +1110,16 @@ public class KoeApiBridge {
                     byte[] decode = Base64.decode(raw, 0);
                     Context context = KoeApiBridge.this.webView.getContext();
                     String lowerCase = (str2 == null || str2.length() == 0) ? "mp3" : str2.toLowerCase();
+                    if (!lowerCase.matches("[a-z0-9]{1,5}")) lowerCase = "mp3"; // ファイル名に .. や / を混ぜられないように
                     String mime = lowerCase.equals("wav") ? "audio/wav" : lowerCase.equals("m4a") ? "audio/mp4" : lowerCase.equals("ogg") ? "audio/ogg" : "audio/mpeg";
                     String str3 = "KoeTomo_" + System.currentTimeMillis() + "." + lowerCase;
-                    if (Build.VERSION.SDK_INT >= 29) {
-                        ContentValues contentValues = new ContentValues();
-                        contentValues.put("_display_name", str3);
-                        contentValues.put("mime_type", mime);
-                        contentValues.put("relative_path", "Music/KoeTomo");
-                        Uri insert = context.getContentResolver().insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, contentValues);
-                        if (insert == null) {
-                            KoeApiBridge.this.toastOnJs("保存に失敗しました");
-                            return;
-                        }
-                        OutputStream openOutputStream = context.getContentResolver().openOutputStream(insert);
-                        openOutputStream.write(decode);
-                        openOutputStream.flush();
-                        openOutputStream.close();
-                    } else {
-                        File file = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "KoeTomo");
-                        file.mkdirs();
-                        File file2 = new File(file, str3);
-                        FileOutputStream fileOutputStream = new FileOutputStream(file2);
-                        fileOutputStream.write(decode);
-                        fileOutputStream.flush();
-                        fileOutputStream.close();
-                        context.sendBroadcast(new Intent("android.intent.action.MEDIA_SCANNER_SCAN_FILE", Uri.fromFile(file2)));
+                    String where = KoeApiBridge.writeToTarget(context, false, str3, mime, decode);
+                    if (where == null) {
+                        KoeApiBridge.this.toastOnJs("保存に失敗しました");
+                        return;
                     }
-                    KoeApiBridge.this.toastOnJs("音声を保存しました");
-                    KoeApiBridge.this.showDownloadNotification("ダウンロード完了", "音声を保存しました");
+                    KoeApiBridge.this.toastOnJs("音声を保存しました → " + where);
+                    KoeApiBridge.this.showDownloadNotification("音声を保存しました", str3 + "\n保存先: 内部ストレージ/" + where);
                 } catch (Exception e) {
                     KoeApiBridge.this.toastOnJs("保存に失敗しました");
                 }
@@ -822,8 +1127,46 @@ public class KoeApiBridge {
         }).start();
     }
 
+    /** 先頭バイト(マジックナンバー)から画像形式を判定する。判定できないときは jpg。 */
+    private static String sniffImageExt(byte[] b) {
+        if (b == null || b.length < 12) return "jpg";
+        int b0 = b[0] & 255, b1 = b[1] & 255, b2 = b[2] & 255, b3 = b[3] & 255;
+        if (b0 == 0x89 && b1 == 0x50 && b2 == 0x4E && b3 == 0x47) return "png";
+        if (b0 == 0xFF && b1 == 0xD8 && b2 == 0xFF) return "jpg";
+        if (b0 == 0x47 && b1 == 0x49 && b2 == 0x46) return "gif";
+        if (b0 == 0x42 && b1 == 0x4D) return "bmp";
+        if (b0 == 0x52 && b1 == 0x49 && b2 == 0x46 && b3 == 0x46
+                && (b[8] & 255) == 0x57 && (b[9] & 255) == 0x45 && (b[10] & 255) == 0x42 && (b[11] & 255) == 0x50) return "webp";
+        if ((b[4] & 255) == 0x66 && (b[5] & 255) == 0x74 && (b[6] & 255) == 0x79 && (b[7] & 255) == 0x70) {
+            int b8 = b[8] & 255, b9 = b[9] & 255, b10 = b[10] & 255;
+            if (b8 == 0x68 && b9 == 0x65 && b10 == 0x69) return "heic"; // heic/heif
+            if (b8 == 0x6D && b9 == 0x69 && b10 == 0x66) return "heic";
+            if (b8 == 0x61 && b9 == 0x76 && b10 == 0x69) return "avif";
+        }
+        return "jpg";
+    }
+
+    private static String imageMimeOf(String ext) {
+        if ("png".equals(ext)) return "image/png";
+        if ("gif".equals(ext)) return "image/gif";
+        if ("webp".equals(ext)) return "image/webp";
+        if ("bmp".equals(ext)) return "image/bmp";
+        if ("heic".equals(ext)) return "image/heic";
+        if ("avif".equals(ext)) return "image/avif";
+        return "image/jpeg";
+    }
+
     @JavascriptInterface
     public void saveImage(final String str) {
+        saveImage(str, "original");
+    }
+
+    /**
+     * 画像を保存する。fmt が "original" のときは取得したデータをそのまま(正しい拡張子で)保存し、
+     * "jpg" / "png" / "webp" のときは端末上で変換してから保存する。
+     */
+    @JavascriptInterface
+    public void saveImage(final String str, final String fmt) {
         if (str == null || !str.toLowerCase().startsWith("https://")) { toastOnJs("保存元URLが不正です"); return; }
         if (!isHttpUrl(str)) { return; }
         new Thread(new Runnable() {
@@ -847,38 +1190,66 @@ public class KoeApiBridge {
                     httpURLConnection.disconnect();
                     byte[] byteArray = byteArrayOutputStream.toByteArray();
                     Context context = KoeApiBridge.this.webView.getContext();
-                    String str = "KoeTomo_" + System.currentTimeMillis() + ".jpg";
-                    if (Build.VERSION.SDK_INT >= 29) {
-                        ContentValues contentValues = new ContentValues();
-                        contentValues.put("_display_name", str);
-                        contentValues.put("mime_type", "image/jpeg");
-                        contentValues.put("relative_path", "Pictures/KoeTomo");
-                        Uri insert = context.getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues);
-                        if (insert == null) {
-                            KoeApiBridge.this.toastOnJs("保存に失敗しました");
-                            return;
+                    String ext = sniffImageExt(byteArray);
+                    String want = (fmt == null || fmt.length() == 0) ? "original" : fmt.toLowerCase();
+                    if ("jpeg".equals(want)) want = "jpg";
+                    if (!"original".equals(want) && !want.equals(ext)) {
+                        byte[] converted = KoeApiBridge.convertImage(byteArray, want);
+                        if (converted != null) {
+                            byteArray = converted;
+                            ext = want;
+                        } else {
+                            KoeApiBridge.this.toastOnJs("変換できないため元の形式で保存します");
                         }
-                        OutputStream openOutputStream = context.getContentResolver().openOutputStream(insert);
-                        openOutputStream.write(byteArray);
-                        openOutputStream.flush();
-                        openOutputStream.close();
-                    } else {
-                        File file = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "KoeTomo");
-                        file.mkdirs();
-                        File file2 = new File(file, str);
-                        FileOutputStream fileOutputStream = new FileOutputStream(file2);
-                        fileOutputStream.write(byteArray);
-                        fileOutputStream.flush();
-                        fileOutputStream.close();
-                        context.sendBroadcast(new Intent("android.intent.action.MEDIA_SCANNER_SCAN_FILE", Uri.fromFile(file2)));
                     }
-                    KoeApiBridge.this.toastOnJs("画像を保存しました");
-                    KoeApiBridge.this.showDownloadNotification("ダウンロード完了", "画像を保存しました");
+                    String mime = imageMimeOf(ext);
+                    String name = "KoeTomo_" + System.currentTimeMillis() + "." + ext;
+                    String where = KoeApiBridge.writeToTarget(context, true, name, mime, byteArray);
+                    if (where == null) {
+                        KoeApiBridge.this.toastOnJs("保存に失敗しました");
+                        return;
+                    }
+                    KoeApiBridge.this.toastOnJs("画像を保存しました (" + ext.toUpperCase() + ") → " + where);
+                    KoeApiBridge.this.showDownloadNotification("画像を保存しました", name + "\n保存先: 内部ストレージ/" + where);
                 } catch (Exception e) {
                     KoeApiBridge.this.toastOnJs("保存に失敗しました");
                 }
             }
         }).start();
+    }
+
+    /** 端末上で画像形式を変換する。失敗したら null を返して呼び出し側で元の形式にフォールバックする。 */
+    private static byte[] convertImage(byte[] src, String want) {
+        try {
+            Bitmap bm = BitmapFactory.decodeByteArray(src, 0, src.length);
+            if (bm == null) return null;
+            Bitmap.CompressFormat cf;
+            int quality = 92;
+            if ("png".equals(want)) {
+                cf = Bitmap.CompressFormat.PNG;
+                quality = 100;
+            } else if ("webp".equals(want)) {
+                cf = Bitmap.CompressFormat.WEBP;
+            } else {
+                cf = Bitmap.CompressFormat.JPEG;
+            }
+            if (cf == Bitmap.CompressFormat.JPEG && bm.hasAlpha()) {
+                // JPEG は透過を持てないので白背景に合成してから変換する
+                Bitmap flat = Bitmap.createBitmap(bm.getWidth(), bm.getHeight(), Bitmap.Config.ARGB_8888);
+                android.graphics.Canvas cv = new android.graphics.Canvas(flat);
+                cv.drawColor(-1);
+                cv.drawBitmap(bm, 0.0f, 0.0f, null);
+                bm.recycle();
+                bm = flat;
+            }
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            boolean ok = bm.compress(cf, quality, out);
+            bm.recycle();
+            if (!ok) return null;
+            return out.toByteArray();
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     @JavascriptInterface
@@ -1103,6 +1474,9 @@ public class KoeApiBridge {
                             JSONObject a = assets.optJSONObject(i);
                             if (a != null && a.optString("name", "").toLowerCase().endsWith(".apk")) {
                                 apk = a.optString("browser_download_url", "");
+                                // downloadUpdate はこの URL と完全一致したものだけを受け付ける
+                                // (githubusercontent は誰でもアセットを置けるため、ホスト一致だけでは足りない)
+                                if (isTrustedUpdateUrl(apk)) KoeApiBridge.lastUpdateApkUrl = apk;
                                 break;
                             }
                         }
@@ -1187,10 +1561,38 @@ public class KoeApiBridge {
         }
     }
 
+    /** checkUpdate が実際に取得した更新APKのURL。これ以外はダウンロードしない。 */
+    private static volatile String lastUpdateApkUrl = null;
+
+    /**
+     * 端末に落ちてきたAPKが、このアプリと同じ署名鍵で署名されているかを確認する。
+     * 共有ストレージ上のファイルは他アプリに差し替えられうるため、
+     * インストール画面を出す前に必ずここを通す。
+     */
+    private static boolean apkSignatureOk(Context c, String path) {
+        try {
+            if (path == null || path.length() == 0) return false;
+            android.content.pm.PackageInfo pi = c.getPackageManager()
+                    .getPackageArchiveInfo(path, android.content.pm.PackageManager.GET_SIGNATURES);
+            if (pi == null || pi.signatures == null || pi.signatures.length != 1) return false;
+            byte[] dg = java.security.MessageDigest.getInstance("SHA-256").digest(pi.signatures[0].toByteArray());
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < dg.length; i++) sb.append(String.format("%02x", dg[i] & 0xff));
+            return MainActivity.RELEASE_CERT_SHA256.equalsIgnoreCase(sb.toString());
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     @JavascriptInterface
     public void downloadUpdate(final String url) {
         if (!isHttpUrl(url) || !isTrustedUpdateUrl(url)) {
             toastOnJs("更新URLが不正です");
+            return;
+        }
+        String pinned = lastUpdateApkUrl;
+        if (pinned == null || !pinned.equals(url)) {
+            toastOnJs("更新URLが確認できません。もう一度「更新を確認」を押してください");
             return;
         }
         try {
@@ -1205,7 +1607,9 @@ public class KoeApiBridge {
             req.setDescription("新しいバージョンをダウンロードしています");
             req.setMimeType("application/vnd.android.package-archive");
             req.setNotificationVisibility(1);
-            req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "KoeTomoPlus-update-" + System.currentTimeMillis() + ".apk");
+            // 共有ダウンロードフォルダに置くと、インストール確認までの間に他アプリが差し替えられる。
+            // アプリ専用の外部領域に落とす。
+            req.setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, "KoeTomoPlus-update.apk");
             final long id = dm.enqueue(req);
             toastOnJs("更新をダウンロードしています…");
             final android.content.BroadcastReceiver[] holder = new android.content.BroadcastReceiver[1];
@@ -1224,6 +1628,18 @@ public class KoeApiBridge {
                             KoeApiBridge.this.toastOnJs("更新ファイルを取得できませんでした");
                             return;
                         }
+                        // 署名がこのアプリと同じでなければインストール画面を出さない
+                        String local = null;
+                        try {
+                            java.io.File d = ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+                            if (d != null) local = new java.io.File(d, "KoeTomoPlus-update.apk").getAbsolutePath();
+                        } catch (Exception ig) {
+                        }
+                        if (local == null || !apkSignatureOk(ctx, local)) {
+                            try { if (local != null) new java.io.File(local).delete(); } catch (Exception ig) {}
+                            KoeApiBridge.this.toastOnJs("更新ファイルの署名を確認できませんでした。インストールを中止しました");
+                            return;
+                        }
                         Intent inst = new Intent("android.intent.action.VIEW");
                         inst.setDataAndType(fileUri, "application/vnd.android.package-archive");
                         inst.addFlags(268435457);
@@ -1233,7 +1649,17 @@ public class KoeApiBridge {
                     }
                 }
             };
-            context.registerReceiver(holder[0], new android.content.IntentFilter("android.intent.action.DOWNLOAD_COMPLETE"));
+            android.content.IntentFilter dlFilter = new android.content.IntentFilter("android.intent.action.DOWNLOAD_COMPLETE");
+            if (Build.VERSION.SDK_INT >= 33) {
+                try {
+                    Context.class.getMethod("registerReceiver", android.content.BroadcastReceiver.class, android.content.IntentFilter.class, int.class)
+                            .invoke(context, holder[0], dlFilter, Integer.valueOf(4)); // RECEIVER_NOT_EXPORTED
+                } catch (Exception e) {
+                    context.registerReceiver(holder[0], dlFilter);
+                }
+            } else {
+                context.registerReceiver(holder[0], dlFilter);
+            }
         } catch (Exception e) {
             toastOnJs("更新のダウンロードに失敗しました: " + e);
         }

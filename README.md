@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.01-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-1.02-blue">
   <img alt="platform" src="https://img.shields.io/badge/platform-Android%206.0%2B-green">
   <img alt="license" src="https://img.shields.io/badge/license-source--available-lightgrey">
   <img alt="status" src="https://img.shields.io/badge/status-unofficial-orange">

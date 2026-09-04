@@ -52,8 +52,22 @@ public class CallForegroundService extends Service {
         if (builder == null) {
             builder = new Notification.Builder(this);
         }
-        builder.setContentTitle("KoeTomo 通話中").setContentText("タップで通話に戻る").setSmallIcon(17301558).setOngoing(true).setContentIntent(activity);
+        builder.setContentTitle("KoeTomo 通話中").setContentText("タップで通話に戻る").setOngoing(true).setContentIntent(activity);
+        // 受話器アイコンをやめてアプリ自身のロゴにする（通知が全部同じ📞に見えていたため）
+        KoeApiBridge.applySmallIcon(this, builder);
         startForeground(NOTI_ID, builder.build());
         return 2; // START_NOT_STICKY: プロセス再起動時に通話なしの「通話中」通知が残らないようにする
+    }
+
+    // 履歴からスワイプでアプリを終了した場合、Activity の onDestroy が来ないことがある。
+    // 自分が開いている枠を閉じてからサービスを止める(枠が残ると次回作成が拒否される)。
+    public void onTaskRemoved(Intent rootIntent) {
+        try {
+            new KoeSession(getApplicationContext()).closeMyRoomOnExit();
+        } catch (Exception e) {
+        }
+        try { stopForeground(true); } catch (Exception e) {}
+        stopSelf();
+        super.onTaskRemoved(rootIntent);
     }
 }
