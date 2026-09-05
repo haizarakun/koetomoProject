@@ -79,3 +79,143 @@
 .koe-mg-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
 .koe-mg-c{aspect-ratio:1/1;border-radius:10px;background:rgba(127,127,127,.13);transition:background .08s}
 .koe-mg-c.on{background:var(--accent,#2AC1C7)}
+
+/* ===== フォロワー / フォロー中 の一覧 ===== */
+#followListBody{padding:0!important}
+.fl-search{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;
+  padding:10px 12px;background:var(--bg-secondary,#1e1f22)}
+.fl-search .ico{width:18px;height:18px;opacity:.55;flex:0 0 auto}
+.fl-search input{flex:1;min-width:0;border:0;border-radius:999px;padding:10px 14px;
+  background:var(--bg-input,#2b2d31);color:var(--text-normal,#dbdee1);font-size:15px;font-family:inherit}
+.fl-search input:focus{outline:none;box-shadow:0 0 0 2px var(--accent,#33b7cf) inset}
+.fl-row{display:flex;align-items:center;gap:12px;padding:12px 14px;
+  border-bottom:1px solid var(--border,rgba(255,255,255,.07))}
+.fl-tap{flex:0 0 auto;cursor:pointer}
+.fl-row .avatar,.fl-row img.avatar{width:52px;height:52px;border-radius:50%;font-size:20px}
+.fl-body{flex:1;min-width:0;cursor:pointer}
+.fl-name{font-weight:700;font-size:16px;color:var(--text-bright,#f2f3f5);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fl-sub{margin-top:2px;font-size:13px;opacity:.55;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fl-pill{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  min-width:124px;padding:11px 18px;border-radius:999px;font-size:15px;font-weight:700;
+  font-family:inherit;cursor:pointer;border:1.5px solid transparent;transition:opacity .12s}
+.fl-pill .ico{width:16px;height:16px}
+.fl-pill:active{opacity:.6}
+.fl-pill[disabled]{opacity:.5}
+.fl-pill.is-on{background:var(--accent,#1d9bf0);color:#fff}
+.fl-pill.is-off{background:transparent;color:var(--accent,#1d9bf0);border-color:var(--accent,#1d9bf0)}
+.fl-pill.is-wait{background:var(--bg-input,#3a3d43);color:var(--text-normal,#dbdee1)}
+
+/* ===== プロフィール編集の保存前プレビュー ===== */
+.qe-preview{margin:0 0 14px;padding:10px 12px;border-radius:12px;
+  background:var(--bg-input,#1c1c1c);border:1px solid var(--border,rgba(255,255,255,.08))}
+.qe-preview-label{font-size:12px;opacity:.55;margin-bottom:8px}
+.qe-preview-card{display:flex;align-items:flex-start;gap:10px}
+.qe-preview-card .avatar,.qe-preview-card img.avatar{width:44px;height:44px;border-radius:50%;flex:0 0 auto}
+.qe-preview-body{flex:1;min-width:0}
+.qe-preview-name{font-weight:700;font-size:15px;color:var(--text-bright,#f2f3f5);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qe-preview-comment{margin-top:3px;font-size:13px;opacity:.75;white-space:pre-wrap;word-break:break-word}
+/* 一覧は端末の高さいっぱいまで使う(数人しか見えないと探せない) */
+#followListModal .modal-content{width:100%;max-width:560px;height:88vh;max-height:88vh;display:flex;flex-direction:column}
+#followListModal .modal-header{flex:0 0 auto}
+#followListBody{flex:1;min-height:0;overflow-y:auto}
+
+/* 一覧: 関係を必ず文字で出す + ボタンは控えめな大きさに */
+.fl-rel{color:var(--accent,#33b7cf);font-weight:600}
+.fl-dot{opacity:.4;margin:0 2px}
+.fl-row{padding:10px 12px;gap:10px}
+.fl-row .avatar,.fl-row img.avatar{width:46px;height:46px;font-size:18px}
+.fl-name{font-size:15px}
+.fl-sub{font-size:12px}
+.fl-pill{min-width:96px;padding:7px 12px;font-size:13px;border-width:1.5px}
+.fl-pill .ico{width:13px;height:13px}
+#followListModal .modal-content{height:88vh!important;min-height:88vh!important}
+
+/* ===== 通話パネル: チャットとログのタブ ===== */
+.callv2-tabs{display:flex;gap:6px;padding:6px 8px 8px;border-bottom:1px solid var(--border,rgba(255,255,255,.08))}
+.callv2-tab{flex:1;padding:7px 10px;border:0;border-radius:999px;font-family:inherit;font-size:13px;font-weight:700;
+  background:var(--bg-input,#2b2d31);color:var(--text-normal,#dbdee1);cursor:pointer}
+.callv2-tab.active{background:var(--accent,#33b7cf);color:#fff}
+.callv2-tabcount{display:none;margin-left:6px;padding:1px 6px;border-radius:999px;
+  background:var(--danger,#f23f43);color:#fff;font-size:11px}
+.koe-chat-sys-dim{opacity:.55;font-size:11px}
+#callSysLog{padding:6px 8px}
+
+/* ===== 一覧: もう少し小さく・オンライン表示を切らない ===== */
+.fl-row{padding:8px 12px;gap:9px}
+.fl-row .avatar,.fl-row img.avatar{width:40px;height:40px;font-size:16px}
+.fl-name{font-size:14px}
+.fl-sub{font-size:11px;opacity:.6}
+.fl-pill{min-width:84px;padding:6px 10px;font-size:12px}
+.fl-pill .ico{width:12px;height:12px}
+.fl-search{padding:8px 12px}
+.fl-search input{padding:8px 12px;font-size:14px}
+
+/* ===== 一覧の絞り込み(すべて/相互/片思い) ===== */
+.fl-filters{display:flex;gap:6px;padding:0 12px 8px;border-bottom:1px solid var(--border,rgba(255,255,255,.07))}
+.fl-filter{flex:1;padding:6px 8px;border:0;border-radius:999px;font-family:inherit;font-size:12px;font-weight:700;
+  background:var(--bg-input,#2b2d31);color:var(--text-normal,#dbdee1);cursor:pointer;white-space:nowrap}
+.fl-filter.active{background:var(--accent,#33b7cf);color:#fff}
+
+/* ===== 非公開の一覧には鍵 ===== */
+.pv-stat-locked{opacity:.6;cursor:default;display:inline-flex;align-items:center;gap:4px}
+.pv-stat-locked .koe-lock{width:13px;height:13px}
+
+/* ===== Chat: 自分のメッセージの削除 ===== */
+.msg-del{border:0;background:transparent;color:var(--danger,#f23f43);font-family:inherit;font-size:11px;
+  padding:0 6px 0 0;cursor:pointer;opacity:.75}
+.msg-del:active{opacity:.4}
+.msg-del[disabled]{opacity:.3}
+
+/* 絞り込みチップは廃止(友達ボタンに置き換え) */
+.fl-filters{display:none!important}
+/* 非公開でもタップは通す。鍵マークだけ添える */
+.pv-stat-lock{opacity:.8}
+.pv-stat-lock .koe-lock{width:12px;height:12px;margin-right:3px;vertical-align:-1px;opacity:.75}
+
+/* 届いている友達申請 */
+.fl-reqbox{border:1px solid var(--line,#2a2a33);border-radius:12px;margin:16px 0 8px;overflow:hidden;background:rgba(255,255,255,.03)}
+.fl-reqhead{padding:8px 12px;font-size:12px;font-weight:700;opacity:.85;border-bottom:1px solid var(--line,#2a2a33)}
+.fl-reqbox .fl-row{padding:8px 10px}
+.fl-reqbox .fl-pill{margin-left:6px}
+#profileViewFriendBtn{width:100%}
+
+/* 友達画面の切り替えタブ */
+.fl-tabs{display:flex;gap:8px;margin:0 0 10px}
+.fl-tab{flex:1;padding:10px 8px;border-radius:10px;border:1px solid var(--line,#2a2a33);
+  background:transparent;color:var(--fg,#e8e8ee);font-size:13px;font-weight:700;line-height:1.2}
+.fl-tab.active{background:var(--accent,#3ad0c8);color:#08222a;border-color:transparent}
+.fl-tabn{opacity:.75;font-weight:700;margin-left:2px}
+.fl-tab.active .fl-tabn{opacity:.85}
+
+/* フォロワーから外す */
+.fl-x{width:30px;height:30px;flex:0 0 auto;margin-right:6px;border-radius:50%;
+  border:1px solid var(--line,#2a2a33);background:transparent;color:var(--fg,#e8e8ee);
+  font-size:16px;line-height:1;opacity:.55}
+.fl-x:active{opacity:1}
+
+/* #2 通知の上のボタン(タブ)を見やすく */
+.notif-page-header{gap:8px;align-items:center}
+#notifKindChips{display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;flex:1;padding:2px 0}
+#notifKindChips::-webkit-scrollbar{display:none}
+.notif-kind-chip{flex:0 0 auto;padding:7px 14px;border-radius:999px;border:1px solid var(--line,#2a2a33);
+  background:transparent;color:var(--fg,#e8e8ee);font-size:13px;font-weight:700;line-height:1;white-space:nowrap;transition:background .15s,color .15s}
+.notif-kind-chip.active{background:var(--accent,#3ad0c8);color:#08222a;border-color:transparent}
+#notifSettingsGearBtn{flex:0 0 auto}
+
+/* #1 お知らせ詳細モーダル */
+.info-modal{max-width:520px;width:92%;max-height:80vh;display:flex;flex-direction:column}
+.info-modal .modal-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.info-modal .modal-x{background:transparent;border:none;color:var(--fg,#e8e8ee);font-size:22px;line-height:1;opacity:.6;width:32px;height:32px}
+.info-when{font-size:12px;opacity:.6;margin-bottom:10px}
+.info-body{font-size:14px;line-height:1.7;overflow-y:auto;white-space:normal;word-break:break-word}
+.info-actions{margin-top:14px}
+.info-link{display:inline-block;padding:9px 16px;border-radius:10px;background:var(--accent,#3ad0c8);color:#08222a;font-weight:700;text-decoration:none}
+
+/* #6 通話のチャット+ログを1つにまとめた見た目 */
+#callSysLog{border-top:1px dashed var(--line,#2a2a33);margin-top:4px;padding-top:4px}
+
+/* 本文が無い投稿のプレースホルダ */
+.tl-text.tl-empty{opacity:.55;font-size:13px;font-style:normal}

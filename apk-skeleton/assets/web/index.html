@@ -337,8 +337,8 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <div class="timeline-feed-toggle" id="notifKindChips">
 <button class="timeline-feed-chip notif-kind-chip active" data-kind="normal">通常</button>
 <button class="timeline-feed-chip notif-kind-chip" data-kind="important">重要</button>
-<button class="timeline-feed-chip notif-kind-chip" data-kind="follow">フォロー</button>
 <button class="timeline-feed-chip notif-kind-chip" data-kind="calls">着信</button>
+<button class="timeline-feed-chip notif-kind-chip" data-kind="info">お知らせ</button>
 </div>
 <button id="notifSettingsGearBtn" class="tl-topbar-icon" title="通知の設定"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg></button>
 </div>
@@ -366,7 +366,7 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <p id="profileCommentDisplay" class="profile-view-comment"></p>
 <div class="profile-follow-stats" style="display:flex;gap:18px;margin-top:6px;justify-content:center;">
 <span id="profileFolloweeStat" class="pv-stat-click" style="cursor:pointer;text-align:center;"><b id="profileFolloweeCount" style="display:block;font-size:16px;">0</b><span style="font-size:12px;opacity:.75;">フォロー中</span></span>
-<span id="profileFollowerStat" class="pv-stat-click" style="cursor:pointer;text-align:center;"><b id="profileFollowerCount" style="display:block;font-size:16px;">0</b><span style="font-size:12px;opacity:.75;">フォロワー</span></span>
+<span id="profileFollowerStat" class="pv-stat-click" style="cursor:pointer;text-align:center;"><b id="profileFollowerCount" style="display:block;font-size:16px;">0</b><span style="font-size:12px;opacity:.75;">フォロワー</span></span><span id="profileFriendStat" class="pv-stat-click" style="cursor:pointer;text-align:center;"><b id="profileFriendCount" style="display:block;font-size:16px;">0</b><span style="font-size:12px;opacity:.75;">友達</span></span>
 </div>
 <div id="profileBalance" class="card-sub" style="display:none;margin-top:3px;font-weight:600;"></div>
 <div id="myBadges" class="badge-row"></div>
@@ -471,11 +471,7 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <p class="page-desc">投稿・枠作成などがサーバー側の制限で弾かれたとき、その時刻・前回成功からの秒数・サーバーの文言を記録します（この端末内だけ）。公式アプリにもアプリ内のクールタイムは無く、制限はサーバー判定のみです。</p>
 <div id="koeLimitLog" class="card-list"></div>
 </details>
-<details class="mypage-section" id="koeQrSection">
-<summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM19 14h2M14 19h3M19 19h2"/></svg> 自分のQRコード</summary>
-<p class="page-desc">友だち追加用のQRコードです。相手のカメラで読み取ってもらえます。</p>
-<div id="koeQrBox" style="text-align:center;padding:8px;"></div>
-</details>
+
 <details class="mypage-section">
 <summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M5 20h14"/></svg> 保存(ダウンロード)</summary>
 <p class="page-desc" style="white-space:normal;">保存ボタンを押したときに<b>形式をきくかどうか</b>と、<b>保存先フォルダ</b>をここで決められます。</p>
@@ -753,6 +749,7 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <option value="pop">ポップ</option>
 <option value="none">鳴らさない</option>
 </select>
+<label class="check-row" style="margin-top:8px;"><input type="checkbox" id="newNotifPopupChk"> 新着通知をアプリ内のポップでも知らせる</label>
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" id="bgNotifyChk"> アプリを閉じている間もAndroidの通知で知らせる</label>
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" id="autoDelRegChk"> 自分の投稿が規制対象になったら自動で削除して通知する</label>
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" id="voiceContinuousChk"> 音声投稿を連続再生する</label>
@@ -1136,7 +1133,7 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <p class="page-desc" style="margin-top:4px;">オフにした種類は一覧にもバッジ件数にも出てこなくなります(この端末だけの表示設定です)。</p>
 <div id="notifCatListPage" class="notif-cat-list"></div>
 <div class="field-label" style="margin-top:16px;">表示するタブ</div>
-<p class="page-desc" style="margin-top:4px;">通知画面の上部に表示するタブ(通常/重要/フォロー/着信)を選べます。</p>
+<p class="page-desc" style="margin-top:4px;">通知画面の上部に表示するタブ(通常/重要/着信/お知らせ)を選べます。</p>
 <div id="notifTabListPage" class="notif-cat-list"></div>
 </div>
 </div>
@@ -1304,7 +1301,9 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <div id="applicantsBox"></div>
 <div id="callStatus" class="callv2-status"></div>
 <div id="callChatPanel" class="callv2-panel" style="display:none;">
+<div class="callv2-tabs"><button type="button" class="callv2-tab active" data-ctab="chat">チャット</button><button type="button" class="callv2-tab" data-ctab="log">ログ<span id="callSysCount" class="callv2-tabcount"></span></button></div>
 <div id="callChatLog" class="callv2-chatlog"></div>
+<div id="callSysLog" class="callv2-chatlog" style="display:none;"></div>
 <div class="callv2-chatinput">
 <textarea id="callChatInput" rows="1" placeholder="コメントを送信(改行OK)"></textarea>
 <button id="callChatSendBtn" class="btn-secondary" style="width:auto;">送信</button>
@@ -1333,7 +1332,7 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <button id="callCloseRoomBtn" class="btn-danger" style="display:none; margin-top:8px;">ルーム終了</button>
 <button id="callCommentToggleBtn" class="btn-secondary" style="margin-top:8px;">コメント欄 ON/OFF切替</button>
 </div>
-<details class="call-collapse" style="margin-top:8px;"><summary>ログ</summary><div id="callLog" class="inspect-result" style="height:100px;"></div></details>
+<div id="callAutoRow" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border,rgba(255,255,255,.08));"><label class="field-label">挙手の自動処理</label><label class="check-row"><input type="checkbox" id="callAutoRaiseChk"> 入ったら自動で挙手する</label><label class="check-row"><input type="checkbox" id="callAutoApproveChk"> オーナーの時、挙手を自動で許可する</label><label class="check-row"><input type="checkbox" id="callAutoRejectChk"> オーナーの時、挙手を自動で拒否する</label><p class="callv2-note">通話ページの設定と同じものです。ここで変えるとすぐ効きます。</p></div><details class="call-collapse" style="margin-top:8px;"><summary>ログ</summary><div id="callLog" class="inspect-result" style="height:100px;"></div></details>
 </div>
 <div class="callv2-actions">
 <button id="callRaiseHandBtn" class="callv2-raise" style="display:none;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11V6a1.5 1.5 0 0 1 3 0v4m0 0V4.5a1.5 1.5 0 0 1 3 0V10m0 0V6a1.5 1.5 0 0 1 3 0v6m0-2a1.5 1.5 0 0 1 3 0v4a6 6 0 0 1-6 6h-1a6 6 0 0 1-5.4-3.4L4.5 13a1.6 1.6 0 0 1 2.8-1.5"/></svg><span>手を挙げる</span></button>

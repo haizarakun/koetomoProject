@@ -34,6 +34,9 @@ public class KoeSession {
     static final String APP_VERSION = "3.9.101";
     static final String BASE_URL = "https://api.meetscom.com";
     static final String BASE_URL2 = "https://api2.meetscom.com";
+    private JSONObject previewCache = null;
+    private static String lastPostSig = null;
+    private static long lastPostAt = 0L;
     static final String PNG_FALLBACK = "https://d34we8vh702akg.cloudfront.net/";
     static final String UA = "okhttp/4.12.0";  // 公式アプリと同一(OkHttpデフォルトUA)。ログインWAFが独自UAを弾くため一致させる。
     private JSONObject clientDefines = null;
@@ -376,6 +379,7 @@ public class KoeSession {
                     JSONArray arr = obj.optJSONArray(k);
                     if (arr != null && arr.length() >= 2) {
                         try {
+                            if (arr.optString(0, "").length() == 0) continue; // 空名は取り直させる
                             this.nameCache.put(Long.valueOf(Long.parseLong(k)), new String[]{arr.optString(0, ""), arr.optString(1, "")});
                         } catch (Exception e) {
                         }
@@ -386,7 +390,23 @@ public class KoeSession {
         }
     }
 
+    private volatile boolean nameCacheSaveScheduled = false;
+    /** 名前キャッシュの保存はまとめて行う(スクロール中に何十回も全件シリアライズ+書き込みしない)。3秒後に1回だけ書く。 */
     private void saveNameCache() {
+        if (nameCacheSaveScheduled) return;
+        nameCacheSaveScheduled = true;
+        Thread t = new Thread(new Runnable() {
+            public void run() {
+                try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
+                nameCacheSaveScheduled = false;
+                saveNameCacheNow();
+            }
+        }, "koe-namecache-save");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private void saveNameCacheNow() {
         try {
             JSONObject obj = new JSONObject();
             synchronized (this.nameCache) {
@@ -500,7 +520,7 @@ public class KoeSession {
     private String blockUser(String str) {
         HashMap hashMap = new HashMap();
         hashMap.put("target_id", str);
-        hashMap.put("version", APP_VERSION);
+        hashMap.put("version", "android_" + APP_VERSION);
         String authToken = authToken();
         if (authToken != null) {
             hashMap.put("auth_token", authToken);
@@ -566,6 +586,7 @@ public class KoeSession {
             JSONObject jSONObject2 = new JSONObject();
             jSONObject2.put("user_id", j);
             jSONObject2.put("name", str);
+            if (str.length() > 0) { this.nameCache.put(Long.valueOf(j), new String[]{str, str2}); saveNameCache(); } // プロフィールで得た名前は一覧/返信表示にも反映
             jSONObject2.put("comment", jSONObject != null ? jSONObject.optString("comment", "") : "");
             jSONObject2.put("icon_url", iconUrl(str2));
             String[] strArr = {"header_image_file_path", "headerImageFilePath", "header_image", "headerImage", "header_image_url", "headerImageUrl", "header_url", "cover_image", "cover_image_file_path", "coverImageFilePath", "header"};
@@ -601,8 +622,18 @@ public class KoeSession {
                 jSONObject2.put("birthday", birthday());
             }
             if (z) {
-                jSONObject2.put("is_following", jSONObject != null && jSONObject.optBoolean("is_following", jSONObject.optBoolean("isFollowing", false)));
-                jSONObject2.put("is_followed", jSONObject != null && jSONObject.optBoolean("is_followed", jSONObject.optBoolean("isFollowed", false)));
+                jSONObject2.put("is_following", relFollowing(jSONObject));
+                jSONObject2.put("is_followed", relFollowed(jSONObject));
+                // 「友達」は声とも本体の関係で、フォローとは別。ボタンの出し分けに生のフラグを渡す。
+                //   is_friend            … 友達が成立している
+                //   is_friend_requestee  … 自分が相手に申請した(申請中)
+                //   is_friend_requester  … 相手から申請が来ている(承認できる)
+                jSONObject2.put("is_friend", jSONObject != null
+                        && (jSONObject.optBoolean("is_friend", false) || jSONObject.optBoolean("isFriend", false)));
+                jSONObject2.put("friend_requested", jSONObject != null
+                        && (jSONObject.optBoolean("is_friend_requestee", false) || jSONObject.optBoolean("isFriendRequestee", false)));
+                jSONObject2.put("friend_incoming", jSONObject != null
+                        && (jSONObject.optBoolean("is_friend_requester", false) || jSONObject.optBoolean("isFriendRequester", false)));
                 jSONObject2.put("friend_count", jSONObject != null ? jSONObject.optInt("friend_count", jSONObject.optInt("friendCount", 0)) : 0);
                 jSONObject2.put("area_name", jSONObject != null ? jSONObject.optString("area_name", jSONObject.optString("areaName", "")) : "");
                 jSONObject2.put("login_status", jSONObject != null ? jSONObject.optString("login_status_with_unit", jSONObject.optString("loginStatusWithUnit", "")) : "");
@@ -643,7 +674,7 @@ public class KoeSession {
                     if (jSONObject.has("passive_follows")) jSONObject2.put("passive_follows", jSONObject.opt("passive_follows"));
                     if (jSONObject.has("feature")) jSONObject2.put("feature", jSONObject.opt("feature"));
                 }
-                try { dbgLog(nowStr() + "  [PROFILE] uid=" + j + " created_at=" + (ca.length() > 0 ? ca : "(なし)") + " user_info=" + (jSONObject != null ? truncate(redactLog(jSONObject.toString()), 1600) : "-")); } catch (Exception ignored) {}
+                try { dbgLog(nowStr() + "  [PROFILE] uid=" + j + " created_at=" + (ca.length() > 0 ? ca : "(なし)") + " keys=" + (jSONObject != null ? topKeys(jSONObject) : "-")); } catch (Exception ignored) {} // 個人情報(誕生日等)をログに残さない: キー名のみ
             }
             return new JSONObject().put("ok", true).put("profile", jSONObject2).put("raw", str3).toString();
         } catch (Exception e) {
@@ -744,8 +775,13 @@ public class KoeSession {
                 str2 = "";
             }
             JSONObject put2 = put.put("description", str2).put("category_id", 0).put("is_open", z).put("image_file_path", "").put("voice_file_path", "").put("md5", "");
-            String authToken = authToken();
-            return okResult(httpJson("POST", "https://api.meetscom.com/api/communities?version=" + enc(APP_VERSION) + (authToken != null ? "&auth_token=" + enc(authToken) : ""), put2));
+            // 公式 CommunityApi.createCommunity は @Body JSON + X-App-Version / X-Auth-Token ヘッダー。
+            // (httpJson が両ヘッダーを付ける) URL に認証を並べるのは当方の書き方だった。
+            Resp rc = httpJson("POST", BASE_URL + "/api/communities", put2);
+            if (rc.status == 404 || rc.status >= 500) {
+                rc = httpJson("POST", BASE_URL2 + "/api/communities", put2);
+            }
+            return okResult(rc);
         } catch (Exception e) {
             return errJson(e);
         }
@@ -958,24 +994,45 @@ public class KoeSession {
     //   /api/feed_posts     = 「つぶやく」= 通常のタイムライン → play_time を付ける(purpose/topicなし)
     // ※公式はエンドポイント名と意味が逆。api→api2 フォールバック。
     private Resp postToSeries(String endpoint, String description, String purpose, String imagePath, String voicePath, String md5) {
+        return postToSeries(endpoint, description, purpose, imagePath, voicePath, md5, "0");
+    }
+
+    private Resp postToSeries(String endpoint, String description, String purpose, String imagePath, String voicePath, String md5, String playTime) {
         HashMap<String, String> hashMap = new HashMap<String, String>();
-        hashMap.put("version", "android_3.9.101");
+        hashMap.put("version", "android_" + APP_VERSION);
         boolean isFeed = endpoint.contains("feed_posts");
         if (!isFeed) {
             hashMap.put("purpose", (purpose == null || purpose.length() == 0) ? "0" : purpose);
             hashMap.put("topic", "0");
         } else {
-            hashMap.put("play_time", "0");
+            // 公式 generateFeedPostRequest は録音の長さ(秒)をそのまま送る
+            hashMap.put("play_time", (playTime == null || playTime.length() == 0) ? "0" : playTime);
         }
         if (description != null && description.length() > 0) hashMap.put("description", description);
         if (imagePath != null && imagePath.length() > 0) hashMap.put("image_file_path", imagePath);
         if (voicePath != null && voicePath.length() > 0) hashMap.put("voice_file_path", voicePath);
-        if (md5 != null && md5.length() > 0) hashMap.put("md5", md5);
+        // 公式は md5 を「画像を付けたときだけ」送る(MD5Manager.add は image_file_path の直後のみ)。
+        // 音声にも付けていたので、サーバー側の検証と食い違っていた。
+        if (imagePath != null && imagePath.length() > 0 && md5 != null && md5.length() > 0) hashMap.put("md5", md5);
         String authToken = authToken();
         if (authToken != null) hashMap.put("auth_token", authToken);
-        Resp http = http("POST", "https://api.meetscom.com" + endpoint, (Map<String, String>) null, hashMap);
-        if (http.status == 404 || http.status >= 500) {
-            http = http("POST", "https://api2.meetscom.com" + endpoint, (Map<String, String>) null, hashMap);
+        // 同じ内容の投稿が短時間に二度飛ぶのを防ぐ(タップの二重発火・再送による二重投稿対策)
+        String postSig = endpoint + "\u0000" + (description == null ? "" : description) + "\u0000"
+                + (imagePath == null ? "" : imagePath) + "\u0000" + (voicePath == null ? "" : voicePath);
+        long nowMs = System.currentTimeMillis();
+        synchronized (KoeSession.class) {
+            if (postSig.equals(lastPostSig) && nowMs - lastPostAt < 15000) {
+                dbgLog(nowStr() + "  [POST] 同一内容の連続投稿を抑止 " + endpoint);
+                return new Resp(200, (JSONObject) null);
+            }
+            lastPostSig = postSig;
+            lastPostAt = nowMs;
+        }
+        Resp http = http("POST", BASE_URL + endpoint, (Map<String, String>) null, hashMap);
+        // 5xx はサーバー側で投稿が作られている可能性があるため別ホストへ再送しない(二重投稿の防止)。
+        // 404(そのホストに存在しない)のときだけ api2 を試す。
+        if (http.status == 404) {
+            http = http("POST", BASE_URL2 + endpoint, (Map<String, String>) null, hashMap);
         }
         dbgLog(nowStr() + "  [POST] " + endpoint + " HTTP " + http.status + (http.status != 200 && http.status != 201 && http.body != null ? " " + truncate(redactLog(http.body.toString()), 200) : ""));
         return http;
@@ -994,6 +1051,28 @@ public class KoeSession {
                         str3 = str3.substring(indexOf + 1);
                     }
                     byte[] decode = Base64.decode(str3, 0);
+                    // 送られてきたのが既にJPEG(WebView側で長辺1280・品質88に縮小済み)なら、
+                    // PNGへ再エンコードせずそのまま上げる。PNG化すると数MBに膨らんで投稿が遅くなる。
+                    boolean srcIsJpeg = decode.length > 3 && (decode[0] & 255) == 0xFF && (decode[1] & 255) == 0xD8 && (decode[2] & 255) == 0xFF;
+                    if (srcIsJpeg) {
+                        String jpgName = UUID.randomUUID().toString().replace("-", "") + ".jpg";
+                        String jpgKey = jpgName;
+                        JSONObject cfgJ = imageS3Config();
+                        String pathJ = cfgJ.optString("path", "");
+                        if (pathJ != null && pathJ.length() > 0) {
+                            jpgKey = pathJ.replaceAll("^/+", "").replaceAll("/+$", "") + "/" + jpgName;
+                        }
+                        JSONObject credJ = cognitoCredentials(cfgJ);
+                        String errJ = s3PutBytes(cfgJ, credJ, decode, jpgKey, "image/jpeg");
+                        if (errJ == null) {
+                            dbgLog(nowStr() + "  [IMGPOST] JPEGのまま送信 " + decode.length + "B key=" + jpgKey);
+                            Resp rj = postToSeries(endpoint, str, str2, jpgName, null, md5Hex(decode));
+                            if (rj.status >= 200 && rj.status < 300) return okResult(rj);
+                            dbgLog(nowStr() + "  [IMGPOST] JPEG投稿がHTTP " + rj.status + " のためPNGで再試行");
+                        } else {
+                            dbgLog(nowStr() + "  [IMGPOST] JPEGアップロード失敗のためPNGで再試行: " + truncate(errJ, 120));
+                        }
+                    }
                     Bitmap decodeByteArray = BitmapFactory.decodeByteArray(decode, 0, decode.length);
                     if (decodeByteArray == null) {
                         dbgLog(nowStr() + "  [IMGPOST] デコード失敗 bytes=" + decode.length);
@@ -1034,10 +1113,14 @@ public class KoeSession {
     }
 
     private String createPostWithVoice(String endpoint, String str, String str2, String str3, String str4) {
-        return createPostWithVoice(endpoint, str, str2, str3, str4, "0");
+        return createPostWithVoice(endpoint, str, str2, str3, str4, "0", "0");
     }
 
     private String createPostWithVoice(String endpoint, String str, String str2, String str3, String str4, String purpose) {
+        return createPostWithVoice(endpoint, str, str2, str3, str4, purpose, "0");
+    }
+
+    private String createPostWithVoice(String endpoint, String str, String str2, String str3, String str4, String purpose, String playTime) {
         if (str != null) {
             try {
                 if (str.length() != 0) {
@@ -1066,7 +1149,7 @@ public class KoeSession {
                         return jsonErr(s3PutBytes);
                     }
                     // voice_file_path もファイル名だけ送る（画像と同じ理由）
-                    return okResult(postToSeries(endpoint, str4, (purpose == null || purpose.length() == 0) ? "0" : purpose, null, bareVoice, md5Hex(decode)));
+                    return okResult(postToSeries(endpoint, str4, (purpose == null || purpose.length() == 0) ? "0" : purpose, null, bareVoice, null, playTime));
                 }
             } catch (Exception e) {
                 return errJson(e);
@@ -1137,6 +1220,7 @@ public class KoeSession {
                 String authToken = authToken();
                 if (authToken != null) q.put("auth_token", authToken);
                 Resp r = http("DELETE", host + path + str, q, (Map<String, String>) null);
+                dbgLog(nowStr() + "  [POSTDEL] " + host + path + str + " -> " + r.status);
                 if (r.status >= 200 && r.status < 300) {
                     try { return new JSONObject().put("ok", true).put("kind", path.contains("timeline") ? "talk" : "feed").toString(); } catch (Exception e) { return "{\"ok\":true}"; }
                 }
@@ -1248,15 +1332,18 @@ public class KoeSession {
 
     private String doTipping(String str, String str2, String str3) {
         try {
+            // 公式 OkHttpSingleton.generateTippingRequest:
+            //   POST api2 /api/tippings  form: target_id(相手), item_pack_id, referer_id(画面の種類), room_id(枠内のみ)
+            // 以前は相手のIDを referer_id に入れていて、送り先が伝わっていなかった。
             HashMap hashMap = new HashMap();
+            hashMap.put("target_id", str2);
             hashMap.put("item_pack_id", str);
-            hashMap.put("referer_id", str2);
-            if (str3 == null || str3.length() == 0) {
-                str3 = "0";
-            }
-            hashMap.put("room_id", str3);
-            hashMap.put("screen", "timeline");
-            Resp request = request("POST", "/api/tippings", (Map<String, String>) null, hashMap);
+            boolean inRoom = (str3 != null && str3.length() > 0 && !"0".equals(str3));
+            hashMap.put("referer_id", inRoom ? "3" : "1"); // TippingScreen: 1=Profile, 3=GroupTalking
+            if (inRoom) hashMap.put("room_id", str3);
+            Resp request = httpApi2("POST", "/api/tippings", (Map<String, String>) null, hashMap);
+            dbgLog(nowStr() + "  [TIP] pack=" + str + " to=" + str2 + " HTTP " + request.status
+                    + (request.status >= 200 && request.status < 300 ? "" : " " + truncate(redactLog(request.body != null ? request.body.toString() : ""), 200)));
             if (request.status >= 200 && request.status < 300) {
                 return new JSONObject().put("ok", true).toString();
             }
@@ -1430,6 +1517,19 @@ public class KoeSession {
         return null;
     }
 
+    /** 候補キーのうち「要素のある配列」を優先して返す(空配列 user_info と本命 liked_users_info が同居する応答対策)。全部空なら最初に見つかった空配列。 */
+    private static JSONArray firstNonEmptyArray(JSONObject jSONObject, String... strArr) {
+        JSONArray empty = null;
+        for (String k : strArr) {
+            JSONArray a = jSONObject.optJSONArray(k);
+            if (a != null) {
+                if (a.length() > 0) return a;
+                if (empty == null) empty = a;
+            }
+        }
+        return empty;
+    }
+
     private static JSONArray firstArray(JSONObject jSONObject, String... strArr) {
         for (String optJSONArray : strArr) {
             JSONArray optJSONArray2 = jSONObject.optJSONArray(optJSONArray);
@@ -1461,6 +1561,106 @@ public class KoeSession {
         return "";
     }
 
+
+    // 「フォロー中」「フォロワー」一覧の各行に フォロー中／フォロー を出すための土台。
+    // /api/v2/users/{id}/followees の各要素には関係のフラグが入っていないため、
+    // 自分のフォロー先・フォロワーのID集合を作って突き合わせる。
+    // 何度も開くものなので短時間キャッシュし、フォロー操作のたびに捨てる。
+    private java.util.Set<Long> myFolloweeIds = null, myFollowerIds = null;
+    private long relSetAt = 0L;
+    // 一覧を開くたびに取り直すと毎回3往復ぶん待たされて目に見えて遅くなる。
+    // フォロー操作をしたときは clearRelationSets() で捨てるので、長めに持っておいて問題ない。
+    private static final long REL_SET_TTL = 600000L;
+
+    void clearRelationSets() {
+        synchronized (this) { myFolloweeIds = null; myFollowerIds = null; relSetAt = 0L; }
+    }
+
+    // 自分が出した友達申請のID集合(短時間キャッシュ)。申請ボタンの出し分けに使う。
+    private java.util.HashSet<Long> sentFriendIds = null;
+    private long sentFriendAt = 0L;
+
+    void clearFriendCache() {
+        synchronized (this) { sentFriendIds = null; sentFriendAt = 0L; }
+    }
+
+    private java.util.HashSet<Long> sentFriendRequestIds() {
+        synchronized (this) {
+            if (sentFriendIds != null && System.currentTimeMillis() - sentFriendAt < 120000L) return sentFriendIds;
+        }
+        java.util.HashSet<Long> out = new java.util.HashSet<Long>();
+        try {
+            Resp r = request("GET", "/api/followings", (Map<String, String>) null, (Map<String, String>) null);
+            if (r.status == 200 && r.body != null) {
+                JSONArray arr = normalizeUserList(r.body);
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject u = arr.optJSONObject(i);
+                    if (u != null) out.add(Long.valueOf(u.optLong("user_id", 0)));
+                }
+            }
+        } catch (Throwable ig) {
+        }
+        synchronized (this) { sentFriendIds = out; sentFriendAt = System.currentTimeMillis(); }
+        return out;
+    }
+
+    private java.util.Set<Long> idsOfList(String kind) {
+        java.util.HashSet<Long> out = new java.util.HashSet<Long>();
+        long me = userId();
+        if (me == 0) return out;
+        for (int page = 1; page <= 5; page++) {
+            Resp r = httpApi2("GET", "/api/v2/users/" + me + "/" + kind, q1("page", String.valueOf(page)), (Map<String, String>) null);
+            if (r == null || r.status != 200 || r.body == null) break;
+            JSONArray arr = normalizeUserList(r.body);
+            if (arr == null || arr.length() == 0) break;
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject u = arr.optJSONObject(i);
+                if (u != null) out.add(Long.valueOf(u.optLong("user_id", 0)));
+            }
+            if (arr.length() < 20) break; // 最終ページ(これ以上ページを捲らない)
+        }
+        return out;
+    }
+
+    private void ensureRelationSets() {
+        boolean needFe, needFr;
+        synchronized (this) {
+            boolean fresh = System.currentTimeMillis() - relSetAt < REL_SET_TTL;
+            needFe = !(fresh && myFolloweeIds != null);
+            needFr = !(fresh && myFollowerIds != null);
+        }
+        if (!needFe && !needFr) return;
+        final java.util.Set<Long>[] out = new java.util.Set[2];
+        Thread t1 = null, t2 = null;
+        if (needFe) { t1 = new Thread(new Runnable() { public void run() { try { out[0] = idsOfList("followees"); } catch (Throwable ig) {} } }); t1.start(); }
+        if (needFr) { t2 = new Thread(new Runnable() { public void run() { try { out[1] = idsOfList("followers"); } catch (Throwable ig) {} } }); t2.start(); }
+        try { if (t1 != null) t1.join(15000); } catch (Exception ig) {}
+        try { if (t2 != null) t2.join(15000); } catch (Exception ig) {}
+        synchronized (this) {
+            if (out[0] != null) myFolloweeIds = out[0];
+            if (out[1] != null) myFollowerIds = out[1];
+            relSetAt = System.currentTimeMillis();
+        }
+        dbgLog(nowStr() + "  [RELSET] followees=" + (myFolloweeIds == null ? -1 : myFolloweeIds.size())
+                + " followers=" + (myFollowerIds == null ? -1 : myFollowerIds.size()));
+    }
+
+    /** 自分の一覧を見ているときは、その一覧自体が片側の答えなので、足りない側だけ用意する。 */
+    private void ensureRelationSetsFor(boolean needFollowees, boolean needFollowers) {
+        synchronized (this) {
+            boolean fresh = System.currentTimeMillis() - relSetAt < REL_SET_TTL;
+            if ((!needFollowees || (fresh && myFolloweeIds != null))
+                    && (!needFollowers || (fresh && myFollowerIds != null))) return;
+        }
+        if (needFollowees && needFollowers) { ensureRelationSets(); return; }
+        java.util.Set<Long> got = idsOfList(needFollowees ? "followees" : "followers");
+        synchronized (this) {
+            if (needFollowees) myFolloweeIds = got; else myFollowerIds = got;
+            if (myFolloweeIds != null && myFollowerIds != null) relSetAt = System.currentTimeMillis();
+        }
+        dbgLog(nowStr() + "  [RELSET] " + (needFollowees ? "followees=" : "followers=") + got.size() + " (必要な側だけ)");
+    }
+
     private String followList(String userIdStr, String page, String kind) {
         long uid = 0;
         try {
@@ -1479,7 +1679,37 @@ public class KoeSession {
             // 公式仕様: ヘッダ認証。http()直叩きでクエリ認証の混入を避ける。
             Resp resp = httpApi2("GET", path, q1("page", p), (Map<String, String>) null);
             if (resp.status == 200 && resp.body != null) {
-                return new JSONObject().put("ok", true).put("users", normalizeUserList(resp.body)).toString();
+                JSONArray users = normalizeUserList(resp.body);
+                // 一覧そのものが関係を表しているので、それを最優先で反映する。
+                //   followees を見ている = そこに並ぶ全員を自分がフォローしている
+                //   followers を見ている = そこに並ぶ全員が自分をフォローしている
+                boolean listIsFollowees = "followees".equals(kind);
+                boolean mine = (uid == userId());
+                java.util.Set<Long> fe = null, fr = null;
+                try {
+                    if (mine) {
+                        // 自分の followees を見ている → 相手が自分をフォローしているか(=followers)だけ要る
+                        ensureRelationSetsFor(!listIsFollowees, listIsFollowees);
+                    } else {
+                        ensureRelationSets();
+                    }
+                } catch (Throwable ig) {}
+                synchronized (this) { fe = myFolloweeIds; fr = myFollowerIds; }
+                for (int i = 0; i < users.length(); i++) {
+                    JSONObject u = users.optJSONObject(i);
+                    if (u == null) continue;
+                    long id = u.optLong("user_id", 0);
+                    boolean following = u.optBoolean("is_following", false);
+                    boolean followed = u.optBoolean("is_followed", false);
+                    if (mine && listIsFollowees) following = true;
+                    if (mine && !listIsFollowees) followed = true;
+                    if (fe != null && fe.contains(Long.valueOf(id))) following = true;
+                    if (fr != null && fr.contains(Long.valueOf(id))) followed = true;
+                    u.put("is_following", following);
+                    u.put("is_followed", followed);
+                    if (following) u.put("requested", false);
+                }
+                return new JSONObject().put("ok", true).put("users", users).toString();
             }
             return new JSONObject().put("ok", false).put("status", resp.status).toString();
         } catch (Exception e) {
@@ -1572,19 +1802,157 @@ public class KoeSession {
         }
     }
 
-    private String getMyQrCode() {
+    private String sendFriendRequest(String targetId) {
+        if (targetId == null || targetId.length() == 0) return jsonErr("target_id不明");
+        HashMap<String, String> f = new HashMap<String, String>();
+        f.put("target_id", targetId);
+        f.put("version", "android_" + APP_VERSION);
+        String at = authToken();
+        if (at != null) f.put("auth_token", at);
+        Resp r = http("POST", BASE_URL + "/api/relation/follow", (Map<String, String>) null, f);
+        if (r.status == 404 || r.status >= 500) {
+            r = http("POST", BASE_URL2 + "/api/relation/follow", (Map<String, String>) null, f);
+        }
+        dbgLog(nowStr() + "  [FRIEND-REQ] send target=" + targetId + " -> " + r.status);
+        clearRelationSets();
+        clearFriendCache();
+        clearRelationsCache();
+        return okResultStatus(r);
+    }
+
+    /** 自分が出した申請を取り消す。公式 generateKoetomoWithdrawRequest: DELETE api/relation/follows?target_id= */
+    private String cancelFriendRequest(String targetId) {
+        return friendRelationDelete("/api/relation/follows", targetId, "cancel");
+    }
+
+    /** 来ている申請を断る。公式 generateKoetomoDeleteRequest: DELETE api/relation/followers?target_id= */
+    private String denyFriendRequest(String targetId) {
+        return friendRelationDelete("/api/relation/followers", targetId, "deny");
+    }
+
+    /** 友達をやめる。公式 generateFriendsDeleteRequest: DELETE api/relation/friends?target_id= */
+    private String removeFriend(String targetId) {
+        return friendRelationDelete("/api/relation/friends", targetId, "remove");
+    }
+
+    private String friendRelationDelete(String path, String targetId, String tag) {
+        if (targetId == null || targetId.length() == 0) return jsonErr("target_id不明");
+        HashMap<String, String> q = new HashMap<String, String>();
+        q.put("target_id", targetId);
+        q.put("version", "android_" + APP_VERSION);
+        String at = authToken();
+        if (at != null) q.put("auth_token", at);
+        Resp r = http("DELETE", BASE_URL + path, q, (Map<String, String>) null);
+        if (r.status == 404 || r.status >= 500) {
+            r = http("DELETE", BASE_URL2 + path, q, (Map<String, String>) null);
+        }
+        dbgLog(nowStr() + "  [FRIEND-REQ] " + tag + " " + path + " target=" + targetId + " -> " + r.status);
+        clearRelationSets();
+        clearFriendCache();
+        clearRelationsCache();
+        return okResultStatus(r);
+    }
+
+    // 公式 FriendFragment.getFriendsData は 1回の呼び出しで3つのタブぶんを受け取っている:
+    //   POST https://api.meetscom.com/api/v2/dive/relations
+    //     FORM: without_chat_id=false, include_blocked_user=true
+    //   応答: { "friends":[…声とも], "followers":[…届いている申請], "follows":[…送った申請] }
+    // GET /api/followers はただのフォロワー一覧で、申請一覧ではなかった。
+    private JSONObject relationsCache = null;
+    private long relationsAt = 0L;
+
+    private JSONObject fetchRelations() {
+        synchronized (this) {
+            if (relationsCache != null && System.currentTimeMillis() - relationsAt < 15000L) return relationsCache;
+        }
+        // 公式 generateFormBuilder() は auth_token と version を必ずフォームに入れる。
+        // ヘッダーだけでは受け付けてもらえないため、ここでも同じものを入れる。
+        HashMap<String, String> f = new HashMap<String, String>();
+        String at = authToken();
+        if (at != null) f.put("auth_token", at);
+        f.put("version", "android_" + APP_VERSION);
+        f.put("without_chat_id", "false");
+        f.put("include_blocked_user", "true");
+        Resp r = http("POST", BASE_URL + "/api/v2/dive/relations", (Map<String, String>) null, f);
+        if (r.status == 404 || r.status >= 500 || r.status <= 0) {
+            r = http("POST", BASE_URL2 + "/api/v2/dive/relations", (Map<String, String>) null, f);
+        }
+        JSONObject body = (r.status == 200 && r.body != null) ? r.body : null;
+        JSONObject data = null;
+        if (body != null) {
+            Object d = body.opt("data");
+            if (d instanceof JSONObject) {
+                data = (JSONObject) d;
+            } else if (d instanceof String) {
+                // 旧APIは data が JSON文字列で来ることがある
+                try {
+                    String ds = ((String) d).trim();
+                    if (ds.startsWith("{")) data = new JSONObject(ds);
+                } catch (Exception ignore) {
+                }
+            }
+            if (data == null || (!data.has("friends") && !data.has("followers") && !data.has("follows"))) {
+                if (body.has("friends") || body.has("followers") || body.has("follows")) data = body;
+            }
+            if (data == null) data = body;
+        }
+        StringBuilder keys = new StringBuilder();
+        if (data != null) {
+            java.util.Iterator<String> it = data.keys();
+            while (it.hasNext()) { if (keys.length() > 0) keys.append(","); keys.append(it.next()); }
+        }
+        dbgLog(nowStr() + "  [RELATIONS] POST api/v2/dive/relations -> " + r.status
+                + (data != null ? " friends=" + arrLen(data, "friends") + " followers=" + arrLen(data, "followers")
+                    + " follows=" + arrLen(data, "follows") + " keys=[" + keys + "]"
+                  : " " + truncate(redactLog(r.body != null ? r.body.toString() : "(応答なし)"), 200)));
+        synchronized (this) { relationsCache = data; relationsAt = System.currentTimeMillis(); }
+        return data;
+    }
+
+    private static int arrLen(JSONObject o, String key) {
+        JSONArray a = o != null ? o.optJSONArray(key) : null;
+        return a == null ? -1 : a.length();
+    }
+
+    void clearRelationsCache() {
+        synchronized (this) { relationsCache = null; relationsAt = 0L; }
+    }
+
+    private JSONArray relationsArray(String key) {
+        JSONObject data = fetchRelations();
+        if (data == null) return new JSONArray();
+        JSONArray raw = data.optJSONArray(key);
+        if (raw == null) {
+            // 応答のキー名が違う場合に備えて、同じ意味の名前も見る
+            String[] alt;
+            if ("friends".equals(key)) alt = new String[]{"friend", "friend_users", "koetomo", "koetomos", "koetomo_users"};
+            else if ("followers".equals(key)) alt = new String[]{"follower", "incoming", "incoming_requests", "follower_users"};
+            else alt = new String[]{"follow", "outgoing", "outgoing_requests", "followings", "follow_users"};
+            for (int i = 0; i < alt.length && raw == null; i++) raw = data.optJSONArray(alt[i]);
+        }
+        if (raw == null) return new JSONArray();
         try {
-            Resp r = request("GET", "/api/users/qr_codes", (Map<String, String>) null, (Map<String, String>) null);
-            if (r.status != 200 || r.body == null) return gracefulUnavailable(r, "qr", "qr_codes");
-            JSONObject b = r.body;
-            JSONObject d = b.optJSONObject("data");
-            String url = "";
-            if (d != null) url = firstStr(d, "url", "qr_code_url", "image_url", "qr_url", "file_path", "qr");
-            if (url.length() == 0) url = firstStr(b, "url", "qr_code_url", "image_url", "qr_url", "file_path", "qr");
-            JSONObject out = new JSONObject().put("ok", true);
-            if (url.length() > 0) out.put("url", url);
-            out.put("raw", d != null ? d : b);
-            return out.toString();
+            return normalizeUserList(new JSONObject().put("users", raw));
+        } catch (Exception e) {
+            return new JSONArray();
+        }
+    }
+
+    /** 届いている友達申請。公式では relations 応答の "followers"。 */
+    private String getFriendRequestsIn() {
+        try {
+            JSONArray users = relationsArray("followers");
+            return new JSONObject().put("ok", true).put("users", users).toString();
+        } catch (Exception e) {
+            return errJson(e);
+        }
+    }
+
+    /** 送った友達申請。公式では relations 応答の "follows"。 */
+    private String getFriendRequestsOut() {
+        try {
+            JSONArray users = relationsArray("follows");
+            return new JSONObject().put("ok", true).put("users", users).toString();
         } catch (Exception e) {
             return errJson(e);
         }
@@ -1598,7 +1966,25 @@ public class KoeSession {
         if (authToken != null) {
             hashMap.put("auth_token", authToken);
         }
-        return okResult(http("POST", "https://api.meetscom.com/api/relation/new_follow/following", hashMap, (Map<String, String>) null));
+        // 公式 OkHttpSingleton.generateKoetomoFollowRequest:
+        //   POST api.meetscom.com/api/relation/follow  フォーム: auth_token, version, target_id
+        // (以前使っていた /api/relation/new_follow/following は公式には存在しない)
+        // 公式 generateFeedFollowRequest: POST api/followings (form target_id)。
+        // これが本命で、/api/relation/follow は別系統(友達申請)。
+        Resp r = http("POST", BASE_URL + "/api/followings", (Map<String, String>) null, hashMap);
+        dbgLog(nowStr() + "  [FOLLOW] POST /api/followings -> " + r.status);
+        clearRelationSets();
+        if (r.status < 200 || r.status >= 300) {
+            // 予備は公式の TimelineApiServer1.follow(POST api/relation/new_follow/following, クエリ)。
+            // /api/relation/follow は公式では「友達申請」で意味が違うため使わない。
+            Resp rb = http("POST", BASE_URL + "/api/relation/new_follow/following", hashMap, (Map<String, String>) null);
+            dbgLog(nowStr() + "  [FOLLOW-FB] new_follow/following -> " + rb.status);
+            if (rb.status >= 200 && rb.status < 300) r = rb;
+        }
+        dbgLog(nowStr() + "  [FOLLOW] target=" + str + " HTTP " + r.status + " vsns=" + r.vsns
+                + (r.status >= 200 && r.status < 300 ? "" : " " + truncate(redactLog(r.body != null ? r.body.toString() : ""), 200)));
+        // 成功時でも非0の X-Vsns-Status を返すため、HTTPステータスのみで判定する
+        return okResultStatus(r);
     }
 
     private String getAccountBalance() {
@@ -1908,6 +2294,29 @@ public class KoeSession {
                     }
                 }
             }
+            // 取得済みのプレビューを再利用する。
+            // 会話一覧を開くたびに毎回8本の /api/messages を投げ直していたのが、
+            // チャット画面の表示が重い主因だった。last_sent_at が変わっていなければ本文も変わらない。
+            try {
+                android.content.SharedPreferences cp = this.prefs;
+                String cachedRaw = cp.getString("chat_preview_cache", "{}");
+                JSONObject cache = new JSONObject(cachedRaw);
+                for (int k = toFetch.size() - 1; k >= 0; k--) {
+                    int idx = fetchIdx.get(k).intValue();
+                    JSONObject row = jSONArray2.optJSONObject(idx);
+                    if (row == null) continue;
+                    String ck = toFetch.get(k)[0] + "@" + row.optString("last_sent_at", "");
+                    String hit = cache.optString(ck, "");
+                    if (hit.length() > 0) {
+                        row.put("last_message", hit);
+                        toFetch.remove(k);
+                        fetchIdx.remove(k);
+                    }
+                }
+                this.previewCache = cache;
+            } catch (Exception ig) {
+                this.previewCache = null;
+            }
             // 直近メッセージを並列取得（見えている上位のみ・全体タイムアウト付き）
             if (!toFetch.isEmpty()) {
                 int n = Math.min(toFetch.size(), 8);
@@ -1924,16 +2333,30 @@ public class KoeSession {
                 for (int k = 0; k < n; k++) { try { long left = deadline - System.currentTimeMillis(); ths[k].join(left > 0 ? left : 1); } catch (Exception ignore) {} }
                 for (int k = 0; k < n; k++) {
                     if (results[k] != null && results[k].length() > 0) {
-                        try { jSONArray2.getJSONObject(fetchIdx.get(k).intValue()).put("last_message", results[k]); } catch (Exception ignore) {}
+                        try {
+                            JSONObject row = jSONArray2.getJSONObject(fetchIdx.get(k).intValue());
+                            row.put("last_message", results[k]);
+                            if (this.previewCache != null) {
+                                this.previewCache.put(toFetch.get(k)[0] + "@" + row.optString("last_sent_at", ""), results[k]);
+                            }
+                        } catch (Exception ignore) {}
                     }
                 }
+                // キャッシュを保存(古い会話の分が無限に増えないよう上限を設ける)
+                try {
+                    if (this.previewCache != null) {
+                        if (this.previewCache.length() > 120) this.previewCache = new JSONObject();
+                        this.prefs.edit().putString("chat_preview_cache", this.previewCache.toString()).apply();
+                    }
+                } catch (Exception ignore) {}
             }
             return new JSONObject().put("ok", true).put("rooms", jSONArray2).put("raw", str).toString();
         }
     }
 
     private String getCoinHistory() {
-        return historyResult(request("GET", "/api/v2/coin_histories", q1("page", "1"), (Map<String, String>) null), "coin_histories", "histories", "data");
+        // 公式 generateGetCoinHistoryRequest は order を必ず付ける
+        return historyResult(request("GET", "/api/v2/coin_histories", q2("page", "1", "order", "desc"), (Map<String, String>) null), "coin_histories", "histories", "data");
     }
 
     private String getCommunitiesFeed(String page) {
@@ -2298,33 +2721,171 @@ public class KoeSession {
         return postsResult(request2("GET", "/api/following_posts", qOpt("max_created_at", str), (Map<String, String>) null), "following_posts", false);
     }
 
+    /**
+     * 友達画面の一覧。「友達(声とも)」と「相互フォロー」の両方を1つの配列で返し、
+     * 各行に is_friend / is_following / is_followed を付ける(画面側のタブで振り分ける)。
+     * どこか1つが失敗しても残りは必ず出す。
+     */
     private String getFriendsList(String str) {
-        if (str == null || str.length() == 0) {
-            str = "1";
+        JSONArray users = new JSONArray();
+        java.util.HashSet<Long> have = new java.util.HashSet<Long>();
+
+        // ---- 1) 友達(声とも) ----
+        //   公式 FriendFragment: POST api/v2/dive/relations の "friends"
+        //   予備: POST api/dive/friends (generateFriendsListRequest)
+        try {
+            JSONArray fr = relationsArray("friends");
+            if (fr.length() == 0) {
+                HashMap<String, String> ff = new HashMap<String, String>();
+                String at = authToken();
+                if (at != null) ff.put("auth_token", at);
+                ff.put("version", "android_" + APP_VERSION);
+                Resp r = http("POST", BASE_URL + "/api/dive/friends", (Map<String, String>) null, ff);
+                if (r.status == 404 || r.status >= 500 || r.status <= 0) {
+                    r = http("POST", BASE_URL2 + "/api/dive/friends", (Map<String, String>) null, ff);
+                }
+                if (r.status == 200 && r.body != null) fr = normalizeUserList(r.body);
+                dbgLog(nowStr() + "  [FRIENDS] 予備 api/dive/friends HTTP " + r.status + " n=" + fr.length()
+                        + (r.status != 200 && r.body != null ? " " + truncate(redactLog(r.body.toString()), 140) : ""));
+            }
+            for (int i = 0; i < fr.length(); i++) {
+                JSONObject u = fr.optJSONObject(i);
+                if (u == null) continue;
+                long id = u.optLong("user_id", 0);
+                if (id == 0 || !have.add(Long.valueOf(id))) continue;
+                u.put("is_friend", true);
+                users.put(u);
+            }
+            dbgLog(nowStr() + "  [FRIENDS] 友達=" + users.length());
+        } catch (Throwable ig) {
+            dbgLog(nowStr() + "  [FRIENDS] 友達の取得で例外: " + ig);
+        }
+
+        // ---- 2) 相互フォロー ----
+        java.util.Set<Long> fe = null, fol = null;
+        try {
+            ensureRelationSets();
+            synchronized (this) { fe = myFolloweeIds; fol = myFollowerIds; }
+        } catch (Throwable ig) {
         }
         try {
-            // 1) GET /api/relation/friends
-            Resp r = request("GET", "/api/relation/friends", q1("page", str), (Map<String, String>) null);
-            JSONArray users = (r.status == 200 && r.body != null) ? normalizeUserList(r.body) : new JSONArray();
-            dbgLog(nowStr() + "  [FRIENDS] GET relation/friends HTTP " + r.status + " users=" + users.length() + " " + (r.body != null ? truncate(redactLog(r.body.toString()), 160) : ""));
-            // 2) だめなら POST /api/relation/friends
-            if (users.length() == 0) {
-                Resp rp = request("POST", "/api/relation/friends", q1("page", str), (Map<String, String>) null);
-                if (rp.status == 200 && rp.body != null) users = normalizeUserList(rp.body);
-                dbgLog(nowStr() + "  [FRIENDS] POST relation/friends HTTP " + rp.status + " users=" + users.length());
+            if (fe != null && fol != null) {
+                // すでに載っている友達にフォロー関係の印を付ける
+                for (int i = 0; i < users.length(); i++) {
+                    JSONObject u = users.optJSONObject(i);
+                    if (u == null) continue;
+                    Long id = Long.valueOf(u.optLong("user_id", 0));
+                    u.put("is_following", fe.contains(id));
+                    u.put("is_followed", fol.contains(id));
+                }
+                // まだ載っていない相互フォローの人を足す
+                java.util.HashSet<Long> both = new java.util.HashSet<Long>(fe);
+                both.retainAll(fol);
+                both.removeAll(have);
+                dbgLog(nowStr() + "  [FRIENDS] フォロー中=" + fe.size() + " フォロワー=" + fol.size() + " 相互(未掲載)=" + both.size());
+                if (!both.isEmpty()) {
+                    long me = userId();
+                    for (int page = 1; page <= 5 && !both.isEmpty(); page++) {
+                        Resp rf = httpApi2("GET", "/api/v2/users/" + me + "/followees", q1("page", String.valueOf(page)), (Map<String, String>) null);
+                        if (rf == null || rf.status != 200 || rf.body == null) break;
+                        JSONArray arr = normalizeUserList(rf.body);
+                        if (arr == null || arr.length() == 0) break;
+                        for (int i = 0; i < arr.length(); i++) {
+                            JSONObject u = arr.optJSONObject(i);
+                            if (u == null) continue;
+                            Long id = Long.valueOf(u.optLong("user_id", 0));
+                            if (!both.remove(id)) continue;
+                            if (!have.add(id)) continue;
+                            u.put("is_following", true);
+                            u.put("is_followed", true);
+                            u.put("requested", false);
+                            u.put("is_friend", false);
+                            users.put(u);
+                        }
+                        if (arr.length() < 20) break;
+                    }
+                }
             }
-            // 3) それでも空なら 相互フォロー = フォロー中 ∩ フォロワー を自前計算
-            if (users.length() == 0) {
-                users = computeMutualFollows(str);
-                dbgLog(nowStr() + "  [FRIENDS] computed mutual users=" + users.length());
+        } catch (Throwable ig) {
+            dbgLog(nowStr() + "  [FRIENDS] 相互の取得で例外: " + ig);
+        }
+
+        // ---- 3) ここまでで相互が1人も出ていなければ、自前計算で入れ直す ----
+        int nMutual = 0;
+        for (int i = 0; i < users.length(); i++) {
+            JSONObject u = users.optJSONObject(i);
+            if (u != null && u.optBoolean("is_following", false) && u.optBoolean("is_followed", false)) nMutual++;
+        }
+        if (nMutual == 0) {
+            try {
+                JSONArray mu = computeMutualFollows("1");
+                for (int i = 0; i < mu.length(); i++) {
+                    JSONObject u = mu.optJSONObject(i);
+                    if (u == null) continue;
+                    long id = u.optLong("user_id", 0);
+                    JSONObject exist = null;
+                    for (int k = 0; k < users.length(); k++) {
+                        JSONObject e2 = users.optJSONObject(k);
+                        if (e2 != null && e2.optLong("user_id", -1) == id) { exist = e2; break; }
+                    }
+                    if (exist != null) {
+                        exist.put("is_following", true);
+                        exist.put("is_followed", true);
+                    } else {
+                        u.put("is_following", true);
+                        u.put("is_followed", true);
+                        u.put("is_friend", false);
+                        users.put(u);
+                        have.add(Long.valueOf(id));
+                    }
+                    nMutual++;
+                }
+                dbgLog(nowStr() + "  [FRIENDS] 自前計算の相互=" + mu.length());
+            } catch (Throwable ig) {
             }
+        }
+
+        // ---- 4) 友達がどこからも取れなかったときの保険 ----
+        int nFriend = 0;
+        for (int i = 0; i < users.length(); i++) {
+            JSONObject u = users.optJSONObject(i);
+            if (u != null && u.optBoolean("is_friend", false)) nFriend++;
+        }
+        if (nFriend == 0 && nMutual > 0) {
+            // koetomo では「申請を送り合った状態」= 友達 なので、相互フォローを友達として出す
+            try {
+                for (int i = 0; i < users.length(); i++) {
+                    JSONObject u = users.optJSONObject(i);
+                    if (u == null) continue;
+                    if (u.optBoolean("is_following", false) && u.optBoolean("is_followed", false)) { u.put("is_friend", true); nFriend++; }
+                }
+            } catch (Throwable ig) {
+            }
+            dbgLog(nowStr() + "  [FRIENDS] 友達一覧が取れないため相互を友達として表示 " + nFriend + "人");
+        }
+
+        // ---- 5) 相互を先に並べる ----
+        try {
+            JSONArray sorted = new JSONArray();
+            for (int pass = 0; pass < 2; pass++) {
+                for (int i = 0; i < users.length(); i++) {
+                    JSONObject u = users.optJSONObject(i);
+                    if (u == null) continue;
+                    boolean mutual = u.optBoolean("is_following", false) && u.optBoolean("is_followed", false);
+                    if ((pass == 0) == mutual) sorted.put(u);
+                }
+            }
+            if (sorted.length() == users.length()) users = sorted;
+        } catch (Throwable ig) {
+        }
+
+        dbgLog(nowStr() + "  [FRIENDS] 合計=" + users.length() + " 友達=" + nFriend + " 相互=" + nMutual);
+        try {
             return new JSONObject().put("ok", true).put("users", users).toString();
         } catch (Exception e) {
             return errJson(e);
         }
     }
-
-    // フォロー中(followees)とフォロワー(followers)の積集合 = 相互フォロー を計算。
     private JSONArray computeMutualFollows(String page) {
         JSONArray out = new JSONArray();
         try {
@@ -2618,8 +3179,210 @@ public class KoeSession {
         return null;
     }
 
+    // ===== 公式アプリにあって未実装だった機能 =====
+
+    /**
+     * フォロワーを外す(相手に自分をフォローさせない)。
+     * 公式 TimelineApiServer1.deleteFollower: DELETE api/relation/new_follow/follower?target_id=…
+     * ブロックせずに一方的なフォローだけ切りたいときに使う。
+     */
+    private String removeFollower(String targetId) {
+        if (targetId == null || targetId.length() == 0) return jsonErr("target_id不明");
+        HashMap<String, String> q = new HashMap<String, String>();
+        q.put("target_id", targetId);
+        q.put("version", "android_" + APP_VERSION);
+        String at = authToken();
+        if (at != null) q.put("auth_token", at);
+        Resp r = http("DELETE", BASE_URL + "/api/relation/new_follow/follower", q, (Map<String, String>) null);
+        if (r.status == 404 || r.status >= 500) {
+            r = http("DELETE", BASE_URL2 + "/api/relation/new_follow/follower", q, (Map<String, String>) null);
+        }
+        dbgLog(nowStr() + "  [FOLLOWER-DEL] target=" + targetId + " -> " + r.status);
+        clearRelationSets();
+        clearRelationsCache();
+        return okResultStatus(r);
+    }
+
+    /**
+     * 通話(ダイブ)の履歴。
+     * 公式 generateDiveTalkHistoryRequest: GET api2 /api/v2/talk_histories?page=
+     */
+    private String getDiveTalkHistories(String page) {
+        HashMap<String, String> q = new HashMap<String, String>();
+        q.put("page", (page == null || page.length() == 0) ? "1" : page);
+        Resp r = httpApi2("GET", "/api/v2/talk_histories", q, (Map<String, String>) null);
+        dbgLog(nowStr() + "  [TALKHIST] v2/talk_histories -> " + r.status);
+        return okList(r, "histories", "talk_histories", "histories", "data");
+    }
+
+    /**
+     * 運営からのお知らせ。
+     * 公式 generateInfoRequest: POST api/system/info  FORM: par, page
+     * par は種別(0=すべて)。公式のお知らせ画面がこれを使っている。
+     */
+    private String getSystemInfo(String par, String page) {
+        HashMap<String, String> f = new HashMap<String, String>();
+        f.put("par", (par == null || par.length() == 0) ? "0" : par);
+        f.put("page", (page == null || page.length() == 0) ? "1" : page);
+        Resp r = request("POST", "/api/system/info", (Map<String, String>) null, f);
+        dbgLog(nowStr() + "  [SYSINFO] api/system/info -> " + r.status);
+        return okList(r, "info", "info", "infos", "system_info", "notices", "data");
+    }
+
+    /**
+     * サーバー側のログアウト。
+     * 公式 generateLogoutRequest: POST api/account/logout（フォームは auth_token / version のみ）
+     * 端末側で消すだけだと、サーバーには端末のトークンが残ったままになる。
+     */
+    private String serverLogout() {
+        Resp r = request("POST", "/api/account/logout", (Map<String, String>) null, new HashMap<String, String>());
+        dbgLog(nowStr() + "  [LOGOUT] api/account/logout -> " + r.status);
+        return okResultStatus(r);
+    }
+
+    /**
+     * コミュニティのコメントをブックマーク。
+     * 公式 CommunityApi.bookmarkComment / deleteBookmarkedComment:
+     *   POST|DELETE /api/communities/{id}/posts/{post_id}/comments/{comment_id}/bookmark
+     */
+    private String bookmarkCommunityComment(String communityId, String postId, String commentId, boolean add) {
+        if (communityId == null || postId == null || commentId == null
+                || communityId.length() == 0 || postId.length() == 0 || commentId.length() == 0) {
+            return jsonErr("パラメータ不明");
+        }
+        String path = "/api/communities/" + communityId + "/posts/" + postId + "/comments/" + commentId + "/bookmark";
+        return okResult(request(add ? "POST" : "DELETE", path, (Map<String, String>) null, add ? new HashMap<String, String>() : null));
+    }
+
+    /**
+     * 試聴(のぞき見)した時間をサーバーに送る。
+     * 公式 TalkRoomApi.sendTrialTime: PUT /api/trial_listenings/{id}?duration=秒
+     */
+    private String sendTrialTime(String listeningId, String durationSec) {
+        if (listeningId == null || listeningId.length() == 0) return jsonErr("trial_listening_id不明");
+        return okResult(request("PUT", "/api/trial_listenings/" + listeningId,
+                q1("duration", (durationSec == null || durationSec.length() == 0) ? "0" : durationSec), (Map<String, String>) null));
+    }
+
     private String getNotifications(String kind) {
         return getNotifications(kind, "1");
+    }
+
+    // ===== 公式にあった残りのAPI(第2弾) =====
+
+    /**
+     * 通話(SkyWay)の接続ログ。公式 generateSkywayConnectionRequest:
+     *   POST api/skyway/connections  FORM: ConnectionId, CallerId, CalleeId, TargetId, token
+     * 通話品質の計測に使う。失敗しても通話自体には影響しない。
+     */
+    private String skywayConnectLog(String connectionId, String callerId, String calleeId, String targetId, String token) {
+        if (connectionId == null || connectionId.length() == 0) return jsonErr("connection_id不明");
+        HashMap<String, String> f = new HashMap<String, String>();
+        f.put("ConnectionId", connectionId);
+        f.put("CallerId", callerId == null ? "0" : callerId);
+        f.put("CalleeId", calleeId == null ? "0" : calleeId);
+        f.put("TargetId", targetId == null ? "0" : targetId);
+        f.put("token", token == null ? "" : token);
+        Resp r = request("POST", "/api/skyway/connections", (Map<String, String>) null, f);
+        dbgLog(nowStr() + "  [SKYWAY] connect log -> " + r.status);
+        return okResultStatus(r);
+    }
+
+    /**
+     * 通話(SkyWay)の切断ログ。公式 generateSkywayDisonnectionRequest:
+     *   POST api/skyway/disconnections  FORM: ConnectionId, CallDuration
+     */
+    private String skywayDisconnectLog(String connectionId, String durationSec) {
+        if (connectionId == null || connectionId.length() == 0) return jsonErr("connection_id不明");
+        HashMap<String, String> f = new HashMap<String, String>();
+        f.put("ConnectionId", connectionId);
+        f.put("CallDuration", (durationSec == null || durationSec.length() == 0) ? "0" : durationSec);
+        Resp r = request("POST", "/api/skyway/disconnections", (Map<String, String>) null, f);
+        dbgLog(nowStr() + "  [SKYWAY] disconnect log -> " + r.status);
+        return okResultStatus(r);
+    }
+
+    /**
+     * 中断した購入トークンの確認。公式 generateAbortedPurchaseTokenRequest:
+     *   GET api2 /api/purchase_token
+     * 前回の購入が途中で止まっていないかをサーバーに問い合わせる(読み取りのみ)。
+     */
+    private String getAbortedPurchaseToken() {
+        Resp r = httpApi2("GET", "/api/purchase_token", (Map<String, String>) null, (Map<String, String>) null);
+        dbgLog(nowStr() + "  [PURCHASE] aborted token -> " + r.status);
+        if (r.status != 200 || r.body == null) return jsonStatus(r);
+        try { return new JSONObject().put("ok", true).put("data", r.body).toString(); }
+        catch (Exception e) { return errJson(e); }
+    }
+
+    /**
+     * 購入トークンをサーバーに登録する。公式 generateAddPurchaseTokenRequest:
+     *   POST api2 /api/purchase_token  FORM: item_id, purchase_token
+     * ※Google Play が発行した購入トークンが必要。トークンは呼び出し側(Play課金の完了)から渡す。
+     */
+    private String addPurchaseToken(String itemId, String purchaseToken) {
+        if (itemId == null || itemId.length() == 0 || purchaseToken == null || purchaseToken.length() == 0) {
+            return jsonErr("item_id / purchase_token 不明");
+        }
+        HashMap<String, String> f = new HashMap<String, String>();
+        f.put("item_id", itemId);
+        f.put("purchase_token", purchaseToken);
+        Resp r = httpApi2("POST", "/api/purchase_token", (Map<String, String>) null, f);
+        dbgLog(nowStr() + "  [PURCHASE] add token item=" + itemId + " -> " + r.status);
+        return okResultStatus(r);
+    }
+
+    /**
+     * サブスクの登録。公式 SubscriptionApi.subscribe:
+     *   POST /api/subscription  JSON {"receipt":…, "signature":…}
+     * ※Google Play の receipt と signature が必要(Play課金の完了から渡す)。
+     */
+    private String subscribe(String receipt, String signature) {
+        if (receipt == null || receipt.length() == 0) return jsonErr("receipt不明");
+        try {
+            JSONObject body = new JSONObject();
+            body.put("receipt", receipt);
+            body.put("signature", signature == null ? "" : signature);
+            Resp r = httpJson("POST", BASE_URL + "/api/subscription", body);
+            if (r.status == 404 || r.status >= 500) r = httpJson("POST", BASE_URL2 + "/api/subscription", body);
+            dbgLog(nowStr() + "  [SUBSCRIBE] -> " + r.status);
+            return okResultStatus(r);
+        } catch (Exception e) {
+            return errJson(e);
+        }
+    }
+
+    /**
+     * メールで新規登録。公式 generateSignupRequest:
+     *   POST api/account/signup  FORM: email, password, name, sex, birthday, device_uid, version …
+     * captcha トークン(etat2/vt2/gt2)は要求されたときだけ付ける。
+     */
+    private String signup(String email, String password, String name, String sex, String birthday, String deviceUid) {
+        if (email == null || email.length() == 0 || password == null || password.length() == 0) {
+            return jsonErr("メールアドレスとパスワードを入力してください");
+        }
+        HashMap<String, String> f = new HashMap<String, String>();
+        f.put("email", email);
+        f.put("password", password);
+        f.put("name", name == null ? "" : name);
+        f.put("sex", (sex == null || sex.length() == 0) ? "0" : sex);
+        f.put("birthday", birthday == null ? "" : birthday);
+        f.put("device_uid", deviceUid == null ? deviceUid() : deviceUid);
+        f.put("birthday_input_error", "");
+        Resp r = request("POST", "/api/account/signup", (Map<String, String>) null, f);
+        dbgLog(nowStr() + "  [SIGNUP] -> " + r.status);
+        return okResultStatus(r);
+    }
+
+    /**
+     * 新規登録メールの認証。公式 generateSignupAuthRequest:
+     *   POST api/account/signup_auth  FORM: token
+     */
+    private String signupAuth(String token) {
+        if (token == null || token.length() == 0) return jsonErr("token不明");
+        Resp r = request("POST", "/api/account/signup_auth", (Map<String, String>) null, q1("token", token));
+        dbgLog(nowStr() + "  [SIGNUP-AUTH] -> " + r.status);
+        return okResultStatus(r);
     }
 
     private String getNotifications(String kind, String page) {
@@ -3032,7 +3795,9 @@ public class KoeSession {
     }
 
     private String getTalkRequestHistory() {
-        return userHistoryResult(request("GET", "/api/dive/talking_requests", q1("page", "1"), (Map<String, String>) null), "talking_requests", "data");
+        // 公式 generateTalkRequestHistoryRequest: POST api/dive/talking_requests (フォーム, ページ指定なし)
+        HashMap<String, String> tf = new HashMap<String, String>();
+        return userHistoryResult(request("POST", "/api/dive/talking_requests", (Map<String, String>) null, tf), "talking_requests", "data");
     }
 
     // 通常のタイムライン(=「つぶやく」)は /api/feed_posts。is_talk=false でタグ付け。
@@ -3053,7 +3818,8 @@ public class KoeSession {
             if (posts != null) {
                 for (int i = 0; i < posts.length(); i++) {
                     JSONObject p = posts.optJSONObject(i);
-                    if (p != null) p.put("is_talk", isTalk);
+                    // 取得元が通話募集ならtrue。そうでなくても purpose を持つ投稿は通話募集のまま(バッジを消さない)。
+                    if (p != null) p.put("is_talk", isTalk || p.optBoolean("is_talk", false));
                 }
             }
             return o.toString();
@@ -3086,6 +3852,7 @@ public class KoeSession {
                 return err.toString();
             }
             JSONObject body = resp.body;
+            absorbUserInfo(body);
             JSONArray comments = body.optJSONArray("comments");
             Object data = body.opt("data");
             if (comments == null && data instanceof JSONArray) {
@@ -3102,7 +3869,7 @@ public class KoeSession {
             for (int i = 0; i < comments.length(); i++) {
                 JSONObject c = comments.optJSONObject(i);
                 if (c == null) continue;
-                ids.put(commentUid(c));
+                ids.put(new JSONObject().put("user_id", commentUid(c))); // resolveNames は {user_id} オブジェクト配列を要求
             }
             resolveNames(ids, "user_id");
 
@@ -3113,9 +3880,14 @@ public class KoeSession {
                 long uid = commentUid(c);
                 String[] cached = nameCache.get(Long.valueOf(uid));
                 JSONObject user = c.optJSONObject("user");
-                String name = user != null ? user.optString("name", "") : "";
+                if (user == null) user = c.optJSONObject("user_info");
+                String name = user != null ? firstNonEmpty(user.optString("name", ""), user.optString("nickname", "")) : "";
+                if (name.length() == 0) name = firstNonEmpty(c.optString("user_name", ""), c.optString("name", ""), c.optString("nickname", ""));
                 if (name.length() == 0 && cached != null) {
                     name = cached[0];
+                }
+                if (name.length() > 0 && !hasName(uid) && uid != 0) {
+                    this.nameCache.put(Long.valueOf(uid), new String[]{name, user != null ? user.optString("profile_picture_file_path", "") : ""});
                 }
                 if (name.length() == 0 && uid != 0) {
                     name = "user " + uid;
@@ -3144,17 +3916,68 @@ public class KoeSession {
     }
 
     private String getTimelineLikers(String str) {
-        HashMap hashMap = new HashMap();
+        HashMap<String, String> hashMap = new HashMap<String, String>();
         hashMap.put("page", "1");
         hashMap.put("version", "android_3.9.101");
         String authToken = authToken();
         if (authToken != null) {
             hashMap.put("auth_token", authToken);
         }
-        Resp http = http("GET", "https://api2.meetscom.com/api/feed_posts/" + str + "/liked_users", hashMap, (Map<String, String>) null);
+        // 公式 TimelineApi.getLikedUsers: GET /api/feed_posts/{post_id}/liked_users?page=1 (X-Auth-Token ヘッダ) → {"metadata":{...},"liked_users_info":[...]}
+        Resp http = http("GET", BASE_URL2 + "/api/feed_posts/" + str + "/liked_users", hashMap, (Map<String, String>) null);
         String str2 = "[liked_users@api2 HTTP " + http.status + "] " + (http.body != null ? truncate(http.body.toString(), 300) : "(なし)");
         try {
-            return (http.status != 200 || http.body == null) ? new JSONObject().put("ok", false).put("status", http.status).put("raw", str2).toString() : new JSONObject().put("ok", true).put("users", normalizeUserList(http.body)).put("raw", str2).toString();
+            JSONArray users = (http.status == 200 && http.body != null) ? normalizeUserList(http.body) : new JSONArray();
+            int likedCount = -1;
+            String source = "api2";
+            if (users.length() == 0) {
+                // 空だった: 生の応答を記録して、別経路で取り直す
+                dbgLog(nowStr() + "  [LIKERS] post=" + str + " api2 HTTP " + http.status + " users=0 body=" + truncate(redactLog(http.body != null ? http.body.toString() : "(null)"), 400));
+                Resp r2 = http("GET", BASE_URL + "/api/feed_posts/" + str + "/liked_users", hashMap, (Map<String, String>) null);
+                if (r2.status == 200 && r2.body != null) {
+                    users = normalizeUserList(r2.body);
+                    source = "api1";
+                }
+                if (users.length() == 0) {
+                    dbgLog(nowStr() + "  [LIKERS] post=" + str + " api1 HTTP " + r2.status + " users=0 body=" + truncate(redactLog(r2.body != null ? r2.body.toString() : "(null)"), 300));
+                    // 投稿詳細に liked_users / liked_user_ids が同梱されていれば、そこから復元する
+                    HashMap<String, String> q2 = new HashMap<String, String>();
+                    q2.put("version", "android_3.9.101");
+                    if (authToken != null) q2.put("auth_token", authToken);
+                    Resp d = http("GET", BASE_URL2 + "/api/feed_posts/" + str, q2, (Map<String, String>) null);
+                    if (d.status == 200 && d.body != null) {
+                        // 詳細応答は {"post_info":{...},"comment_info":[...],"user_info":[...]} の形(ログで確認)
+                        JSONObject pd = d.body.optJSONObject("post_info");
+                        if (pd == null) pd = d.body.optJSONObject("feed_post");
+                        if (pd == null) pd = d.body.optJSONObject("data");
+                        if (pd == null) pd = d.body;
+                        likedCount = pd.optInt("liked_user_count", pd.optInt("good_count", pd.optInt("likes_count", -1)));
+                        JSONArray a = firstArray(pd, "liked_users", "liked_users_info", "liked_user_info", "liked_user_ids", "liked_ids");
+                        if (a == null && pd != d.body) a = firstArray(d.body, "liked_users", "liked_users_info", "liked_user_info", "liked_user_ids", "liked_ids", "user_info");
+                        dbgLog(nowStr() + "  [LIKERS] post=" + str + " 詳細 keys=" + topKeys(pd) + " liked_count=" + likedCount + " arr=" + (a == null ? "null" : String.valueOf(a.length())));
+                        if (a != null && a.length() > 0) {
+                            if (a.optJSONObject(0) != null) {
+                                users = normalizeUserList(new JSONObject().put("users", a));
+                            } else {
+                                JSONArray ids = new JSONArray();
+                                for (int i = 0; i < a.length(); i++) { long id = a.optLong(i, 0); if (id != 0) ids.put(new JSONObject().put("user_id", id)); }
+                                resolveNames(ids, "user_id");
+                                users = new JSONArray();
+                                for (int i = 0; i < ids.length(); i++) {
+                                    long id = ids.optJSONObject(i).optLong("user_id");
+                                    if (isBanned(id)) continue;
+                                    String[] nm = this.nameCache.get(Long.valueOf(id));
+                                    users.put(new JSONObject().put("user_id", id).put("name", nm != null && nm[0].length() > 0 ? nm[0] : "user " + id).put("icon_url", nm != null ? iconUrl(nm[1]) : ""));
+                                }
+                            }
+                            source = "detail";
+                        }
+                    }
+                }
+            }
+            JSONObject out = new JSONObject().put("ok", true).put("users", users).put("raw", str2).put("source", source);
+            if (likedCount >= 0) out.put("liked_count", likedCount);
+            return out.toString();
         } catch (Exception e) {
             return errJson(e);
         }
@@ -3232,16 +4055,39 @@ public class KoeSession {
             // 軽量化: 実ログで api(server1) の target_id 指定は無関係な投稿を30件返す(matched=0)だけで
             // 無駄な名前解決まで発生していた。公式(TimelineApi=TYPE_2)と同じく api2 のみを使い、
             // api2 が応答しなかった(raw<0)場合だけ api にフォールバックする。全体走査(200件×数ページ)は廃止。
+            // つぶやき(feed)と通話募集(talk)は独立しているので同時に取りに行く。
+            // 直列にすると毎回2往復ぶん待たされ、プロフィールを開くたびに体感で効いていた。
+            final JSONArray fMerged = new JSONArray(), tMerged = new JSONArray();
+            final long fj = j;
+            final String fCurF = curF, fCurT = curT;
+            final int[] rF = new int[]{0}, rT = new int[]{0};
+            final java.util.Set<Long> fSeenFeed = seenFeed, fSeenTalk = seenTalk;
+            final String[] fNextF = nextF, fNextT = nextT;
+            Thread tf = null, tt = null;
             if (doF) {
-                int[] rF = scopedPostsInto("/api/feed_posts", "feed_posts", j, curF, "timeline", true, merged, nextF, seenFeed);
-                if (rF[0] < 0) scopedPostsInto("/api/feed_posts", "feed_posts", j, curF, "timeline", false, merged, nextF, seenFeed);
-                if (rF[0] >= 0 && rF[0] < 30) nextF[0] = ""; // 30件未満なら終端
+                tf = new Thread(new Runnable() { public void run() {
+                    try {
+                        rF[0] = scopedPostsInto("/api/feed_posts", "feed_posts", fj, fCurF, "timeline", true, fMerged, fNextF, fSeenFeed)[0];
+                        if (rF[0] < 0) scopedPostsInto("/api/feed_posts", "feed_posts", fj, fCurF, "timeline", false, fMerged, fNextF, fSeenFeed);
+                    } catch (Throwable ig) {}
+                }});
+                tf.start();
             }
             if (doT) {
-                int[] rT = scopedPostsInto("/api/timeline_posts", "timeline_posts", j, curT, "talk", true, merged, nextT, seenTalk);
-                if (rT[0] < 0) scopedPostsInto("/api/timeline_posts", "timeline_posts", j, curT, "talk", false, merged, nextT, seenTalk);
-                if (rT[0] >= 0 && rT[0] < 30) nextT[0] = "";
+                tt = new Thread(new Runnable() { public void run() {
+                    try {
+                        rT[0] = scopedPostsInto("/api/timeline_posts", "timeline_posts", fj, fCurT, "talk", true, tMerged, fNextT, fSeenTalk)[0];
+                        if (rT[0] < 0) scopedPostsInto("/api/timeline_posts", "timeline_posts", fj, fCurT, "talk", false, tMerged, fNextT, fSeenTalk);
+                    } catch (Throwable ig) {}
+                }});
+                tt.start();
             }
+            try { if (tf != null) tf.join(30000); } catch (Exception ig) {}
+            try { if (tt != null) tt.join(30000); } catch (Exception ig) {}
+            for (int i = 0; i < fMerged.length(); i++) merged.put(fMerged.opt(i));
+            for (int i = 0; i < tMerged.length(); i++) merged.put(tMerged.opt(i));
+            if (doF && rF[0] >= 0 && rF[0] < 30) nextF[0] = ""; // 30件未満なら終端
+            if (doT && rT[0] >= 0 && rT[0] < 30) nextT[0] = "";
             String[] nextOut = new String[]{(nextF[0].length() > 0 || nextT[0].length() > 0) ? ("F:" + nextF[0] + "|T:" + nextT[0]) : ""};
             // 投稿を作成日時の新しい順に並べ替える(timeline と feed を混ぜたときのズレを防ぐ)
             merged = sortPostsByCreatedDesc(merged);
@@ -3413,7 +4259,27 @@ public class KoeSession {
     // sendAuth=false のときは Authorization/X-Auth-Token を付けない。
     // ログイン系(login / signup / twitter_login)を「既ログイン状態のトークン付き」で
     // 送るとサーバーが弾く(HTTP 503 リクエストエラー)ため、ログイン系だけ false で呼ぶ。
+    // 端末が長時間スリープ/バックグラウンドだった後などに、使い回し(keep-alive)の接続が
+    // サーバー側で既に閉じられていて、復帰直後の最初の数リクエストが
+    // 「unexpected end of stream」「connection reset」「thread interrupted」で落ちることがある。
+    // これらは1回だけ新しい接続で即リトライすれば通るので、リトライ可能かを判定する。
+    private static boolean isRetryableNet(Throwable e) {
+        if (e == null) return false;
+        if (e instanceof java.io.InterruptedIOException) return true;
+        if (e instanceof java.io.EOFException) return true;
+        String m = (e.getMessage() != null ? e.getMessage() : e.toString()).toLowerCase();
+        return m.contains("unexpected end of stream")
+                || m.contains("connection reset")
+                || m.contains("connection abort")
+                || m.contains("econnreset")
+                || m.contains("interrupted")
+                || m.contains("broken pipe")
+                || m.contains("stream was reset")
+                || m.contains("connection closed");
+    }
+
     private Resp http(String method, String url, Map<String, String> query, Map<String, String> fields, boolean sendAuth) {
+      for (int __attempt = 0; __attempt < 2; __attempt++) {
         HttpURLConnection conn = null;
         try {
             StringBuilder sb = new StringBuilder(url);
@@ -3554,6 +4420,13 @@ public class KoeSession {
             resp.sessionExpired = localExpired;
             return resp;
         } catch (Exception e) {
+            if (conn != null) { try { conn.disconnect(); } catch (Exception ig) {} }
+            // 1回だけ、新しい接続で即リトライ(復帰直後の切れた接続対策)
+            if (__attempt == 0 && isRetryableNet(e)) {
+                Thread.interrupted(); // pause起因の割り込みフラグをクリアしてから再試行
+                try { Thread.sleep(150); } catch (Exception ig) {}
+                continue;
+            }
             try {
                 dbgLog(nowStr() + "  " + method + " " + redactLog(url) + "  → 通信エラー: " + (e.getMessage() != null ? e.getMessage() : e.toString()));
             } catch (Exception eLog) {
@@ -3563,15 +4436,14 @@ public class KoeSession {
                 err.put("error", e.getMessage() != null ? e.getMessage() : "io_error");
             } catch (Exception e2) {
             }
-            Resp resp = new Resp(-1, err);
-            if (conn != null) {
-                conn.disconnect();
-            }
-            return resp;
+            return new Resp(-1, err);
         }
+      }
+      return new Resp(-1, (JSONObject) null); // 到達しない
     }
 
     private Resp httpJson(String method, String url, JSONObject bodyObj) {
+      for (int __attempt = 0; __attempt < 2; __attempt++) {
         HttpURLConnection conn = null;
         try {
             conn = (HttpURLConnection) new URL(url).openConnection();
@@ -3626,12 +4498,16 @@ public class KoeSession {
             resp.sessionExpired = localExpired;
             return resp;
         } catch (Exception e) {
-            Resp resp = new Resp(-1, null);
-            if (conn != null) {
-                conn.disconnect();
+            if (conn != null) { try { conn.disconnect(); } catch (Exception ig) {} }
+            if (__attempt == 0 && isRetryableNet(e)) {
+                Thread.interrupted();
+                try { Thread.sleep(150); } catch (Exception ig) {}
+                continue;
             }
-            return resp;
+            return new Resp(-1, (JSONObject) null);
         }
+      }
+      return new Resp(-1, (JSONObject) null);
     }
 
     private String[] httpText(String url) {
@@ -4451,26 +5327,71 @@ public class KoeSession {
         return jSONArray2;
     }
 
+    // 公式(TimelineApiServer1)は api.meetscom.com に version="android_3.9.101" で送る。
+    // ここだけ "3.9.101" とapi2優先になっていて、公式と食い違っていた。
     private Resp newTimelineApi(String str, String str2) {
         HashMap hashMap = new HashMap();
-        hashMap.put("version", APP_VERSION);
+        hashMap.put("version", "android_" + APP_VERSION);
         String authToken = authToken();
         if (authToken != null) {
             hashMap.put("auth_token", authToken);
         }
         boolean z = str.equals("POST") || str.equals("PUT");
-        Resp http = z ? http(str, BASE_URL2 + str2, (Map<String, String>) null, hashMap) : http(str, BASE_URL2 + str2, hashMap, (Map<String, String>) null);
-        return (http.status == 404 || http.status >= 500) ? z ? http(str, BASE_URL + str2, (Map<String, String>) null, hashMap) : http(str, BASE_URL + str2, hashMap, (Map<String, String>) null) : http;
+        Resp http = z ? http(str, BASE_URL + str2, (Map<String, String>) null, hashMap) : http(str, BASE_URL + str2, hashMap, (Map<String, String>) null);
+        return (http.status == 404 || http.status >= 500) ? z ? http(str, BASE_URL2 + str2, (Map<String, String>) null, hashMap) : http(str, BASE_URL2 + str2, hashMap, (Map<String, String>) null) : http;
     }
 
     private Resp newTimelineApiForm(String str, Map<String, String> map) {
-        map.put("version", APP_VERSION);
+        map.put("version", "android_" + APP_VERSION);
         String authToken = authToken();
         if (authToken != null) {
             map.put("auth_token", authToken);
         }
-        Resp http = http("POST", BASE_URL2 + str, (Map<String, String>) null, map);
-        return (http.status == 404 || http.status >= 500) ? http("POST", BASE_URL + str, (Map<String, String>) null, map) : http;
+        Resp http = http("POST", BASE_URL + str, (Map<String, String>) null, map);
+        return (http.status == 404 || http.status >= 500) ? http("POST", BASE_URL2 + str, (Map<String, String>) null, map) : http;
+    }
+
+    private static final String[] VOICE_KEYS = {"voice_file_path", "voice_url", "sound_file_path", "sound_file_url", "audio_file_path", "audio_url", "recording_file_path", "record_file_path", "file_path", "voice", "sound", "audio"};
+    // 一覧に本文/音声URLが無い投稿を、詳細(GET /api/feed_posts/{id})から補完する。
+    // 音声のキーが公式と違う可能性があるので、生の詳細レスポンスのキーもログに残す。
+    private void fillVoiceFromDetail(long id, JSONObject out) {
+        try {
+            HashMap<String, String> f = new HashMap<String, String>();
+            f.put("version", "android_" + APP_VERSION);
+            String at = authToken();
+            if (at != null) f.put("auth_token", at);
+            Resp resp = http("GET", "https://api2.meetscom.com/api/feed_posts/" + id, f, (Map<String, String>) null);
+            if (resp.status != 200 || resp.body == null) return;
+            JSONObject b = resp.body;
+            JSONObject pd = b.optJSONObject("post_info");
+            if (pd == null) pd = b.optJSONObject("post");
+            if (pd == null) pd = b.optJSONObject("feed_post");
+            JSONObject data = b.optJSONObject("data");
+            if (pd == null && data != null) {
+                pd = data.optJSONObject("post_info");
+                if (pd == null) pd = data.optJSONObject("post");
+                if (pd == null) pd = data.optJSONObject("feed_post");
+                if (pd == null) pd = data;
+            }
+            if (pd == null) pd = b;
+            // 生のキーを記録(公式が音声をどのキーで返すか特定するため)
+            dbgLog(nowStr() + "  [POST-EMPTY] 詳細キー id=" + id + " keys=" + topKeys(pd));
+            String t = firstStr(pd, "description", "comment", "text", "message", "body");
+            String rawVoice = firstNonEmpty(
+                    pd.optString("voice_file_path", ""), pd.optString("voice_url", ""),
+                    pd.optString("sound_file_path", ""), pd.optString("sound_file_url", ""),
+                    pd.optString("audio_file_path", ""), pd.optString("audio_url", ""),
+                    pd.optString("recording_file_path", ""), pd.optString("record_file_path", ""),
+                    pd.optString("file_path", ""), pd.optString("voice", ""), pd.optString("sound", ""), pd.optString("audio", ""));
+            String v = voiceUrl(rawVoice);
+            String im = iconUrl(pd.optString("image_file_path", pd.optString("image", "")));
+            if (t.length() > 0) out.put("text", t);
+            if (v.length() > 0) { out.put("voice_url", v); out.put("has_voice", true); }
+            if (im.length() > 0) out.put("image_url", im);
+            if (pd.has("play_time") && !pd.isNull("play_time")) out.put("play_time", pd.opt("play_time"));
+            dbgLog(nowStr() + "  [POST-EMPTY] 詳細から補完 id=" + id + " voice=" + (v.length() > 0) + " text=" + (t.length() > 0) + (rawVoice.length() > 0 ? " rawVoice=" + truncate(redactLog(rawVoice), 80) : ""));
+        } catch (Throwable ig) {
+        }
     }
 
     private JSONArray normalizePosts(JSONArray jSONArray) throws Exception {
@@ -4482,7 +5403,14 @@ public class KoeSession {
                 long optLong = optJSONObject.optLong("user_id");
                 if (isBanned(optLong)) continue; // 共有BANリストの相手は自動非表示
                 String[] strArr = this.nameCache.get(Long.valueOf(optLong));
-                String optString = optJSONObject.optString("comment", optJSONObject.optString("description", ""));
+                // 本文は基本 description。空文字のキーが入っていても firstNonEmpty で別名まで見て拾う。
+                String optString = firstNonEmpty(
+                        optJSONObject.optString("description", ""),
+                        optJSONObject.optString("comment", ""),
+                        optJSONObject.optString("text", ""),
+                        optJSONObject.optString("body", ""),
+                        optJSONObject.optString("message", ""),
+                        optJSONObject.optString("content", ""));
                 JSONObject jSONObject = new JSONObject();
                 jSONObject.put("id", optJSONObject.opt("id"));
                 jSONObject.put("user_id", optLong);
@@ -4506,6 +5434,26 @@ public class KoeSession {
                 // is_talk: 通話募集(=「話そう」=timeline_posts)は purpose を持つ。通常のタイムライン(=「つぶやく」=feed_posts)は持たない。
                 // 混在フィード(フォロー/友達/ブックマーク)用の自動判定。タブ側では取得元エンドポイントで上書きする。
                 jSONObject.put("is_talk", hasPurpose);
+                // 音声投稿の判定(一覧に音声パスが無くても play_time/play_count があれば音声投稿)
+                boolean voicey = (optJSONObject.has("play_time") && !optJSONObject.isNull("play_time"))
+                        || (optJSONObject.has("play_count") && !optJSONObject.isNull("play_count"));
+                if (voicey) jSONObject.put("has_voice", true);
+                // 本文も画像も音声も無い投稿は「見えない投稿」になる。原因を記録し、
+                // 音声投稿(play_timeあり・音声パス無し)は詳細を1回だけ取りに行って埋める(まれなケース・上限つき)。
+                String img0 = optJSONObject.optString("image_file_path", "");
+                String voi0 = optJSONObject.optString("voice_file_path", "");
+                if (optString.length() == 0 && img0.length() == 0 && voi0.length() == 0) {
+                    dbgLog(nowStr() + "  [POST-EMPTY] id=" + optJSONObject.opt("id")
+                            + " purpose=" + optJSONObject.opt("purpose") + " topic=" + optJSONObject.opt("topic")
+                            + " keys=" + topKeys(optJSONObject));
+                    // 調査結果: 詳細API(/api/feed_posts/{id})にも description/voice_file_path/image_file_path は
+                    // 存在しない(音声ファイルが消えた投稿)。公式アプリも空カードを出すだけなので、
+                    // 通話募集(purposeあり)以外はそもそも表示しない。
+                    if (!hasPurpose) {
+                        dbgLog(nowStr() + "  [POST-EMPTY] 非表示 id=" + optJSONObject.opt("id") + (voicey ? " (音声データなしの音声投稿)" : ""));
+                        continue;
+                    }
+                }
                 recordRegulatedWordIfNeeded(optJSONObject, optLong, optString);
                 jSONArray2.put(jSONObject);
             }
@@ -4518,13 +5466,13 @@ public class KoeSession {
     private JSONArray normalizeUserList(JSONObject jSONObject) {
         // 形が複数ある: トップレベル {"liked_users":[...]} / {"users":[...]}、{"data":{...}}、
         // さらに旧APIは {"data":"<JSON文字列>"} で来ることがある。すべて見る。
-        JSONArray jSONArray = firstArray(jSONObject, USER_LIST_KEYS);
+        JSONArray jSONArray = firstNonEmptyArray(jSONObject, USER_LIST_KEYS);
         if (jSONArray == null) {
             Object opt = jSONObject.opt("data");
             if (opt instanceof JSONArray) {
                 jSONArray = (JSONArray) opt;
             } else if (opt instanceof JSONObject) {
-                jSONArray = firstArray((JSONObject) opt, USER_LIST_KEYS);
+                jSONArray = firstNonEmptyArray((JSONObject) opt, USER_LIST_KEYS);
             } else if (opt instanceof String) {
                 // 旧API: data が JSON文字列。パースして配列/オブジェクトを探す。
                 try {
@@ -4567,6 +5515,17 @@ public class KoeSession {
                     if (ar.length() > 0) nu.put("area_name", ar);
                     String cm = u.optString("comment", "");
                     if (cm.length() > 0) nu.put("comment", cm.length() > 80 ? cm.substring(0, 80) : cm);
+                    // 一覧の右側に「フォロー中／リクエスト中／フォロー」を出すための関係情報。
+                    // 声とも側は2種類の関係を持つ:
+                    //   is_followee          … 実際にフォローが成立している
+                    //   is_friend_requestee  … こちらから申請したが未成立(=リクエスト中)
+                    boolean fo = u.optBoolean("is_followee", false) || u.optBoolean("isFollowee", false)
+                            || item.optBoolean("is_followee", false);
+                    boolean rq = u.optBoolean("is_friend_requestee", false) || u.optBoolean("isFriendRequestee", false)
+                            || item.optBoolean("is_friend_requestee", false);
+                    nu.put("is_following", fo || rq);
+                    nu.put("requested", rq && !fo);
+                    nu.put("is_followed", relFollowed(u) || relFollowed(item));
                     jSONArray2.put(nu);
                 } catch (Exception e) {
                 }
@@ -4628,6 +5587,27 @@ public class KoeSession {
 
     private static String nowStr() {
         return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
+    }
+
+
+    // koetomo は「フォロー」を友達申請として持っており、v2/v3 のユーザー情報には
+    // is_following / is_followed というキーは存在しない。実際に返るのは
+    //   is_friend_requestee : 自分が相手に申請した(=自分がフォローしている)
+    //   is_friend_requester : 相手が自分に申請した(=相手が自分をフォローしている)
+    //   is_followee / is_follower : 旧来のフォロー関係
+    // 実機ログで follow → is_friend_requestee=true、解除 → false を確認済み。
+    static boolean relFollowing(JSONObject u) {
+        if (u == null) return false;
+        return u.optBoolean("is_following", false) || u.optBoolean("isFollowing", false)
+                || u.optBoolean("is_friend_requestee", false) || u.optBoolean("isFriendRequestee", false)
+                || u.optBoolean("is_followee", false) || u.optBoolean("isFollowee", false);
+    }
+
+    static boolean relFollowed(JSONObject u) {
+        if (u == null) return false;
+        return u.optBoolean("is_followed", false) || u.optBoolean("isFollowed", false)
+                || u.optBoolean("is_friend_requester", false) || u.optBoolean("isFriendRequester", false)
+                || u.optBoolean("is_follower", false) || u.optBoolean("isFollower", false);
     }
 
     private String okResult(Resp resp) {
@@ -4961,8 +5941,8 @@ public class KoeSession {
             }
             if (z) {
                 jSONObject.put("header_url", iconUrl(optJSONObject.optString("header_image_file_path", optJSONObject.optString("headerImageFilePath", ""))));
-                jSONObject.put("is_following", optJSONObject.optBoolean("is_following", optJSONObject.optBoolean("isFollowing", false)));
-                jSONObject.put("is_followed", optJSONObject.optBoolean("is_followed", optJSONObject.optBoolean("isFollowed", false)));
+                jSONObject.put("is_following", relFollowing(optJSONObject));
+                jSONObject.put("is_followed", relFollowed(optJSONObject));
                 jSONObject.put("is_blocked", optJSONObject.optBoolean("is_blocked", optJSONObject.optBoolean("isBlocked", false)));
                 jSONObject.put("friend_count", optJSONObject.optInt("friend_count", optJSONObject.optInt("friendCount", 0)));
                 jSONObject.put("area_name", optJSONObject.optString("area_name", optJSONObject.optString("areaName", "")));
@@ -5130,7 +6110,9 @@ public class KoeSession {
     private String replyTimelinePost(String str, String str2) {
         HashMap hashMap = new HashMap();
         hashMap.put("text", str2);
-        return okResult(newTimelineApiForm("/api/feed_posts/" + str + "/comments", hashMap));
+        Resp r = newTimelineApiForm("/api/feed_posts/" + str + "/comments", hashMap);
+        dbgLog(nowStr() + "  [REPLY] post=" + str + " HTTP " + r.status + " vsns=" + r.vsns + " body=" + truncate(redactLog(r.body != null ? r.body.toString() : "(null)"), 300));
+        return okResult(r);
     }
 
     // クエリ作成の小ヘルパー（2つ目は値が空なら付けない）
@@ -5147,12 +6129,21 @@ public class KoeSession {
         }
         // 公式: POST /api/relation/user_report(全てクエリ)。referer_id は必須int(空だと弾かれる)なので 0 を送る。
         // community_id / community_talk_room_id は nullable のためユーザー通報では送らない。
+        // 公式 OkHttpSingleton.generateUserReportsRequest:
+        //   POST api/relation/user_report  フォーム: auth_token, version, target_id, diagnostics_info, content
+        //   referer_id は画面種別が特定できるときだけ付く(不明時は送らない)
         HashMap<String, String> q = new HashMap<String, String>();
         q.put("target_id", str);
         q.put("content", (str2 == null || str2.length() == 0) ? "通報" : str2);
-        q.put("referer_id", "0");
-        q.put("diagnostics_info", "");  // 公式も同名パラメータを必ず送る
-        Resp r = request("POST", "/api/relation/user_report", q, (Map<String, String>) null);
+        q.put("diagnostics_info", "");
+        // 公式 ReportScreen: -1=不明 0=Feed 1=Timeline 2=声とも 3=フォロー 7=相手プロフィール …
+        // 公式は必ず referer_id を送る。当方はプロフィールからの通報なので 7(PeopleProfile)。
+        q.put("referer_id", "7");
+        q.put("version", "android_" + APP_VERSION);
+        String atR = authToken();
+        if (atR != null) q.put("auth_token", atR);
+        // 公式 RelationApi.report は @Query（target_id / content / referer_id / diagnostics_info など）
+        Resp r = http("POST", BASE_URL + "/api/relation/user_report", q, (Map<String, String>) null);
         dbgLog(nowStr() + "  [REPORT] target=" + str + " HTTP " + r.status + (r.body != null ? " " + truncate(redactLog(r.body.toString()), 200) : ""));
         boolean ok = r.status >= 200 && r.status < 300;
         try {
@@ -5206,7 +6197,7 @@ public class KoeSession {
         }
         // ホスト学習のキーは ID 部分を正規化(/api/v3/users/123 → /api/v3/users/{n})。
         // ユーザーごとに毎回 旧サーバー(500)→api2 と無駄打ちしていたのを防ぐ
-        final String ck = str2 == null ? "" : str2.replaceAll("/\\d+", "/{n}");
+        final String ck = (str == null ? "" : str) + " " + (str2 == null ? "" : str2.replaceAll("/\\d+", "/{n}"));
         String str3 = this.hostCache.containsKey(ck) ? this.hostCache.get(ck) : BASE_URL;
         LinkedHashSet linkedHashSet = new LinkedHashSet();
         linkedHashSet.add(str3);
@@ -5236,14 +6227,43 @@ public class KoeSession {
         return resp;
     }
 
+    /** 名前が実際に入っているキャッシュだけを「解決済み」とみなす(空文字のエントリは未解決扱い) */
+    private boolean hasName(long uid) {
+        String[] e = this.nameCache.get(Long.valueOf(uid));
+        return e != null && e.length > 0 && e[0] != null && e[0].length() > 0;
+    }
+
+    /** レスポンス上位の user_info 配列(feed_posts / comments 等が同梱してくる)を名前キャッシュに吸収する */
+    private void absorbUserInfo(JSONObject body) {
+        if (body == null) return;
+        JSONArray arr = body.optJSONArray("user_info");
+        if (arr == null && body.optJSONObject("data") != null) arr = body.optJSONObject("data").optJSONArray("user_info");
+        if (arr == null) arr = body.optJSONArray("users");
+        if (arr == null) return;
+        boolean changed = false;
+        for (int i = 0; i < arr.length(); i++) {
+            JSONObject u = arr.optJSONObject(i);
+            if (u == null) continue;
+            long uid = u.optLong("user_id", u.optLong("id", 0));
+            String nm = firstNonEmpty(u.optString("name", ""), u.optString("nickname", ""), u.optString("user_name", ""));
+            if (uid == 0 || nm.length() == 0) continue;
+            String[] prev = this.nameCache.get(Long.valueOf(uid));
+            String icon = u.optString("profile_picture_file_path", "");
+            if (icon.length() == 0 && prev != null && prev.length > 1) icon = prev[1];
+            this.nameCache.put(Long.valueOf(uid), new String[]{nm, icon});
+            changed = true;
+        }
+        if (changed) saveNameCache();
+    }
+
     private void resolveNames(JSONArray jSONArray, String str) {
         JSONArray optJSONArray;
         ArrayList arrayList = new ArrayList();
         for (int i = 0; i < jSONArray.length(); i++) {
             JSONObject optJSONObject = jSONArray.optJSONObject(i);
-            if (optJSONObject != null) {
-                long optLong = optJSONObject.optLong(str);
-                if (optLong != 0 && !this.nameCache.containsKey(Long.valueOf(optLong)) && !arrayList.contains(Long.valueOf(optLong))) {
+            long optLong = optJSONObject != null ? optJSONObject.optLong(str) : jSONArray.optLong(i, 0); // 素の数値配列も許容
+            {
+                if (optLong != 0 && !hasName(optLong) && !arrayList.contains(Long.valueOf(optLong))) {
                     arrayList.add(Long.valueOf(optLong));
                 }
             }
@@ -5262,9 +6282,11 @@ public class KoeSession {
                 for (int i3 = 0; i3 < optJSONArray.length(); i3++) {
                     JSONObject optJSONObject2 = optJSONArray.optJSONObject(i3);
                     if (optJSONObject2 != null) {
-                        long optLong2 = optJSONObject2.optLong("user_id");
-                        if (optLong2 != 0) {
-                            this.nameCache.put(Long.valueOf(optLong2), new String[]{optJSONObject2.optString("name"), optJSONObject2.optString("profile_picture_file_path")});
+                        long optLong2 = optJSONObject2.optLong("user_id", optJSONObject2.optLong("id", 0));
+                        String nm2 = firstNonEmpty(optJSONObject2.optString("name", ""), optJSONObject2.optString("nickname", ""), optJSONObject2.optString("user_name", ""));
+                        // 名前が空のまま覚えると「user 1234567」表示が永久に固定されるので、空は覚えない(あとで個別に取り直す)
+                        if (optLong2 != 0 && nm2.length() > 0) {
+                            this.nameCache.put(Long.valueOf(optLong2), new String[]{nm2, optJSONObject2.optString("profile_picture_file_path", "")});
                             changed = true;
                         }
                     }
@@ -5273,6 +6295,114 @@ public class KoeSession {
                     saveNameCache();
                 }
             }
+            // まとめ取得(v2/users?ids=)は、退会・停止・非公開などの相手を黙って返さないことがある。
+            // 「user 4093414」のようなIDだけの表示になるので、取り残した分だけ個別に取り直す。
+            boolean extra = false;
+            int tried = 0;
+            for (int i4 = 0; i4 < arrayList.size() && tried < 5; i4++) {
+                Long id = (Long) arrayList.get(i4);
+                if (hasName(id.longValue())) continue;
+                tried++;
+                try {
+                    Resp one = request("GET", "/api/v3/users/" + id, q1("fields", "core"), (Map<String, String>) null);
+                    if (one.status != 200 || one.body == null) continue;
+                    JSONObject u = one.body.optJSONObject("user_info");
+                    if (u == null) {
+                        JSONArray ua = one.body.optJSONArray("user_info");
+                        if (ua != null && ua.length() > 0) u = ua.optJSONObject(0);
+                    }
+                    if (u == null) u = one.body;
+                    String nm = firstNonEmpty(u.optString("name", ""), u.optString("nickname", ""));
+                    if (nm.length() == 0) continue;
+                    this.nameCache.put(id, new String[]{nm, u.optString("profile_picture_file_path", "")});
+                    extra = true;
+                } catch (Exception ig) {
+                }
+            }
+            if (extra) saveNameCache();
+        }
+    }
+
+    // 公式 OkHttpSingleton.generateChatMessageDeleteRequest:
+    //   DELETE api.meetscom.com/api/chat/message?message_id=…&auth_token=…&version=android_…
+    private String deleteChatMessage(String messageId) {
+        return deleteChatMessage(messageId, "", "");
+    }
+
+    // 公式 generateChatMessageDeleteRequest は DELETE api/chat/message?message_id=… だが、
+    // それだけでは消えない端末/相手があったので、経路を順に試して「実際に消えたか」で判定する。
+    private String deleteChatMessage(String messageId, String chatId, String targetId) {
+        if (messageId == null || messageId.length() == 0) return jsonErr("メッセージが不明です");
+        HashMap<String, String> q = new HashMap<String, String>();
+        q.put("message_id", messageId);
+        q.put("version", "android_" + APP_VERSION);
+        if (chatId != null && chatId.length() > 0) q.put("chat_id", chatId);
+        if (targetId != null && targetId.length() > 0) q.put("target_id", targetId);
+        String at = authToken();
+        if (at != null) q.put("auth_token", at);
+
+        String[][] tries = new String[][]{
+            {"DELETE", BASE_URL + "/api/chat/message"},
+            {"DELETE", BASE_URL2 + "/api/chat/message"},
+            {"DELETE", BASE_URL + "/api/chat/messages/" + messageId},
+            {"DELETE", BASE_URL2 + "/api/chat/messages/" + messageId}
+        };
+        Resp last = new Resp(0, (JSONObject) null);
+        for (int i = 0; i < tries.length; i++) {
+            Resp r = http(tries[i][0], tries[i][1], q, (Map<String, String>) null);
+            last = r;
+            dbgLog(nowStr() + "  [MSG-DEL] " + tries[i][1] + " message=" + messageId + " -> " + r.status
+                    + (r.status >= 200 && r.status < 300 ? "" : " " + truncate(redactLog(r.body != null ? r.body.toString() : ""), 140)));
+            if (r.status >= 200 && r.status < 300) return okResultStatus(r);
+        }
+        try {
+            String raw = last.body != null ? truncate(redactLog(last.body.toString()), 200) : "";
+            return new JSONObject().put("ok", false).put("status", last.status)
+                    .put("message", "サーバーがメッセージの削除を受け付けませんでした" + (last.status > 0 ? " (HTTP " + last.status + ")" : ""))
+                    .put("raw", raw).toString();
+        } catch (Exception e) {
+            return errJson(e);
+        }
+    }
+
+    // 相互フォロー(=お互いにフォローしている人)の一覧。
+    // koetomo の friend_count は「友達申請が成立した人数」で相互フォローとは別物のため、
+    // 数と中身が食い違わないよう、ここで数えたものをそのまま使う。
+    private String getMutuals() {
+        try {
+            ensureRelationSets();
+            java.util.Set<Long> fe, fr;
+            synchronized (this) { fe = myFolloweeIds; fr = myFollowerIds; }
+            if (fe == null || fr == null) return new JSONObject().put("ok", false).put("error", "relation_unavailable").toString();
+            java.util.HashSet<Long> both = new java.util.HashSet<Long>(fe);
+            both.retainAll(fr);
+            JSONArray out = new JSONArray();
+            if (!both.isEmpty()) {
+                // 名前・アイコンは自分のフォロー一覧の応答から拾う(追加の往復を増やさない)
+                long me = userId();
+                java.util.HashSet<Long> seen = new java.util.HashSet<Long>();
+                for (int page = 1; page <= 5 && seen.size() < both.size(); page++) {
+                    Resp r = httpApi2("GET", "/api/v2/users/" + me + "/followees", q1("page", String.valueOf(page)), (Map<String, String>) null);
+                    if (r == null || r.status != 200 || r.body == null) break;
+                    JSONArray arr = normalizeUserList(r.body);
+                    if (arr == null || arr.length() == 0) break;
+                    for (int i = 0; i < arr.length(); i++) {
+                        JSONObject u = arr.optJSONObject(i);
+                        if (u == null) continue;
+                        Long id = Long.valueOf(u.optLong("user_id", 0));
+                        if (!both.contains(id) || !seen.add(id)) continue;
+                        u.put("is_following", true);
+                        u.put("is_followed", true);
+                        u.put("requested", false);
+                        out.put(u);
+                    }
+                    if (arr.length() < 20) break;
+                }
+            }
+            dbgLog(nowStr() + "  [MUTUAL] count=" + out.length());
+            return new JSONObject().put("ok", true).put("users", out).put("count", out.length()).toString();
+        } catch (Exception e) {
+            return errJson(e);
         }
     }
 
@@ -5379,7 +6509,8 @@ public class KoeSession {
     }
 
     private String getParticipatingCommunityTalkRooms() {
-        Resp resp = request("GET", "/api/communities/participating_talk_rooms", (Map<String, String>) null, (Map<String, String>) null);
+        // 公式 TalkRoomApi.getMyCommunityTalkRoomList は order / page を必ず送る
+        Resp resp = request("GET", "/api/communities/participating_talk_rooms", q2("page", "1", "order", "1"), (Map<String, String>) null);
         try {
             if (resp.status != 200 || resp.body == null) {
                 return gracefulUnavailable(resp, "talk_rooms", "communities participating_talk_rooms");
@@ -5578,9 +6709,18 @@ public class KoeSession {
         if (roomId == null || roomId.length() == 0) {
             return jsonErr("room_id不明");
         }
-        HashMap<String, String> fields = new HashMap<String, String>();
-        fields.put("comment_enabled", enabled ? "true" : "false");
-        return okResult(request("PUT", "/api/communities/" + communityId + "/talk_rooms/" + roomId + "/switch_comment_enabled", fields, (Map<String, String>) null));
+        // 公式 TalkRoomApi.setCommentEnabledForCommunity は @Body JSON {"comment_enabled":true/false}
+        // (枠側の /api/rooms/{id}/switch_comment_enabled はクエリで、コミュニティ側だけ本文JSON)
+        try {
+            JSONObject body = new JSONObject().put("comment_enabled", enabled);
+            Resp rr = httpJson("PUT", BASE_URL + "/api/communities/" + communityId + "/talk_rooms/" + roomId + "/switch_comment_enabled", body);
+            if (rr.status == 404 || rr.status >= 500) {
+                rr = httpJson("PUT", BASE_URL2 + "/api/communities/" + communityId + "/talk_rooms/" + roomId + "/switch_comment_enabled", body);
+            }
+            return okResult(rr);
+        } catch (Exception e) {
+            return errJson(e);
+        }
     }
 
     private String getCommunityTalkRoomComments(String communityId, String roomId) {
@@ -5610,7 +6750,7 @@ public class KoeSession {
             for (int i = 0; i < comments.length(); i++) {
                 JSONObject c = comments.optJSONObject(i);
                 if (c != null) {
-                    ids.put(commentUid(c));
+                    ids.put(new JSONObject().put("user_id", commentUid(c))); // resolveNames は {user_id} オブジェクト配列を要求
                 }
             }
             resolveNames(ids, "user_id");
@@ -5749,8 +6889,10 @@ public class KoeSession {
         JSONArray jSONArray = null;
         try {
             HashMap hashMap = new HashMap();
+            // 公式 generateSearchUserRequest はクエリ名が "name"。"user_name" では絞り込まれない。
             if (str != null && str.length() > 0) {
-                hashMap.put("user_name", str);
+                hashMap.put("name", str);
+                hashMap.put("consistency", "true");
             }
             if (str2 == null || str2.length() == 0) {
                 str2 = "1";
@@ -6294,32 +7436,107 @@ public class KoeSession {
         return okResult(request("POST", "/api/check_email_token", (Map<String, String>) null, fields));
     }
 
+    // 公式アプリの実装(ChatType1Api / BulkDeleteRequest の注釈から確定):
+    //   POST /api/chat/chats_bulk_delete   ※api.meetscom.com(TYPE_1)
+    //   Content-Type: application/json
+    //   {"chat_ids":[…], "uid":<自分>, "auth_token":"…", "version":"android_3.9.101"}
+    // フォーム送信では 200 が返るのに1件も消えなかったのは、本文がJSONでないと
+    // サーバーが chat_ids を読めていなかったため。
     private String bulkDeleteChats(String chatIdsCsv) {
         if (chatIdsCsv == null || chatIdsCsv.length() == 0) {
             return jsonErr("chat_ids不明");
         }
-        HashMap<String, String> fields = new HashMap<String, String>();
+        JSONArray idArr = new JSONArray();
         String[] ids = chatIdsCsv.split(",");
-        int idx = 0;
         for (int i = 0; i < ids.length; i++) {
             String id = ids[i].trim();
-            if (id.length() > 0) {
-                // 一意なインデックス付きキーにしないと、Map<String,String>では同一キー"chat_ids[]"が上書きされ最後の1件しか送られない
-                fields.put("chat_ids[" + idx + "]", id);
-                idx++;
-            }
+            if (id.length() == 0) continue;
+            try { idArr.put(Long.parseLong(id)); } catch (Exception e) { idArr.put(id); }
         }
-        if (idx == 0) {
+        if (idArr.length() == 0) {
             return jsonErr("有効なchat_idがありません");
         }
-        return okResult(request("DELETE", "/api/chat/chats_bulk_delete", (Map<String, String>) null, fields));
+        java.util.List<String> before = chatIdList();
+        Resp r;
+        try {
+            JSONObject body = new JSONObject();
+            body.put("chat_ids", idArr);
+            body.put("uid", userId());
+            String at = authToken();
+            body.put("auth_token", at == null ? "" : at);
+            body.put("version", "android_" + APP_VERSION);
+            r = httpJson("POST", BASE_URL + "/api/chat/chats_bulk_delete", body);
+            dbgLog(nowStr() + "  [CHAT-DEL] POST(JSON) /api/chat/chats_bulk_delete ids=" + idArr.length() + " -> " + r.status
+                    + (r.status >= 200 && r.status < 300 ? "" : " " + truncate(redactLog(r.body != null ? r.body.toString() : ""), 140)));
+            if (r.status < 200 || r.status >= 300) {
+                r = httpJson("POST", BASE_URL2 + "/api/chat/chats_bulk_delete", body);
+                dbgLog(nowStr() + "  [CHAT-DEL] api2 -> " + r.status);
+            }
+        } catch (Exception e) {
+            return errJson(e);
+        }
+        java.util.List<String> after = chatIdList();
+        int gone = 0;
+        for (int i = 0; i < ids.length; i++) {
+            String id = ids[i].trim();
+            if (id.length() == 0) continue;
+            if (before.contains(id) && !after.contains(id)) gone++;
+        }
+        dbgLog(nowStr() + "  [CHAT-DEL] 消えた件数=" + gone + " / 指定=" + idArr.length());
+        try {
+            if (gone > 0) return new JSONObject().put("ok", true).put("deleted", gone).toString();
+            return new JSONObject().put("ok", false).put("status", r.status)
+                    .put("message", "サーバーが会話の削除を受け付けませんでした" + (r.status > 0 ? " (HTTP " + r.status + ")" : "")).toString();
+        } catch (Exception e) {
+            return errJson(e);
+        }
+    }
+    /** いまの会話一覧の chat_id を並べて返す(削除が効いたかの確認用)。 */
+    private java.util.List<String> chatIdList() {
+        java.util.ArrayList<String> out = new java.util.ArrayList<String>();
+        try {
+            HashMap<String, String> q = new HashMap<String, String>();
+            q.put("uid", String.valueOf(userId()));
+            q.put("offset", "0");
+            q.put("count", "20");
+            Resp r = request("GET", "/api/chats", q, (Map<String, String>) null);
+            if (r.status != 200 || r.body == null) return out;
+            JSONObject d = r.body.optJSONObject("data");
+            JSONArray arr = (d != null) ? d.optJSONArray("chats") : r.body.optJSONArray("chats");
+            if (arr == null) return out;
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject c = arr.optJSONObject(i);
+                if (c != null && c.opt("id") != null) out.add(String.valueOf(c.opt("id")));
+            }
+        } catch (Exception e) {
+        }
+        return out;
     }
 
     private String checkRecordingDisabledUsers(String userIdsCsv) {
         if (userIdsCsv == null || userIdsCsv.length() == 0) {
             return jsonErr("user_ids不明");
         }
-        return okResult(request("GET", "/api/recording_disabled_users/check", q1("user_ids", userIdsCsv), (Map<String, String>) null));
+        // 公式 TalkRecordingApi.getRecordingDisabledUsers:
+        //   POST /api/recording_disabled_users/check  JSON {"user_ids":[…]}
+        //   (kotlinx serialization + snake_case 命名。GET+CSVは当方の推測だった)
+        try {
+            JSONArray ids = new JSONArray();
+            String[] parts = userIdsCsv.split(",");
+            for (int i = 0; i < parts.length; i++) {
+                String v = parts[i].trim();
+                if (v.length() == 0) continue;
+                try { ids.put(Long.parseLong(v)); } catch (Exception ex) { ids.put(v); }
+            }
+            JSONObject body = new JSONObject().put("user_ids", ids);
+            Resp rr = httpJson("POST", BASE_URL + "/api/recording_disabled_users/check", body);
+            if (rr.status == 404 || rr.status >= 500) {
+                rr = httpJson("POST", BASE_URL2 + "/api/recording_disabled_users/check", body);
+            }
+            return okResult(rr);
+        } catch (Exception e) {
+            return errJson(e);
+        }
     }
 
     private String getTalkRecordingAgreements() {
@@ -6334,12 +7551,24 @@ public class KoeSession {
         }
     }
 
+    // 公式 TalkRecordingApi.talkRecordingAgreements:
+    //   POST /api/talk_recording_agreements
+    //   JSON {"terms_agreed":true,"agreement_text":"…","promotional_banner_image":null}
+    // room_id をフォームで送るのは当方の推測だった。
     private String agreeTalkRecording(String roomId) {
-        HashMap<String, String> fields = new HashMap<String, String>();
-        if (roomId != null && roomId.length() > 0) {
-            fields.put("room_id", roomId);
+        try {
+            JSONObject body = new JSONObject();
+            body.put("terms_agreed", true);
+            body.put("agreement_text", "");
+            body.put("promotional_banner_image", JSONObject.NULL);
+            Resp rr = httpJson("POST", BASE_URL + "/api/talk_recording_agreements", body);
+            if (rr.status == 404 || rr.status >= 500) {
+                rr = httpJson("POST", BASE_URL2 + "/api/talk_recording_agreements", body);
+            }
+            return okResult(rr);
+        } catch (Exception e) {
+            return errJson(e);
         }
-        return okResult(request("POST", "/api/talk_recording_agreements", (Map<String, String>) null, fields));
     }
 
     private String getTrialListenings() {
@@ -6450,10 +7679,25 @@ public class KoeSession {
             if (data == null) {
                 data = resp.body;
             }
+            // 公式 RequestChecksResponse:
+            //   data { token, call_method, is_blocking, requester_info { id, name, comment, age, ... } }
+            // 「channel」「target_id」は公式には無い名前だったので、token / requester_info を先に読む。
+            JSONObject req = data.optJSONObject("requester_info");
+            if (req == null) req = data.optJSONObject("requesterInfo");
+            String token = firstStr(data, "token", "channel", "skyway_channel", "channel_name");
+            String tid = (req != null) ? firstStr(req, "id", "user_id") : "";
+            if (tid == null || tid.length() == 0) tid = firstStr(data, "target_id", "receiver_id", "id");
             JSONObject out = new JSONObject();
             out.put("ok", true);
-            out.put("channel", firstStr(data, "channel", "skyway_channel", "channel_name"));
-            out.put("target_id", firstStr(data, "target_id", "receiver_id", "id"));
+            out.put("token", token);
+            out.put("channel", token);
+            out.put("target_id", tid);
+            out.put("call_method", firstStr(data, "call_method", "callMethod"));
+            out.put("is_blocking", data.optBoolean("is_blocking", data.optBoolean("isBlocking", false)));
+            if (req != null) {
+                out.put("requester_name", firstStr(req, "name"));
+                out.put("requester_icon", firstStr(req, "profile_picture_file_path", "profilePictureFilePath"));
+            }
             out.put("status", data.optString("status", ""));
             return out.toString();
         } catch (Exception e) {
@@ -6727,7 +7971,11 @@ public class KoeSession {
     }
 
     private String getSystemParams() {
-        Resp resp = request("GET", "/api/master/system_params", (Map<String, String>) null, (Map<String, String>) null);
+        // 公式 generateSystemParamsRequest は POST(フォーム、キーなし)
+        Resp resp = request("POST", "/api/master/system_params", (Map<String, String>) null, new HashMap<String, String>());
+        if (resp.status == 404 || resp.status == 405) {
+            resp = request("GET", "/api/master/system_params", (Map<String, String>) null, (Map<String, String>) null);
+        }
         try {
             if (resp.status != 200 || resp.body == null) {
                 return jsonStatus(resp);
@@ -6742,7 +7990,8 @@ public class KoeSession {
         if (communityId == null || communityId.length() == 0) {
             return jsonErr("community_id不明");
         }
-        Resp resp = request("GET", "/api/communities/" + communityId + "/join-requests", (Map<String, String>) null, (Map<String, String>) null);
+        // 公式 CommunityApi.getJoinRequests は page を送る
+        Resp resp = request("GET", "/api/communities/" + communityId + "/join-requests", q1("page", "1"), (Map<String, String>) null);
         try {
             if (resp.status != 200 || resp.body == null) {
                 return jsonStatus(resp);
@@ -6809,7 +8058,19 @@ public class KoeSession {
         if (reason != null && reason.length() > 0) {
             fields.put("reason", reason);
         }
-        return okResult(request("POST", "/api/communities/" + communityId + "/report", (Map<String, String>) null, fields));
+        // 公式 CommunityApi.report は @Body JSON {"description":…, "referer_id":…}
+        try {
+            JSONObject rb = new JSONObject();
+            rb.put("description", fields.containsKey("reason") ? fields.get("reason") : "");
+            rb.put("referer_id", 0);
+            Resp rr = httpJson("POST", BASE_URL + "/api/communities/" + communityId + "/report", rb);
+            if (rr.status == 404 || rr.status >= 500) {
+                rr = httpJson("POST", BASE_URL2 + "/api/communities/" + communityId + "/report", rb);
+            }
+            return okResult(rr);
+        } catch (Exception e) {
+            return errJson(e);
+        }
     }
 
     private String toggleCommunityCommentLike(String communityId, String postId, String commentId, boolean unlike) {
@@ -6827,9 +8088,21 @@ public class KoeSession {
     }
 
     private String setDisplayBadge(String badgeId) {
-        HashMap<String, String> fields = new HashMap<String, String>();
-        fields.put("badge_id", badgeId == null ? "" : badgeId);
-        return okResult(request("PUT", "/api/users/" + userId() + "/display-badge", (Map<String, String>) null, fields));
+        // 公式 BadgeApi.setDisplayBadge は @Body JSON {"badge_id":…}
+        // (バッジを外すときは DELETE /api/users/{id}/display-badge)
+        try {
+            String path = "/api/users/" + userId() + "/display-badge";
+            if (badgeId == null || badgeId.length() == 0) {
+                return okResult(request("DELETE", path, (Map<String, String>) null, (Map<String, String>) null));
+            }
+            JSONObject bb = new JSONObject();
+            try { bb.put("badge_id", Long.parseLong(badgeId)); } catch (Exception ex) { bb.put("badge_id", badgeId); }
+            Resp rr = httpJson("PUT", BASE_URL + path, bb);
+            if (rr.status == 404 || rr.status >= 500) rr = httpJson("PUT", BASE_URL2 + path, bb);
+            return okResult(rr);
+        } catch (Exception e) {
+            return errJson(e);
+        }
     }
 
     private String markUserCampaignAsRead(String campaignId) {
@@ -6925,13 +8198,41 @@ public class KoeSession {
         if (status != null && status.length() > 0) {
             fields.put("status", status);
         }
-        return okResult(httpApi2("PUT", "/api/cheering_talk/receiver_users/" + receiverId + "/update_status", (Map<String, String>) null, fields));
+        // 公式 CheeringTalkApi.updateStatus は @Body JSON (ProfileEditRequest, snake_case)
+        try {
+            JSONObject sb = new JSONObject().put("status", status == null ? "" : status);
+            return okResult(httpJsonApi2("PUT", "/api/cheering_talk/receiver_users/" + receiverId + "/update_status", sb));
+        } catch (Exception e) {
+            return errJson(e);
+        }
     }
 
+    // 公式には「受けたリクエストの一覧」APIは無く、着信の確認は GET /api/cheering_talk/request_checks。
     private String getCheeringRequestReceives() {
-        Resp resp = httpApi2("GET", "/api/cheering_talk/request_receives", (Map<String, String>) null, (Map<String, String>) null);
-        dbgLog(nowStr() + "  [CHEER] request_receives HTTP " + resp.status + " " + truncate(redactLog(resp.body != null ? resp.body.toString() : "(null)"), 400));
+        Resp resp = httpApi2("GET", "/api/cheering_talk/request_checks", (Map<String, String>) null, (Map<String, String>) null);
+        dbgLog(nowStr() + "  [CHEER] request_checks HTTP " + resp.status + " " + truncate(redactLog(resp.body != null ? resp.body.toString() : "(null)"), 400));
         return cheeringDataResult(resp, "requests");
+    }
+
+    /**
+     * 応援通話の着信に answer を返す。
+     * 公式 CallApi.answer: POST api2 /api/cheering_talk/request_receives
+     *   JSON {"token":"…","answer":<数値>}   answer: 1=受ける / 0=断る
+     */
+    private String answerCheeringCall(String token, String answer) {
+        if (token == null || token.length() == 0) {
+            return jsonErr("token不明");
+        }
+        try {
+            int a = 1;
+            try { a = Integer.parseInt(answer); } catch (Exception ex) { a = "0".equals(answer) ? 0 : 1; }
+            JSONObject body = new JSONObject().put("token", token).put("answer", a);
+            Resp resp = httpJsonApi2("POST", "/api/cheering_talk/request_receives", body);
+            dbgLog(nowStr() + "  [CHEER] answer(" + a + ") HTTP " + resp.status + " " + truncate(redactLog(resp.body != null ? resp.body.toString() : "(null)"), 300));
+            return okResult(resp);
+        } catch (Exception e) {
+            return errJson(e);
+        }
     }
 
     private String getCheeringSentCoins(String page) {
@@ -7009,10 +8310,16 @@ public class KoeSession {
         return okList(request("GET", "/api/recording_entries", q1("page", page == null || page.length() == 0 ? "1" : page), (Map<String, String>) null), "recordings", "recording_entries", "recordings");
     }
     private String getDailyPointHistories(String page) {
-        return okList(request("GET", "/api/v2/daily_point_histories", q1("page", page == null || page.length() == 0 ? "1" : page), (Map<String, String>) null), "histories", "daily_point_histories", "histories", "point_histories");
+        // 公式 generateGetDailyPointHistoryRequest は page / user_id / order の3つを送る
+        HashMap<String, String> dq = new HashMap<String, String>();
+        dq.put("page", page == null || page.length() == 0 ? "1" : page);
+        dq.put("user_id", String.valueOf(userId()));
+        dq.put("order", "desc");
+        return okList(request("GET", "/api/v2/daily_point_histories", dq, (Map<String, String>) null), "histories", "daily_point_histories", "histories", "point_histories");
     }
     private String getItemHistories(String page) {
-        return okList(request("GET", "/api/item_histories", q1("page", page == null || page.length() == 0 ? "1" : page), (Map<String, String>) null), "items", "item_histories", "items");
+        // 公式 generateGetGiftHistoryRequest は絞り込みが無いとき type_ids=1,2 を送る
+        return okList(request("GET", "/api/item_histories", q2("page", page == null || page.length() == 0 ? "1" : page, "type_ids", "1,2"), (Map<String, String>) null), "items", "item_histories", "items");
     }
     private String getCoinPacks() {
         Resp resp = request("GET", "/api/v2/coin_packs", (Map<String, String>) null, (Map<String, String>) null);
@@ -7524,9 +8831,14 @@ public class KoeSession {
     }
     // トークルーム(コミュニティ)
     private String postTalkRoomComment(String communityId, String roomId, String comment) {
-        HashMap<String, String> f = new HashMap<String, String>();
-        f.put("comment", comment == null ? "" : comment);
-        return okResult(httpApi2("POST", "/api/communities/" + communityId + "/talk_rooms/" + roomId + "/comments", (Map<String, String>) null, f));
+        // 公式 TalkRoomApi.commentForCommunity は @Body JSON {"description":…}
+        try {
+            JSONObject cb = new JSONObject().put("description", comment == null ? "" : comment);
+            Resp rr = httpJsonApi2("POST", "/api/communities/" + communityId + "/talk_rooms/" + roomId + "/comments", cb);
+            return okResult(rr);
+        } catch (Exception e) {
+            return errJson(e);
+        }
     }
     private String switchTalkRoomComment(String communityId, String roomId, boolean enabled) {
         JSONObject body = new JSONObject();
@@ -7539,7 +8851,10 @@ public class KoeSession {
     }
     // 以下は旧API/用途不明のため best-effort（クエリ認証）。ダメなら診断ログで詰める。
     private String getDiveTargetFriends() {
-        return okList(request("GET", "/api/v2/dive/target_friends", (Map<String, String>) null, (Map<String, String>) null), "friends", "target_friends", "friends", "users");
+        // 公式 generateTargetFriendsListRequest: POST api/v2/dive/target_friends (フォーム include_blocked_user)
+        HashMap<String, String> tff = new HashMap<String, String>();
+        tff.put("include_blocked_user", "false");
+        return okList(request("POST", "/api/v2/dive/target_friends", (Map<String, String>) null, tff), "friends", "target_friends", "friends", "users");
     }
     private String getBadgeUsers() {
         return okList(request("GET", "/api/badge_users", (Map<String, String>) null, (Map<String, String>) null), "users", "badge_users", "users");
@@ -7614,7 +8929,8 @@ public class KoeSession {
         if (campaignId == null || campaignId.length() == 0) {
             return jsonErr("campaign_id不明");
         }
-        return okResult(request("POST", "/api/campaigns/" + campaignId + "/user_campaign", (Map<String, String>) null, new HashMap()));
+        // 公式 CampaignApi.getUserCampaign は GET。POSTでは受け付けられない。
+        return okResult(request("GET", "/api/campaigns/" + campaignId + "/user_campaign", (Map<String, String>) null, (Map<String, String>) null));
     }
 
     private String recoverUserCampaign(String campaignId) {
@@ -7884,7 +9200,8 @@ public class KoeSession {
     }
 
     private String getDecorationItems() {
-        Resp resp = request("GET", "/api/decoration_items", (Map<String, String>) null, (Map<String, String>) null);
+        // 公式 DecorationApi.getDecorationItems は on_sale を必ず送る
+        Resp resp = request("GET", "/api/decoration_items", q1("on_sale", "true"), (Map<String, String>) null);
         try {
             if (resp.status != 200 || resp.body == null) {
                 return jsonStatus(resp);
@@ -7904,9 +9221,9 @@ public class KoeSession {
         if (itemId == null || itemId.length() == 0) {
             return jsonErr("item_id不明");
         }
-        HashMap<String, String> fields = new HashMap<String, String>();
-        fields.put("decoration_item_id", itemId);
-        return okResult(request("POST", "/api/decoration_items/purchase", (Map<String, String>) null, fields));
+        // 公式 DecorationApi.purchaseDecorationItems は @Query("item_pack_id")。
+        // フォームで送っていたためサーバー側で品物が読めていなかった。
+        return okResult(request("POST", "/api/decoration_items/purchase", q1("item_pack_id", itemId), (Map<String, String>) null));
     }
 
     private String getVoiceProfiles() {
@@ -7930,7 +9247,10 @@ public class KoeSession {
     }
 
     private String getSubscriptionHistories() {
-        Resp resp = request("GET", "/api/subscription_histories", (Map<String, String>) null, (Map<String, String>) null);
+        // 公式 SubscriptionApi.getSubscriptionHistories は order / page / type_ids を送る
+        HashMap<String, String> shq = new HashMap<String, String>();
+        shq.put("page", "1"); shq.put("order", "desc"); shq.put("type_ids", "1,2");
+        Resp resp = request("GET", "/api/subscription_histories", shq, (Map<String, String>) null);
         try {
             if (resp.status != 200 || resp.body == null) {
                 return jsonStatus(resp);
@@ -7987,16 +9307,16 @@ public class KoeSession {
         if (points == null || points.length() == 0) {
             return jsonErr("points不明");
         }
-        return okResult(request("GET", "/api/estimate_point_exchange", q1("points", points), (Map<String, String>) null));
+        // 公式 CurrencyExchangeApi.estimatePointExchange も @Query("amount")
+        return okResult(request("GET", "/api/estimate_point_exchange", q1("amount", points), (Map<String, String>) null));
     }
 
     private String executePointExchange(String points) {
         if (points == null || points.length() == 0) {
             return jsonErr("points不明");
         }
-        HashMap<String, String> fields = new HashMap<String, String>();
-        fields.put("points", points);
-        return okResult(request("POST", "/api/point_exchange", (Map<String, String>) null, fields));
+        // 公式 CurrencyExchangeApi.pointExchange は @Query("amount")
+        return okResult(request("POST", "/api/point_exchange", q1("amount", points), (Map<String, String>) null));
     }
 
     private String getRoomSettings() {
@@ -8160,7 +9480,7 @@ public class KoeSession {
     private String unblockUser(String str) {
         HashMap hashMap = new HashMap();
         hashMap.put("target_id", str);
-        hashMap.put("version", APP_VERSION);
+        hashMap.put("version", "android_" + APP_VERSION);
         String authToken = authToken();
         if (authToken != null) {
             hashMap.put("auth_token", authToken);
@@ -8168,15 +9488,74 @@ public class KoeSession {
         return okResult(request("POST", "/api/relation/block/deletes", (Map<String, String>) null, hashMap));
     }
 
-    private String unfollowUser(String str) {
-        HashMap hashMap = new HashMap();
-        hashMap.put("target_id", str);
-        hashMap.put("version", "android_3.9.101");
-        String authToken = authToken();
-        if (authToken != null) {
-            hashMap.put("auth_token", authToken);
+    /** 相手をいま自分がフォローしているか、サーバーに聞き直す(解除の実効を確かめるため)。 */
+    private boolean stillFollowing(String targetId) {
+        try {
+            Resp r = request("GET", "/api/v3/users/" + targetId, q1("fields", "follow"), (Map<String, String>) null);
+            if (r.status != 200 || r.body == null) return true; // 分からないときは「まだ」とみなして次を試す
+            JSONObject u = r.body.optJSONObject("user_info");
+            if (u == null) {
+                JSONArray a = r.body.optJSONArray("user_info");
+                if (a != null && a.length() > 0) u = a.optJSONObject(0);
+            }
+            if (u == null) u = r.body;
+            return relFollowing(u);
+        } catch (Exception e) {
+            return true;
         }
-        return okResult(http("DELETE", "https://api.meetscom.com/api/relation/new_follow/following", hashMap, (Map<String, String>) null));
+    }
+
+    // koetomo にはフォロー解除にあたるエンドポイントが複数あり、関係の種類で効くものが違う。
+    //   DELETE /api/relation/follows    … 自分が出した申請の取り消し(is_friend_requestee 系)
+    //   DELETE /api/relation/followers  … 旧来のフォロー関係(is_followee 系)
+    //   POST   /api/relation/unfollow   … 公式アプリのコードにはあるがサーバーには無い(404)
+    // どれも 200 を返しうるのに関係が消えていないことがあるため、
+    // 1つ試すたびにサーバーへ状態を確認し、実際に外れるまで次を試す。
+    private String unfollowUser(String str) {
+        // 公式 OkHttpSingleton.generateFollowCancellationRequest:
+        //   DELETE api/followings/{user_id}   ← タイムラインのフォロー(is_followee)を外す本命
+        // (対になる フォロー は POST api/followings + target_id)
+        // 公式には2系統ある: generateFollowCancellationRequest(DELETE api/followings/{id}) と
+        // TimelineApiServer1.unFollow(DELETE api/relation/new_follow/following?target_id=…)。
+        // /api/relation/follows は「友達申請の取り消し」で別物なので後ろに置く。
+        // /api/relation/follows は「自分が出した友達申請の取り消し」、
+        // /api/relation/followers は「来ている友達申請を断る」で、どちらもフォロー解除ではない。
+        // 巻き添えで友達関係を壊すので、フォロー解除の経路からは外す。
+        String[] attempts = new String[]{"DELETE /api/followings/" + str, "DELETE /api/relation/new_follow/following"};
+        HashMap<String, String> q = new HashMap<String, String>();
+        q.put("target_id", str);
+        q.put("version", "android_" + APP_VERSION);
+        String at = authToken();
+        if (at != null) q.put("auth_token", at);
+        Resp last = new Resp(0, (JSONObject) null);
+        for (int i = 0; i < attempts.length; i++) {
+            int sp = attempts[i].indexOf(' ');
+            String method = attempts[i].substring(0, sp);
+            String path = attempts[i].substring(sp + 1);
+            Resp r;
+            if ("POST".equals(method)) {
+                r = http("POST", BASE_URL + path, (Map<String, String>) null, q);
+            } else {
+                r = http(method, BASE_URL + path, q, (Map<String, String>) null);
+            }
+            last = r;
+            dbgLog(nowStr() + "  [UNFOLLOW] " + method + " " + path + " target=" + str + " -> " + r.status
+                    + (r.status >= 200 && r.status < 300 ? "" : " " + truncate(redactLog(r.body != null ? r.body.toString() : ""), 160)));
+            if (r.status < 200 || r.status >= 300) continue;
+            clearRelationSets();
+            if (!stillFollowing(str)) {
+                dbgLog(nowStr() + "  [UNFOLLOW] 解除を確認しました (" + path + ")");
+                return okResultStatus(r);
+            }
+            dbgLog(nowStr() + "  [UNFOLLOW] " + path + " は200だが関係が残っているため次を試します");
+        }
+        try {
+            return new JSONObject().put("ok", false).put("status", last.status)
+                    .put("error", "unfollow_not_applied")
+                    .put("message", "サーバー側でフォロー解除が反映されませんでした").toString();
+        } catch (Exception e) {
+            return errJson(e);
+        }
     }
 
     private String updateProfile(String str, String str2, String str3) {
@@ -9062,7 +10441,7 @@ public class KoeSession {
                     return createPostWithImage("/api/feed_posts", jSONArray.optString(0), "0", jSONArray.optString(2));
                 }
                 if (str.equals("create_timeline_post_with_voice")) {
-                    return createPostWithVoice("/api/feed_posts", jSONArray.optString(0), jSONArray.optString(1), jSONArray.optString(2), jSONArray.optString(3), "0");
+                    return createPostWithVoice("/api/feed_posts", jSONArray.optString(0), jSONArray.optString(1), jSONArray.optString(2), jSONArray.optString(3), "0", jSONArray.optString(4, "0"));
                 }
                 if (str.equals("create_feed_post")) {
                     return createPost("/api/timeline_posts", jSONArray.optString(0), "0");
@@ -9071,7 +10450,7 @@ public class KoeSession {
                     return createPostWithImage("/api/timeline_posts", jSONArray.optString(0), "0", jSONArray.optString(2));
                 }
                 if (str.equals("create_feed_post_with_voice")) {
-                    return createPostWithVoice("/api/timeline_posts", jSONArray.optString(0), jSONArray.optString(1), jSONArray.optString(2), jSONArray.optString(3), "0");
+                    return createPostWithVoice("/api/timeline_posts", jSONArray.optString(0), jSONArray.optString(1), jSONArray.optString(2), jSONArray.optString(3), "0", jSONArray.optString(4, "0"));
                 }
                 if (str.equals("upload_account_image")) {
                     return uploadAccountImage(jSONArray.optString(0), jSONArray.optString(1, "profile"));
@@ -9099,6 +10478,63 @@ public class KoeSession {
                 }
                 if (str.equals("post_record_comment")) {
                     return postRecordComment(jSONArray.optString(0), jSONArray.optString(1));
+                }
+                if (str.equals("send_friend_request")) {
+                    return sendFriendRequest(jSONArray.optString(0));
+                }
+                if (str.equals("cancel_friend_request")) {
+                    return cancelFriendRequest(jSONArray.optString(0));
+                }
+                if (str.equals("deny_friend_request")) {
+                    return denyFriendRequest(jSONArray.optString(0));
+                }
+                if (str.equals("remove_friend")) {
+                    return removeFriend(jSONArray.optString(0));
+                }
+                if (str.equals("get_friend_requests_in")) {
+                    return getFriendRequestsIn();
+                }
+                if (str.equals("get_friend_requests_out")) {
+                    return getFriendRequestsOut();
+                }
+                if (str.equals("skyway_connect_log")) {
+                    return skywayConnectLog(jSONArray.optString(0), jSONArray.optString(1, "0"), jSONArray.optString(2, "0"), jSONArray.optString(3, "0"), jSONArray.optString(4, ""));
+                }
+                if (str.equals("skyway_disconnect_log")) {
+                    return skywayDisconnectLog(jSONArray.optString(0), jSONArray.optString(1, "0"));
+                }
+                if (str.equals("get_aborted_purchase_token")) {
+                    return getAbortedPurchaseToken();
+                }
+                if (str.equals("add_purchase_token")) {
+                    return addPurchaseToken(jSONArray.optString(0), jSONArray.optString(1));
+                }
+                if (str.equals("subscribe")) {
+                    return subscribe(jSONArray.optString(0), jSONArray.optString(1, ""));
+                }
+                if (str.equals("signup")) {
+                    return signup(jSONArray.optString(0), jSONArray.optString(1), jSONArray.optString(2), jSONArray.optString(3, "0"), jSONArray.optString(4, ""), jSONArray.optString(5, ""));
+                }
+                if (str.equals("signup_auth")) {
+                    return signupAuth(jSONArray.optString(0));
+                }
+                if (str.equals("remove_follower")) {
+                    return removeFollower(jSONArray.optString(0));
+                }
+                if (str.equals("get_dive_talk_histories")) {
+                    return getDiveTalkHistories(jSONArray.optString(0, "1"));
+                }
+                if (str.equals("get_system_info")) {
+                    return getSystemInfo(jSONArray.optString(0, "0"), jSONArray.optString(1, "1"));
+                }
+                if (str.equals("server_logout")) {
+                    return serverLogout();
+                }
+                if (str.equals("bookmark_community_comment")) {
+                    return bookmarkCommunityComment(jSONArray.optString(0), jSONArray.optString(1), jSONArray.optString(2), jSONArray.optBoolean(3, true));
+                }
+                if (str.equals("send_trial_time")) {
+                    return sendTrialTime(jSONArray.optString(0), jSONArray.optString(1, "0"));
                 }
                 if (str.equals("get_friends_list")) {
                     return getFriendsList(jSONArray.optString(0, "1"));
@@ -9328,9 +10764,6 @@ public class KoeSession {
                 if (str.equals("get_follow_requests")) {
                     return getFollowRequests();
                 }
-                if (str.equals("get_my_qr_code")) {
-                    return getMyQrCode();
-                }
                 if (str.equals("get_following_timeline")) {
                     return getFollowingTimeline(jSONArray.optString(0));
                 }
@@ -9354,6 +10787,12 @@ public class KoeSession {
                 }
                 if (str.equals("join_room_by_id")) {
                     return joinCallByRoomId(jSONArray.optString(0));
+                }
+                if (str.equals("delete_chat_message")) {
+                    return deleteChatMessage(jSONArray.optString(0), jSONArray.optString(1, ""), jSONArray.optString(2, ""));
+                }
+                if (str.equals("get_mutuals")) {
+                    return getMutuals();
                 }
                 if (str.equals("delete_feed_post_comment")) {
                     return deleteFeedPostComment(jSONArray.optString(0), jSONArray.optString(1));
@@ -9683,6 +11122,9 @@ public class KoeSession {
                 }
                 if (str.equals("update_cheering_receiver_status")) {
                     return updateCheeringReceiverStatus(jSONArray.optString(0), jSONArray.optString(1, ""));
+                }
+                if (str.equals("answer_cheering_call")) {
+                    return answerCheeringCall(jSONArray.optString(0), jSONArray.optString(1, "1"));
                 }
                 if (str.equals("get_cheering_request_receives")) {
                     return getCheeringRequestReceives();

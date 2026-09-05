@@ -3,6 +3,10 @@ package com.akun.koetomo;
 import android.app.Activity;
 import android.content.Intent;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.Movie;
+import android.graphics.Canvas;
+import android.os.SystemClock;
+import android.view.View;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -169,6 +173,43 @@ public class MainActivity extends Activity {
             box.setOrientation(LinearLayout.VERTICAL);
             box.setGravity(android.view.Gravity.CENTER);
             box.setBackgroundColor(0xFF111111);
+            // 通話中と同じキャラクターのGIFをロード表示に使う
+            try {
+                java.io.InputStream mis = getAssets().open("mascot_loading.gif");
+                java.io.ByteArrayOutputStream mbo = new java.io.ByteArrayOutputStream();
+                byte[] mbuf = new byte[8192]; int mr;
+                while ((mr = mis.read(mbuf)) != -1) mbo.write(mbuf, 0, mr);
+                mis.close();
+                byte[] mbytes = mbo.toByteArray();
+                final Movie movie = Movie.decodeByteArray(mbytes, 0, mbytes.length);
+                if (movie != null && movie.width() > 0) {
+                    View gif = new View(this) {
+                        long start = 0L;
+                        @Override protected void onDraw(Canvas c) {
+                            long now = SystemClock.uptimeMillis();
+                            if (start == 0L) start = now;
+                            int dur = movie.duration(); if (dur <= 0) dur = 1000;
+                            movie.setTime((int) ((now - start) % dur));
+                            int vw = getWidth(), vh = getHeight();
+                            float sc = Math.min(vw / (float) movie.width(), vh / (float) movie.height());
+                            c.save();
+                            c.translate((vw - movie.width() * sc) / 2f, (vh - movie.height() * sc) / 2f);
+                            c.scale(sc, sc);
+                            movie.draw(c, 0, 0);
+                            c.restore();
+                            postInvalidateOnAnimation();
+                        }
+                    };
+                    // Movie.draw はハードウェアアクセラレーションのCanvasでは描けないためソフトウェア層にする
+                    gif.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+                    int px = (int) (getResources().getDisplayMetrics().density * 132);
+                    LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(px, px);
+                    glp.bottomMargin = (int) (getResources().getDisplayMetrics().density * 10);
+                    gif.setLayoutParams(glp);
+                    box.addView(gif);
+                }
+            } catch (Exception ig) {
+            }
             TextView t = new TextView(this);
             t.setText("KoeTomo+");
             t.setTextSize(26);
@@ -555,6 +596,7 @@ public class MainActivity extends Activity {
     public void onResume() {
         super.onResume();
         stopBgNotifPoller();
+        try { KoeNotifyService.stop(getApplicationContext()); } catch (Exception ig) {}
         if (this.webView != null) {
             this.webView.onResume();
             this.webView.resumeTimers();
@@ -606,6 +648,8 @@ public class MainActivity extends Activity {
         }
         bgNotifThread = null;
     }
+
+    static long notifTsPublic(String x) { return notifTs(x); }
 
     private static long notifTs(String x) {
         if (x == null || x.length() == 0) return 0;
@@ -683,6 +727,9 @@ public class MainActivity extends Activity {
             this.webView.pauseTimers();
         }
         startBgNotifPoller();
+        // Activity 内のスレッドだけだと、しばらくするとプロセスごと止められて通知が来なくなる。
+        // 通話中でなければ常駐サービスに引き継いで、アプリを離れていても鳴るようにする。
+        try { if (!this.inCall) KoeNotifyService.start(getApplicationContext()); } catch (Exception ig) {}
         // 画面を離れたタイミングで一時ファイル(画像キャッシュ)が上限を超えていたら古い順に捨てる
         try {
             final android.content.Context c = getApplicationContext();

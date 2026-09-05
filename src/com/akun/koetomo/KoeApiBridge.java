@@ -189,6 +189,77 @@ public class KoeApiBridge {
      * koetomo の通知(いいね/コメント/フォロー等)を Android の通知としても出す。
      * 権限が無い場合はダイアログを出さず黙って何もしない(バックグラウンドから呼ばれるため)。
      */
+    /**
+     * WebView を持たないバックグラウンドサービスから「お知らせ」通知を出す。
+     * チャンネルは前面から出すものと同じ(音・バイブあり)なので、
+     * アプリを開いていなくても同じ音で鳴る。
+     */
+    static void postNotifyFromBackground(Context context, String title, String text) {
+        try {
+            if (context == null) return;
+            if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission("android.permission.POST_NOTIFICATIONS") != 0) return;
+            NotificationManager nm = (NotificationManager) context.getSystemService("notification");
+            if (nm == null) return;
+            cleanOldChannels(nm);
+            if (Build.VERSION.SDK_INT >= 26) {
+                try {
+                    Class<?> ch = Class.forName("android.app.NotificationChannel");
+                    Constructor<?> ctor = ch.getConstructor(String.class, CharSequence.class, int.class);
+                    // IMPORTANCE_DEFAULT(3) でないと音が鳴らない
+                    Object c = ctor.newInstance(NOTIF_CHANNEL_ID, "お知らせ", Integer.valueOf(3));
+                    try {
+                        ch.getMethod("enableVibration", boolean.class).invoke(c, Boolean.TRUE);
+                        ch.getMethod("setVibrationPattern", long[].class).invoke(c, (Object) DOWNLOAD_VIBRATE);
+                    } catch (Exception ig) {
+                    }
+                    try {
+                        android.media.AudioAttributes aa = new android.media.AudioAttributes.Builder()
+                                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                                .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION)
+                                .build();
+                        ch.getMethod("setSound", Uri.class, android.media.AudioAttributes.class)
+                                .invoke(c, android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION), aa);
+                    } catch (Exception ig) {
+                    }
+                    NotificationManager.class.getMethod("createNotificationChannel", ch).invoke(nm, c);
+                } catch (Exception ig) {
+                }
+            }
+            android.content.Intent open = new android.content.Intent(context, MainActivity.class);
+            open.setFlags(603979776 | 268435456);
+            open.putExtra("koe_open_page", "notifications");
+            android.app.PendingIntent pi = android.app.PendingIntent.getActivity(
+                    context, (int) (System.currentTimeMillis() & 0x7fffffff), open,
+                    Build.VERSION.SDK_INT >= 23 ? 67108864 : 0);
+            Notification.Builder b = null;
+            if (Build.VERSION.SDK_INT >= 26) {
+                try {
+                    b = Notification.Builder.class.getConstructor(Context.class, String.class).newInstance(context, NOTIF_CHANNEL_ID);
+                } catch (Exception ig) {
+                }
+            }
+            if (b == null) {
+                b = new Notification.Builder(context);
+                try {
+                    Notification.Builder.class.getMethod("setPriority", int.class).invoke(b, Integer.valueOf(0));
+                    Notification.Builder.class.getMethod("setSound", Uri.class)
+                            .invoke(b, android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION));
+                    Notification.Builder.class.getMethod("setVibrate", long[].class).invoke(b, (Object) DOWNLOAD_VIBRATE);
+                } catch (Exception ig) {
+                }
+            }
+            b.setContentTitle(title).setContentText(text).setAutoCancel(true).setContentIntent(pi);
+            try { b.setStyle(new Notification.BigTextStyle().bigText(text)); } catch (Exception ig) {}
+            applySmallIcon(context, b);
+            android.graphics.Bitmap logo = appLogoBitmap(context);
+            if (logo != null) { try { b.setLargeIcon(logo); } catch (Exception ig) {} }
+            nm.notify(bgNotiId++, b.build());
+        } catch (Exception e) {
+        }
+    }
+
+    private static int bgNotiId = 4001;
+
     public void showKoetomoNotification(String title, String text) {
         postSystemNotification(NOTIF_CHANNEL_ID, "お知らせ", title, text, notifNotiId++, false, "notifications");
     }
@@ -1419,6 +1490,16 @@ public class KoeApiBridge {
     // ==== アプリ内アップデート(GitHub Releases) ====
 
     // 端末にインストール済みのバージョンを返す
+    /** 診断ログを同期で返す(非同期ブリッジが詰まっていても取り出せるようにする) */
+    @JavascriptInterface
+    public String nativeLog() {
+        try {
+            return this.session.dispatch("get_native_log", new JSONArray());
+        } catch (Throwable t) {
+            try { return new JSONObject().put("ok", false).put("error", String.valueOf(t)).toString(); } catch (Exception ig) { return "{\"ok\":false}"; }
+        }
+    }
+
     @JavascriptInterface
     public String appVersion() {
         try {
