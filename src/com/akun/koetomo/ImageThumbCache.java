@@ -42,6 +42,10 @@ public final class ImageThumbCache {
     private static final int CONNECT_TIMEOUT_MS = 8000;
     private static final int READ_TIMEOUT_MS = 12000;
     private static final int TRIM_EVERY = 40;
+    /** 取得を許可する画像配信元(https のみ)。WebView 内の任意 URL をネイティブが代理取得しないための制限。 */
+    private static final String[] ALLOWED_HOST_SUFFIXES = {".meetscom.com", ".cloudfront.net", ".amazonaws.com"};
+    /** 原画像の最大サイズ。これを超えるものは縮小対象にせず、WebView の通常読み込みに任せる。 */
+    private static final int MAX_SOURCE_BYTES = 8 * 1024 * 1024;
 
     private final File dir;
     private int writesSinceTrim = 0;
@@ -53,9 +57,20 @@ public final class ImageThumbCache {
 
     /** この URL がサムネイル対象か(koe_w= を持つ http(s) 画像か)。 */
     public static boolean handles(String url) {
-        return url != null
-                && (url.startsWith("https://") || url.startsWith("http://"))
-                && url.contains(QUERY_KEY + "=");
+        return url != null && url.startsWith("https://") && url.contains(QUERY_KEY + "=") && isAllowedHost(url);
+    }
+
+    private static boolean isAllowedHost(String url) {
+        try {
+            String host = new URL(url).getHost();
+            if (host == null) return false;
+            host = host.toLowerCase(java.util.Locale.ROOT);
+            for (String suffix : ALLOWED_HOST_SUFFIXES) {
+                if (host.endsWith(suffix)) return true;
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
     }
 
     /**
@@ -81,7 +96,6 @@ public final class ImageThumbCache {
             WebResourceResponse res = new WebResourceResponse("image/webp", null, new ByteArrayInputStream(bytes));
             java.util.Map<String, String> headers = new java.util.HashMap<String, String>();
             headers.put("Cache-Control", "max-age=86400");
-            headers.put("Access-Control-Allow-Origin", "*");
             res.setResponseHeaders(headers);
             return res;
         } catch (Throwable t) {
@@ -129,12 +143,16 @@ public final class ImageThumbCache {
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
         conn.setReadTimeout(READ_TIMEOUT_MS);
+        conn.setInstanceFollowRedirects(false); // 許可外ホストへのリダイレクトに追従しない
         conn.setRequestProperty("Accept", "image/*");
         try {
             if (conn.getResponseCode() != 200) return null;
+            if (conn.getContentLength() > MAX_SOURCE_BYTES) return null;
+            String type = conn.getContentType();
+            if (type != null && !type.toLowerCase(java.util.Locale.ROOT).startsWith("image/")) return null;
             InputStream in = conn.getInputStream();
             try {
-                return readAll(in);
+                return readAll(in, MAX_SOURCE_BYTES);
             } finally {
                 in.close();
             }
@@ -210,10 +228,18 @@ public final class ImageThumbCache {
     }
 
     private static byte[] readAll(InputStream in) throws Exception {
+        return readAll(in, Integer.MAX_VALUE);
+    }
+
+    /** 上限を超えたら null(縮小対象外)。 */
+    private static byte[] readAll(InputStream in, int limit) throws Exception {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buf = new byte[16 * 1024];
         int n;
-        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        while ((n = in.read(buf)) > 0) {
+            out.write(buf, 0, n);
+            if (out.size() > limit) return null;
+        }
         return out.toByteArray();
     }
 
