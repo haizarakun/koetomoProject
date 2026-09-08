@@ -1095,8 +1095,10 @@ function koeClearAuthFail() {
 /* ===== 同時リクエスト数の制限 =====
    起動時や画面切替で20〜30本のAPIを一斉に投げていたため、接続が詰まって
    1本あたり4〜11秒かかる状態になっていた(ログの list_group_rooms 11530ms 等)。
-   同時に走らせるのは4本まで。裏側の定期取得は画面用の通信が空いてから流す。 */
-var __koeSem = { n: 0, max: 4, q: [], lq: [] };
+   同時に走らせるのは5本まで。裏側の定期取得は画面用の通信が空いてから流す。
+   サーバー側が遅く 1 本が長く詰まる時(数十秒かかる書き込みなど)は、その 1 本が枠を
+   占有し続けて他の通信まで待たされないよう、一定時間を超えた枠は先に解放する。 */
+var __koeSem = { n: 0, max: 5, q: [], lq: [], slowMs: 6000 };
 function __koePump() {
   while (__koeSem.n < __koeSem.max) {
     var f = __koeSem.q.shift();
@@ -1194,10 +1196,19 @@ async function callApi(methodName, ...args) {
     await __koeAcquire(__low);
     _t0 = performance.now();
     let result;
+    let released = false;
+    const releaseOnce = () => {
+      if (!released) {
+        released = true;
+        __koeRelease();
+      }
+    };
+    const slowTimer = setTimeout(releaseOnce, __koeSem.slowMs); // 長く詰まった 1 本に全体を道連れにしない
     try {
       result = await window.pywebview.api[methodName](...args);
     } finally {
-      __koeRelease();
+      clearTimeout(slowTimer);
+      releaseOnce();
     }
     updateLatencyBadge(Math.round(performance.now() - _t0));
     result && result.session_expired && handleSessionExpired();
@@ -7174,6 +7185,7 @@ async function koeSweepAllRooms(reason) {
       if (p === 10) window.__roomsAllLoaded = true;
     }
     window.__roomsCacheAt = Date.now();
+    window.__roomsSweptAt = Date.now(); // 全件取得の完了時刻(しばらくは 1 ページ目の差分更新だけで済ませる)
     applyRoomView(true);
   } finally {
     window.__koeRoomsLoading = false;
@@ -7216,6 +7228,11 @@ async function loadGroupRooms(auto, force) {
   if (fresh && !force) {
     applyRoomView();
     return;
+  }
+  /* 直近 90 秒以内に全ページ取得済みなら、作り直さず 1 ページ目だけ差分更新する。
+     (タブを開き直すたびに 10 ページ×名前解決を繰り返して 10 秒以上かかっていた) */
+  if (!force && window.__roomsCache && window.__roomsSweptAt && Date.now() - window.__roomsSweptAt < 90000) {
+    return loadGroupRooms(true);
   }
   window.__koeRoomsLoading = true;
   try {
@@ -12467,17 +12484,34 @@ function updateChatBulkBar() {
   const db = document.getElementById("chatBulkDeleteBtn");
   if (db) db.disabled = n === 0;
 }
+/* チャット一覧は server1 が遅い時に 5〜10 秒かかることがある。
+   前回の結果を端末に保存しておき、まずそれを即表示してから最新に置き換える。 */
+const CHAT_LIST_CACHE_KEY = "koe_chat_list_cache";
 async function loadChats() {
   const list = document.getElementById("chatList");
-  list.innerHTML = skeletonCards(4);
+  let cached = null;
+  try {
+    cached = JSON.parse(localStorage.getItem(CHAT_LIST_CACHE_KEY) || "null");
+  } catch (e) {}
+  if (cached && cached.rooms && cached.rooms.length) renderChatList(list, cached);
+  else list.innerHTML = skeletonCards(4);
   const result = await callApi("get_chats");
+  if (result && result.ok && result.rooms) {
+    try {
+      localStorage.setItem(CHAT_LIST_CACHE_KEY, JSON.stringify({ ok: true, rooms: result.rooms }));
+    } catch (e) {}
+  }
+  if (document.getElementById("chatList") !== list) return; // 画面が変わっていたら描かない
+  renderChatList(list, result);
+}
+function renderChatList(list, result) {
   result.ok
     ? result.rooms.length
       ? ((window.__chatRooms = result.rooms),
         (list.innerHTML = result.rooms
           .map(
             (r, i) => `\n    <div class="card" data-chat-idx="${i}">
-      ${window.__koeChatEditMode ? `<input type="checkbox" class="chat-sel-cb" data-chat-idx="${i}" ${window.__koeChatSelected.has(String(r.chat_id)) ? "checked" : ""} style="width:20px;height:20px;margin-right:6px;flex:none;">` : ""}\n      ${avatarHtml(r.name, r.icon_url)}\n      <div class="card-body">\n        <div class="card-name">${escapeHtml(r.name)} <span class="uid-tag">ID:${r.target_id}</span></div>\n        <div class="card-sub" title="${escapeHtml(r.last_sent_at || "")}">${r.last_message ? escapeHtml(String(r.last_message).replace(/\\s+/g, " ").slice(0, 42)) : '<span style="opacity:.5;">(メッセージなし)</span>'} <span style="opacity:.55;">· ${r.last_sent_at ? relTime(r.last_sent_at) : "-"}</span></div>\n      </div>\n    </div>`,
+      ${window.__koeChatEditMode ? `<input type="checkbox" class="chat-sel-cb" data-chat-idx="${i}" ${window.__koeChatSelected.has(String(r.chat_id)) ? "checked" : ""} style="width:20px;height:20px;margin-right:6px;flex:none;">` : ""}\n      ${avatarHtml(r.name, r.icon_url)}\n      <div class="card-body">\n        <div class="card-name">${escapeHtml(r.name)} <span class="uid-tag">ID:${r.target_id}</span>${r.unread_count > 0 ? ` <span class="uid-tag koe-feedbadge">未読 ${r.unread_count}</span>` : ""}</div>\n        <div class="card-sub" title="${escapeHtml(r.last_sent_at || "")}">${r.last_message ? escapeHtml(String(r.last_message).replace(/\\s+/g, " ").slice(0, 42)) : '<span style="opacity:.5;">(メッセージなし)</span>'} <span style="opacity:.55;">· ${r.last_sent_at ? relTime(r.last_sent_at) : "-"}</span></div>\n      </div>\n    </div>`,
           )
           .join("")),
         updateChatBulkBar(),
@@ -12502,7 +12536,7 @@ async function loadChats() {
           }
           openChat(r.chat_id, r.target_id, r.name, r.icon_url);
         }))
-      : (list.innerHTML = `<div class="empty-msg">チャットがありません<br><button class="btn-secondary" style="margin-top:12px;width:auto;" onclick="document.getElementById('userSearchBtn')?.click()">ユーザーを探す</button><br><small style="opacity:.5;word-break:break-all;">応答: ${escapeHtml(result.raw || "")}</small></div>`)
+      : (list.innerHTML = `<div class="empty-msg">チャットがありません<br><button class="btn-secondary" style="margin-top:12px;width:auto;" onclick="document.getElementById('userSearchBtn')?.click()">ユーザーを探す</button></div>`)
     : (list.innerHTML = `<div class="empty-msg">読み込めませんでした<br><button class="btn-secondary" style="width:auto;margin-top:8px;" onclick="reloadCurrentView()">再試行</button></div>`);
 }
 (function () {
