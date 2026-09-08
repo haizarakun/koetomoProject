@@ -45,6 +45,23 @@ public class KoeSession {
     private final java.util.Set<Long> bannedUids = java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<Long, Boolean>());
     private volatile int lastVsns = -999;
     // メモリ軽量化: 名前キャッシュはアクセス順LinkedHashMapで最大1500件に制限し、古いものから自動破棄する
+    /**
+     * 投稿デコレーション(公式の「タイムライン背景画像」)のキャッシュ: user_id → 画像パス。
+     * 公式 PostItem と同じく、その人の timeline_image_enabled が真のときだけ覚える。
+     */
+    private final Map<Long, String> decoCache = java.util.Collections.synchronizedMap(new HashMap<Long, String>());
+    /** このセッションでデコレーションを確認済みの user_id(名前は端末に永続キャッシュされるので、別途 1 回は取り直す)。 */
+    private final java.util.Set<Long> decoChecked = java.util.Collections.synchronizedSet(new java.util.HashSet<Long>());
+
+    /** /api/v2/users のユーザー1件からデコレーション画像を覚える(無ければ消す)。 */
+    private void rememberDecoration(long uid, JSONObject user) {
+        if (uid == 0 || user == null) return;
+        decoChecked.add(Long.valueOf(uid));
+        String path = truthy(user.opt("timeline_image_enabled")) ? user.optString("timeline_image_file_path", "") : "";
+        if (path.length() > 0 && !"null".equals(path)) decoCache.put(Long.valueOf(uid), path);
+        else decoCache.remove(Long.valueOf(uid));
+    }
+
     private final Map<Long, String[]> nameCache = java.util.Collections.synchronizedMap(new java.util.LinkedHashMap<Long, String[]>(256, 0.75f, true) {
         protected boolean removeEldestEntry(Map.Entry<Long, String[]> eldest) {
             return size() > 1500;
@@ -56,6 +73,9 @@ public class KoeSession {
     private SecureStore secureStore = null;
     SecureStore secure() { if (secureStore == null) secureStore = new SecureStore(appContext); return secureStore; }
     private volatile boolean sessionExpiredSeen = false;
+    // 403 + code:1000(認証エラー)が何回続いたか。サーバー側の一時的な拒否で即ログアウトさせないため、
+    // 連続して出たときだけ「本当にセッションが切れた」と判断する。
+    private volatile int authErrStreak = 0;
     private String skywayHost = null;
     // 診断ログ(HTTP層)。認証トークンは伏せて記録する。
     private static final java.util.List<String> DEBUG_LOG = java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
@@ -347,6 +367,7 @@ public class KoeSession {
         int status;
         int vsns = -999;
         boolean sessionExpired = false;
+        boolean authError = false;
 
         Resp(int i, JSONObject jSONObject) {
             this.status = i;
@@ -545,9 +566,14 @@ public class KoeSession {
         });
         t2.start();
         Resp request = request("GET", "/api/v2/users", q1("ids", String.valueOf(j)), (Map<String, String>) null);
+        String decoPath = "";
         if (!(request.body == null || (optJSONArray = request.body.optJSONArray("user_info")) == null || optJSONArray.length() <= 0 || (optJSONObject = optJSONArray.optJSONObject(0)) == null)) {
             str = optJSONObject.optString("name", "");
             str2 = optJSONObject.optString("profile_picture_file_path", "");
+            rememberDecoration(j, optJSONObject);
+            // 自分のプロフィールでは表示フラグに関係なく、設定されている画像パスをそのまま返す(設定画面の表示用)
+            decoPath = optJSONObject.optString("timeline_image_file_path", "");
+            if ("null".equals(decoPath)) decoPath = "";
         }
         try { t2.join(9000); } catch (Exception e) {}
         Resp request2 = r2h[0];
@@ -589,6 +615,7 @@ public class KoeSession {
             if (str.length() > 0) { this.nameCache.put(Long.valueOf(j), new String[]{str, str2}); saveNameCache(); } // プロフィールで得た名前は一覧/返信表示にも反映
             jSONObject2.put("comment", jSONObject != null ? jSONObject.optString("comment", "") : "");
             jSONObject2.put("icon_url", iconUrl(str2));
+            jSONObject2.put("deco_url", decoPath.length() > 0 ? iconUrl(decoPath) : ""); // 投稿デコレーション(公開背景)
             String[] strArr = {"header_image_file_path", "headerImageFilePath", "header_image", "headerImage", "header_image_url", "headerImageUrl", "header_url", "cover_image", "cover_image_file_path", "coverImageFilePath", "header"};
             String str4 = "";
             JSONObject[] jSONObjectArr = {jSONObject, request2.body != null ? request2.body.optJSONObject("data") : null, request2.body};
@@ -637,6 +664,8 @@ public class KoeSession {
                 jSONObject2.put("friend_count", jSONObject != null ? jSONObject.optInt("friend_count", jSONObject.optInt("friendCount", 0)) : 0);
                 jSONObject2.put("area_name", jSONObject != null ? jSONObject.optString("area_name", jSONObject.optString("areaName", "")) : "");
                 jSONObject2.put("login_status", jSONObject != null ? jSONObject.optString("login_status_with_unit", jSONObject.optString("loginStatusWithUnit", "")) : "");
+                int lst0 = loginStateOf(jSONObject);
+                if (lst0 >= 0) jSONObject2.put("login_state", lst0);
                 int optInt = jSONObject != null ? jSONObject.optInt("sex", jSONObject.optInt("gender", 0)) : 0;
                 jSONObject2.put("gender", optInt == 1 ? "男性" : optInt == 2 ? "女性" : "");
                 // アカウント開設日: user_info 直下 → 応答全体(深さ優先)の順で探す
@@ -715,11 +744,26 @@ public class KoeSession {
         }
     }
 
+    /**
+     * 手を挙げる/降ろす・発言者にする(公式 OkHttpSingleton.switchTalkRoomRole 相当)。
+     *   PUT https://api2.meetscom.com/api/rooms/{id}/change_role
+     *   本文(form): role=speaker|speaker_applicant|listener, target_id={uid}
+     *   認証はヘッダー(X-Auth-Token / X-App-Version)のみ。クエリには何も付けない。
+     * role と target_id をクエリに載せていると本文が空になり、サーバーが HTTP 400 を返す。
+     */
     private String changeRole(String str, String str2, String str3) {
-        HashMap hashMap = new HashMap();
-        hashMap.put("role", str3);
-        hashMap.put("target_id", str2);
-        return okResult(request("PUT", "/api/rooms/" + str + "/change_role", hashMap, (Map<String, String>) null));
+        HashMap<String, String> f = new HashMap<String, String>();
+        f.put("role", str3);
+        f.put("target_id", str2);
+        String path = "/api/rooms/" + str + "/change_role";
+        Resp r = http("PUT", BASE_URL2 + path, (Map<String, String>) null, (Map<String, String>) f);
+        if (r.status == 404 || r.status <= 0 || r.status >= 500) {
+            Resp r2 = http("PUT", BASE_URL + path, (Map<String, String>) null, (Map<String, String>) f);
+            if (r2.status >= 200 && r2.status < 300) r = r2;
+        }
+        dbgLog(nowStr() + "  [ROLE] " + str3 + " room=" + str + " target=" + str2 + " HTTP " + r.status
+                + " " + truncate(redactLog(r.body != null ? r.body.toString() : ""), 200));
+        return okResultStatus(r);
     }
 
     private JSONObject cognitoCredentials(JSONObject jSONObject) throws Exception {
@@ -1025,14 +1069,20 @@ public class KoeSession {
                 dbgLog(nowStr() + "  [POST] 同一内容の連続投稿を抑止 " + endpoint);
                 return new Resp(200, (JSONObject) null);
             }
-            lastPostSig = postSig;
-            lastPostAt = nowMs;
         }
         Resp http = http("POST", BASE_URL + endpoint, (Map<String, String>) null, hashMap);
         // 5xx はサーバー側で投稿が作られている可能性があるため別ホストへ再送しない(二重投稿の防止)。
         // 404(そのホストに存在しない)のときだけ api2 を試す。
         if (http.status == 404) {
             http = http("POST", BASE_URL2 + endpoint, (Map<String, String>) null, hashMap);
+        }
+        // 二重投稿の抑止は「成功した投稿」に対してだけ効かせる。失敗(403 など)を覚えてしまうと、
+        // 直後の再試行が偽の 200 を返して「投稿できた」ように見えてしまう。
+        if (http.status >= 200 && http.status < 300) {
+            synchronized (KoeSession.class) {
+                lastPostSig = postSig;
+                lastPostAt = System.currentTimeMillis();
+            }
         }
         dbgLog(nowStr() + "  [POST] " + endpoint + " HTTP " + http.status + (http.status != 200 && http.status != 201 && http.body != null ? " " + truncate(redactLog(http.body.toString()), 200) : ""));
         return http;
@@ -1373,16 +1423,33 @@ public class KoeSession {
                 str = this.skywayHost;
             } else {
                 try {
+                    // 公開設定(client_defines)は数時間は変わらないので端末に保存し、セッション(Activity/Service)ごとに
+                    // release.json + client_defines.json を取り直さない(起動・バックグラウンド確認の通信を削減)
+                    JSONObject optJSONObject3 = null;
+                    try {
+                        long ts = this.prefs.getLong("client_defines_ts", 0);
+                        String cached = this.prefs.getString("client_defines_json", null);
+                        if (cached != null && cached.length() > 2 && System.currentTimeMillis() - ts < 6L * 3600L * 1000L) {
+                            optJSONObject3 = new JSONObject(cached);
+                        }
+                    } catch (Exception ig) { optJSONObject3 = null; }
+                    if (optJSONObject3 == null) {
                     Resp http = http("GET", "https://api.meetscom.com/config/release/3.9.101.json", (Map<String, String>) null, (Map<String, String>) null);
                     JSONObject optJSONObject = http.body != null ? http.body.optJSONObject("data") : null;
                     JSONObject optJSONObject2 = optJSONObject != null ? optJSONObject.optJSONObject("client_defines") : null;
                     String optString = optJSONObject2 != null ? optJSONObject2.optString("url", "") : "";
                     if (optString.length() > 0) {
                         Resp http2 = http("GET", optString, (Map<String, String>) null, (Map<String, String>) null);
-                        JSONObject optJSONObject3 = http2.body != null ? http2.body.optJSONObject("data") : null;
+                        optJSONObject3 = http2.body != null ? http2.body.optJSONObject("data") : null;
                         if (optJSONObject3 == null) {
                             optJSONObject3 = http2.body;
                         }
+                        if (optJSONObject3 != null) {
+                            try { this.prefs.edit().putString("client_defines_json", optJSONObject3.toString()).putLong("client_defines_ts", System.currentTimeMillis()).apply(); } catch (Exception ig) {}
+                        }
+                    }
+                    }
+                    if (optJSONObject3 != null) {
                         this.clientDefines = optJSONObject3;
                         if (optJSONObject3 != null) {
                             JSONObject optJSONObject4 = optJSONObject3.optJSONObject("client_system_params");
@@ -1551,6 +1618,23 @@ public class KoeSession {
         return "";
     }
 
+    /**
+     * 公式アプリと同じ「オンライン状態」の判定値。
+     * koetomo は login_status を整数(0=オンライン, 1=最近, 2=以前)で返し、
+     * login_status_with_unit は表示用の文字列("6時間以内"等)。
+     * 文字列だけ見ていると本当にオンラインの相手を灰色にしてしまうので、整数側も必ず持ち回る。
+     */
+    private static int loginStateOf(JSONObject u) {
+        if (u == null) return -1;
+        Object v = u.opt("login_status");
+        if (v == null) v = u.opt("loginStatus");
+        if (v instanceof Number) return ((Number) v).intValue();
+        if (v instanceof String) {
+            try { return Integer.parseInt(((String) v).trim()); } catch (Exception ignore) { return -1; }
+        }
+        return -1;
+    }
+
     private static String firstStr(JSONObject jSONObject, String... strArr) {
         for (String optString : strArr) {
             String optString2 = jSONObject.optString(optString, "");
@@ -1620,6 +1704,28 @@ public class KoeSession {
             if (arr.length() < 20) break; // 最終ページ(これ以上ページを捲らない)
         }
         return out;
+    }
+
+    /**
+     * 自分がフォローしている全ユーザーIDを返す(最後のページまで捲る／内部キャッシュあり)。
+     * 枠一覧の「フォロー中」絞り込みが 1 ページ目(20人)しか見ておらず、
+     * 21人目以降をフォローしている人の枠が出てこなかったため追加。
+     */
+    private String getFolloweeIds() {
+        try {
+            ensureRelationSets();
+            java.util.Set<Long> set;
+            synchronized (this) { set = myFolloweeIds; }
+            JSONArray arr = new JSONArray();
+            if (set != null) {
+                for (Long v : set) {
+                    if (v != null && v.longValue() != 0) arr.put(v.longValue());
+                }
+            }
+            return new JSONObject().put("ok", true).put("ids", arr).put("count", arr.length()).toString();
+        } catch (Exception e) {
+            return errJson(e);
+        }
     }
 
     private void ensureRelationSets() {
@@ -3737,16 +3843,28 @@ public class KoeSession {
             call.put("member", userId() + "_" + channel);
             // 1対1通話はグループ枠ではないので room_id は null。channel文字列を入れると通話終了時に存在しない枠へ room_leave が飛ぶ
             call.put("room_id", JSONObject.NULL);
-            call.put("is_owner", false);
-            call.put("owner_user_id", targetUid);
+            // 公式(PhoneManager.connect): 自分のIDが相手より「小さい」側が P2PRoom.findOrCreate で
+            // 部屋を作り、大きい側は find して join する。受け手/発信者の区別ではない点に注意。
+            //   isOwner = (myUserId < targetUserId)
+            long myUid = userId();
+            boolean owner = (myUid != 0 && targetUid != 0) ? (myUid < targetUid) : false;
+            call.put("is_owner", owner);
+            call.put("owner_user_id", (myUid != 0 && targetUid != 0) ? Math.min(myUid, targetUid) : targetUid);
+            // participants は「通話相手」。自分自身を入れると誰と話しているのか分からなくなる。
             JSONArray participants = new JSONArray();
-            if (targetUid != 0) {
+            if (targetUid != 0 && targetUid != myUid) {
                 String[] cached = this.nameCache.get(Long.valueOf(targetUid));
                 participants.put(new JSONObject().put("user_id", targetUid)
                         .put("name", cached != null ? cached[0] : ("user " + targetUid))
                         .put("icon_url", cached != null ? iconUrl(cached[1]) : ""));
             }
+            if (targetUid == myUid) {
+                dbgLog(nowStr() + "  [CHEER] 警告: 通話相手が自分自身になっています(target_id=" + targetUid + ")");
+            }
             call.put("participants", participants);
+            // 1対1通話であることを明示。グループ枠の「オーナー権限/枠を閉じる/発言者の許可」は存在せず、
+            // 公式(SkyWayPhoneForOneOnOne)も両者が無条件で音声を publish する。
+            call.put("one_on_one", true);
             return new JSONObject().put("ok", true).put("call", call).toString();
         } catch (Exception e) {
             return errJson(e);
@@ -4252,6 +4370,20 @@ public class KoeSession {
         return instance.doFinal(str.getBytes("UTF-8"));
     }
 
+    /**
+     * 公式(ErrorHandlerKt.AUTH_ERROR_CODE / ResponseExtKt)と同じ「認証エラー」の判定。
+     * api2 は認証が切れると HTTP 403 + {"code":1000,"message":"ユーザーが見つかりませんでした"} を返す。
+     * 401 だけを見ていると、この状態を「ただの読み込み失敗」と誤認して延々ポーリングし続けてしまう。
+     */
+    private static boolean isAuthErrorBody(int status, JSONObject body) {
+        if (status != 403 || body == null) return false;
+        if (body.optInt("code", -1) == 1000) return true;
+        JSONObject err = body.optJSONObject("error");
+        if (err != null && err.optInt("code", -1) == 1000) return true;
+        JSONObject data = body.optJSONObject("data");
+        return data != null && data.optInt("code", -1) == 1000;
+    }
+
     private Resp http(String method, String url, Map<String, String> query, Map<String, String> fields) {
         return http(method, url, query, fields, true);
     }
@@ -4415,9 +4547,20 @@ public class KoeSession {
                 dbgLog(nowStr() + "  " + method + " " + redactLog(sb.toString()) + "  → " + status + snip);
             } catch (Exception eLog) {
             }
+            boolean localAuthErr = isAuthErrorBody(status, bodyJson);
+            if (localAuthErr) {
+                // 一瞬だけ 403 が返ることがあるので、5回続いたら本当に切れたとみなす
+                if (++this.authErrStreak >= 5) {
+                    localExpired = true;
+                    this.sessionExpiredSeen = true;
+                }
+            } else if (status >= 200 && status < 300) {
+                this.authErrStreak = 0;
+            }
             Resp resp = new Resp(status, bodyJson);
             resp.vsns = localVsns;
             resp.sessionExpired = localExpired;
+            resp.authError = localAuthErr;
             return resp;
         } catch (Exception e) {
             if (conn != null) { try { conn.disconnect(); } catch (Exception ig) {} }
@@ -4493,9 +4636,20 @@ public class KoeSession {
                 } catch (Exception e) {
                 }
             }
+            boolean localAuthErr = isAuthErrorBody(status, bodyJson);
+            if (localAuthErr) {
+                // 一瞬だけ 403 が返ることがあるので、5回続いたら本当に切れたとみなす
+                if (++this.authErrStreak >= 5) {
+                    localExpired = true;
+                    this.sessionExpiredSeen = true;
+                }
+            } else if (status >= 200 && status < 300) {
+                this.authErrStreak = 0;
+            }
             Resp resp = new Resp(status, bodyJson);
             resp.vsns = localVsns;
             resp.sessionExpired = localExpired;
+            resp.authError = localAuthErr;
             return resp;
         } catch (Exception e) {
             if (conn != null) { try { conn.disconnect(); } catch (Exception ig) {} }
@@ -4548,6 +4702,10 @@ public class KoeSession {
                 this.sessionExpiredSeen = true;
             }
             String body = readBody(conn, status);
+            if (!localExpired && status == 403 && body != null && body.contains("\"code\"") && body.contains("1000")) {
+                localExpired = true;
+                this.sessionExpiredSeen = true;
+            }
             String[] result = new String[]{String.valueOf(status), body != null ? body : ""};
             return result;
         } catch (Exception e) {
@@ -4890,6 +5048,8 @@ public class KoeSession {
             JSONObject call = new JSONObject();
             call.put("auth_token", skywayAuthToken);
             call.put("channel", roomToken);
+            // 公式 TalkRoomViewModel: connection_type 1=SFU / それ以外=P2P。SkyWay の部屋種別を公式と揃える。
+            call.put("connection_type", resolveConnectionType(room, roomIdLong));
             call.put("member", member);
             call.put("participants", participants);
             call.put("room_id", roomIdVal);
@@ -5425,6 +5585,8 @@ public class KoeSession {
                 jSONObject.put("liked", optJSONObject.optBoolean("liked", optJSONObject.optBoolean("is_liked", optJSONObject.optBoolean("is_good", false))));
                 jSONObject.put("bookmarked", optJSONObject.optBoolean("bookmarked", false));
                 jSONObject.put("is_explicit", optExplicitFlag(optJSONObject));
+                String deco = decoCache.get(Long.valueOf(optLong));
+                if (deco != null) jSONObject.put("deco_url", iconUrl(deco));
                 // 通話募集(Feed)投稿を区別するためのフィールドを保持
                 boolean hasPurpose = optJSONObject.has("purpose") && !optJSONObject.isNull("purpose");
                 if (hasPurpose) jSONObject.put("purpose", optJSONObject.opt("purpose"));
@@ -5508,8 +5670,11 @@ public class KoeSession {
                 try {
                     JSONObject nu = new JSONObject().put("user_id", optLong).put("name", firstNonEmpty).put("icon_url", iconUrl(firstNonEmpty(u.optString("profile_picture_file_path", ""), u.optString("profilePictureFilePath", ""))));
                     // 最終オンライン(「3分前」等)・自己紹介・年齢・地域: 一覧のオンライン表示や並び替えに使う
-                    String ls = firstNonEmpty(u.optString("login_status_with_unit", ""), u.optString("loginStatusWithUnit", ""), u.optString("login_status", ""));
+                    String ls = firstNonEmpty(u.optString("login_status_with_unit", ""), u.optString("loginStatusWithUnit", ""));
                     if (ls.length() > 0) nu.put("login_status", ls);
+                    int lst = loginStateOf(u);
+                    if (lst < 0) lst = loginStateOf(item);
+                    if (lst >= 0) nu.put("login_state", lst);
                     if (!u.isNull("age") && u.opt("age") != null) nu.put("age", u.opt("age"));
                     String ar = u.optString("area_name", u.optString("areaName", ""));
                     if (ar.length() > 0) nu.put("area_name", ar);
@@ -5616,6 +5781,9 @@ public class KoeSession {
             if (resp.sessionExpired) {
                 put.put("session_expired", true);
             }
+            if (resp.authError) {
+                put.put("auth_error", true);
+            }
             if (resp.body != null) {
                 put.put("body", resp.body);
             }
@@ -5635,6 +5803,9 @@ public class KoeSession {
             JSONObject put = new JSONObject().put("ok", ok).put("status", resp.status).put("vsns", resp.vsns);
             if (resp.sessionExpired) {
                 put.put("session_expired", true);
+            }
+            if (resp.authError) {
+                put.put("auth_error", true);
             }
             if (resp.body != null) {
                 put.put("body", resp.body);
@@ -5947,6 +6118,8 @@ public class KoeSession {
                 jSONObject.put("friend_count", optJSONObject.optInt("friend_count", optJSONObject.optInt("friendCount", 0)));
                 jSONObject.put("area_name", optJSONObject.optString("area_name", optJSONObject.optString("areaName", "")));
                 jSONObject.put("login_status", optJSONObject.optString("login_status_with_unit", optJSONObject.optString("loginStatusWithUnit", "")));
+                int lst2 = loginStateOf(optJSONObject);
+                if (lst2 >= 0) jSONObject.put("login_state", lst2);
             }
             return new JSONObject().put("ok", true).put("profile", jSONObject).put("raw", truncate).toString();
         } catch (Exception e) {
@@ -6150,6 +6323,7 @@ public class KoeSession {
             JSONObject out = new JSONObject().put("ok", ok).put("status", r.status);
             if (r.body != null) out.put("body", r.body);
             if (r.sessionExpired) out.put("session_expired", true);
+            if (r.authError) out.put("auth_error", true);
             return out.toString();
         } catch (Exception e) {
             return errJson(e);
@@ -6263,7 +6437,9 @@ public class KoeSession {
             JSONObject optJSONObject = jSONArray.optJSONObject(i);
             long optLong = optJSONObject != null ? optJSONObject.optLong(str) : jSONArray.optLong(i, 0); // 素の数値配列も許容
             {
-                if (optLong != 0 && !hasName(optLong) && !arrayList.contains(Long.valueOf(optLong))) {
+                boolean needName = !hasName(optLong);
+                boolean needDeco = !decoChecked.contains(Long.valueOf(optLong));
+                if (optLong != 0 && (needName || needDeco) && !arrayList.contains(Long.valueOf(optLong))) {
                     arrayList.add(Long.valueOf(optLong));
                 }
             }
@@ -6277,6 +6453,7 @@ public class KoeSession {
                 sb.append(arrayList.get(i2));
             }
             Resp request = request("GET", "/api/v2/users", q1("ids", sb.toString()), (Map<String, String>) null);
+            for (int k = 0; k < arrayList.size(); k++) decoChecked.add((Long) arrayList.get(k));
             if (request.body != null && (optJSONArray = request.body.optJSONArray("user_info")) != null) {
                 boolean changed = false;
                 for (int i3 = 0; i3 < optJSONArray.length(); i3++) {
@@ -6287,6 +6464,7 @@ public class KoeSession {
                         // 名前が空のまま覚えると「user 1234567」表示が永久に固定されるので、空は覚えない(あとで個別に取り直す)
                         if (optLong2 != 0 && nm2.length() > 0) {
                             this.nameCache.put(Long.valueOf(optLong2), new String[]{nm2, optJSONObject2.optString("profile_picture_file_path", "")});
+                            rememberDecoration(optLong2, optJSONObject2);
                             changed = true;
                         }
                     }
@@ -6315,6 +6493,7 @@ public class KoeSession {
                     String nm = firstNonEmpty(u.optString("name", ""), u.optString("nickname", ""));
                     if (nm.length() == 0) continue;
                     this.nameCache.put(id, new String[]{nm, u.optString("profile_picture_file_path", "")});
+                    rememberDecoration(id.longValue(), u);
                     extra = true;
                 } catch (Exception ig) {
                 }
@@ -6486,6 +6665,86 @@ public class KoeSession {
         HashMap hashMap = new HashMap();
         hashMap.put("comment_enabled", z ? "true" : "false");
         return okResult(request("PUT", "/api/rooms/" + str + "/switch_comment_enabled", hashMap, (Map<String, String>) null));
+    }
+
+    /**
+     * 枠の SkyWay 接続種別(公式 JoinTrialResponse.Room.connectionType)を返す。
+     * 1=SFU(公式の既定) / 2=P2P / 0=不明。枠オブジェクトに無ければ join_trial から取る。
+     */
+    private int resolveConnectionType(JSONObject room, long roomId) {
+        int type = room.optInt("connection_type", room.optInt("connectionType", 0));
+        if (type != 0 || roomId == 0) return type;
+        try {
+            JSONObject res = new JSONObject(roomJoinTrial(String.valueOf(roomId)));
+            JSONObject body = res.optJSONObject("body");
+            JSONObject data = body != null ? body.optJSONObject("data") : null;
+            JSONObject r = data != null ? data.optJSONObject("room") : (body != null ? body.optJSONObject("room") : null);
+            if (r != null) type = r.optInt("connection_type", r.optInt("connectionType", 0));
+        } catch (Exception ignored) {
+        }
+        return type;
+    }
+
+    /**
+     * 公式サーバー上の「タイムライン背景画像」(他ユーザーの投稿一覧にも表示される)を外す。
+     * 公式 OkHttpSingleton.generateTimelineBackgroundUpdateRequest と同じ PUT を空パスで送り、
+     * それでも残る場合は完全透明の画像で上書きする。ユーザー設定(表示スイッチ)には触らない。
+     */
+    /** 内部専用の画像種別。dispatch("upload_account_image") では受け付けない。 */
+    private static final String TIMELINE_IMAGE_KIND = "timeline_internal";
+
+    /** 完全透明の小さな PNG(Base64)。公開背景を「見えない画像」で上書きする時に使う。 */
+    private static String transparentPngBase64() {
+        Bitmap bmp = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888);
+        bmp.eraseColor(0x00000000);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        bmp.compress(Bitmap.CompressFormat.PNG, 100, out);
+        bmp.recycle();
+        return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
+    }
+
+    /** 自分のアカウントに設定されている公開タイムライン背景のパス(無ければ "")。 */
+    private String myTimelineImagePath() {
+        try {
+            Resp r = request("GET", "/api/v2/users", q1("ids", String.valueOf(userId())), (Map<String, String>) null);
+            JSONArray arr = r.body != null ? r.body.optJSONArray("user_info") : null;
+            JSONObject me = arr != null && arr.length() > 0 ? arr.optJSONObject(0) : null;
+            return me != null ? me.optString("timeline_image_file_path", "") : "";
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private String clearPublicTimelineImage() {
+        try {
+            if (myTimelineImagePath().length() == 0) {
+                return new JSONObject().put("ok", true).put("already_clear", true).toString();
+            }
+            HashMap<String, String> form = new HashMap<String, String>();
+            form.put("timeline_image_file_path", "");
+            form.put("version", "android_" + APP_VERSION);
+            String authToken = authToken();
+            if (authToken != null) form.put("auth_token", authToken);
+            Resp img = http("PUT", BASE_URL + "/api/account/timeline_images", (Map<String, String>) null, form);
+            if (img.status == 404 || img.status >= 500) {
+                img = http("PUT", BASE_URL2 + "/api/account/timeline_images", (Map<String, String>) null, form);
+            }
+            dbgLog(nowStr() + "  [TLIMG] clear image=" + img.status);
+            // 空パスをサーバーが受け付けなかった場合は、完全透明の 1x1 画像で上書きして見えなくする
+            String remaining = myTimelineImagePath();
+            String overwrite = null;
+            if (remaining.length() > 0 && !"null".equals(remaining)) {
+                overwrite = uploadAccountImage(transparentPngBase64(), TIMELINE_IMAGE_KIND);
+                dbgLog(nowStr() + "  [TLIMG] transparent overwrite -> " + truncate(overwrite, 120));
+            }
+            boolean cleared = remaining.length() == 0 || "null".equals(remaining)
+                    || (overwrite != null && new JSONObject(overwrite).optBoolean("ok"));
+            if (cleared) decoCache.remove(Long.valueOf(userId()));
+            return new JSONObject().put("ok", cleared).put("image_status", img.status)
+                    .put("overwritten", overwrite != null).toString();
+        } catch (Exception e) {
+            return errJson(e);
+        }
     }
 
     private String roomJoinTrial(String str) {
@@ -7655,12 +7914,54 @@ public class KoeSession {
             JSONObject out = new JSONObject();
             out.put("ok", true);
             if (data != null) {
-                out.put("channel", firstStr(data, "channel", "skyway_channel", "channel_name"));
-                out.put("token", firstStr(data, "token", "skyway_token", "call_token"));
-                out.put("target_id", data.opt("id") != null ? data.opt("id") : receiverId);
+                String tk = firstStr(data, "token", "skyway_token", "call_token");
+                String ch = firstStr(data, "channel", "skyway_channel", "channel_name");
+                // 公式は CallResponse.data.token をそのまま SkyWay のルーム名(=channel)に使う
+                if (ch == null || ch.length() == 0) ch = tk;
+                out.put("channel", ch);
+                out.put("token", tk);
+                // target_id は以降の confirm / disconnect / SkyWay 接続で使う「相手のユーザーID」。
+                // receiver_id(応援トーク受け手レコードのID)とは別物なので取り違えない。
+                out.put("target_id", (targetUserId != null && targetUserId.length() > 0) ? targetUserId : receiverId);
+                out.put("receiver_id", receiverId);
                 out.put("raw", data);
             }
             return out.toString();
+        } catch (Exception e) {
+            return errJson(e);
+        }
+    }
+
+    /**
+     * 公式 DefaultCheeringTalkRealtimeDatabase.isAccepted 相当。
+     * api/cheering_talk/request_connections/{token}/confirm_status が 1 になったら相手が応答。
+     * 発信側は request_checks(受け手用API)ではなくこちらを見る。
+     */
+    private String cheeringConfirmStatus(String token) {
+        if (token == null || token.length() == 0) return jsonErr("token不明");
+        try {
+            int[] st = new int[]{0};
+            String raw = rtdbGet("api/cheering_talk/request_connections/" + token + "/confirm_status.json", st);
+            String v = raw == null ? "" : raw.trim();
+            boolean accepted = "1".equals(v);
+            boolean refused = "0".equals(v) || "2".equals(v);
+            dbgLog(nowStr() + "  [CHEER] confirm_status " + token + " HTTP " + st[0] + " = " + (v.length() == 0 ? "(なし)" : v));
+            return new JSONObject().put("ok", true).put("rtdb", st[0] == 200 ? "ok" : "error")
+                    .put("value", v).put("accepted", accepted).put("refused", refused).toString();
+        } catch (Exception e) {
+            return errJson(e);
+        }
+    }
+
+    /** 公式 isReceiverConnected 相当。相手が実際に音声へ入ったか(receiver_connect_status)。 */
+    private String cheeringReceiverConnected(String token) {
+        if (token == null || token.length() == 0) return jsonErr("token不明");
+        try {
+            int[] st = new int[]{0};
+            String raw = rtdbGet("api/cheering_talk/request_connections/" + token + "/receiver_connect_status.json", st);
+            String v = raw == null ? "" : raw.trim().replace("\"", "");
+            return new JSONObject().put("ok", true).put("value", v)
+                    .put("connected", "connected".equals(v)).toString();
         } catch (Exception e) {
             return errJson(e);
         }
@@ -8519,28 +8820,77 @@ public class KoeSession {
         }
     }
 
+    /**
+     * 公式アプリ(OkHttpSingleton)とまったく同じ形で書き込みリクエストを送る。
+     *   POST / PUT … URL にクエリを付けず、auth_token と version=android_x.y.z を「本文」に入れる
+     *   DELETE     … 本文なし、auth_token と version=android_x.y.z を「クエリ」に入れる
+     * 共通の request() は version を "3.9.101"(android_ 無し)でクエリに載せるため、
+     * 旧サーバー(api.meetscom.com)の /api/matching 系・/api/dive/ 系では
+     * HTTP 200 が返るのに待ち行列へ入らない(＝いつまでもマッチしない)ことがある。
+     * ランダム通話まわりは必ずこちらを使う。
+     */
+    private Resp requestOfficial(String method, String path, Map<String, String> fields) {
+        boolean isDelete = "DELETE".equals(method);
+        HashMap<String, String> body = new HashMap<String, String>();
+        HashMap<String, String> query = new HashMap<String, String>();
+        if (fields != null) {
+            for (Map.Entry<String, String> e : fields.entrySet()) {
+                if (e.getKey() != null && e.getValue() != null) body.put(e.getKey(), e.getValue());
+            }
+        }
+        HashMap<String, String> target = isDelete ? query : body;
+        String token = authToken();
+        if (token != null && token.length() > 0) target.put("auth_token", token);
+        target.put("version", "android_" + APP_VERSION);
+        final String ck = method + " " + path.replaceAll("/\\d+", "/{n}") + " #official";
+        String firstHost = this.hostCache.containsKey(ck) ? this.hostCache.get(ck) : BASE_URL;
+        LinkedHashSet<String> hosts = new LinkedHashSet<String>();
+        hosts.add(firstHost);
+        hosts.add(BASE_URL);
+        hosts.add(BASE_URL2);
+        Resp last = new Resp(0, (JSONObject) null);
+        for (String h : hosts) {
+            Resp r = http(method, h + path, query, isDelete ? null : (Map<String, String>) body);
+            if (r.status >= 200 && r.status < 300) {
+                String prev = this.hostCache.get(ck);
+                if (prev == null || !prev.equals(h)) { this.hostCache.put(ck, h); saveHostCache(); }
+                return r;
+            }
+            if (r.status == 404 || r.status <= 0 || r.status >= 500) {
+                last = r;
+                // 応答なし(タイムアウト)はサーバー側で処理済みの可能性があるので別ホストへ再送しない
+                if (r.status <= 0) return r;
+            } else {
+                return r;
+            }
+        }
+        return last;
+    }
+
     private String matchingStart(String groupId) {
         HashMap<String, String> f = new HashMap<String, String>();
         f.put("group_id", (groupId == null || groupId.length() == 0) ? "1" : groupId);
-        Resp r = request("POST", "/api/matching", (Map<String, String>) null, f);
-        dbgLog(nowStr() + "  [MATCH] start HTTP " + r.status + " " + truncate(redactLog(r.body != null ? r.body.toString() : "(null)"), 200));
-        return okResult(r);
+        Resp r = requestOfficial("POST", "/api/matching", f);
+        dbgLog(nowStr() + "  [MATCH] start HTTP " + r.status + " vsns=" + r.vsns + " " + truncate(redactLog(r.body != null ? r.body.toString() : "(null)"), 300));
+        return okResultStatus(r);
     }
 
     private String matchingCancel() {
-        return okResult(request("DELETE", "/api/matching", (Map<String, String>) null, (Map<String, String>) null));
+        Resp r = requestOfficial("DELETE", "/api/matching", (Map<String, String>) null);
+        dbgLog(nowStr() + "  [MATCH] cancel HTTP " + r.status + " vsns=" + r.vsns);
+        return okResultStatus(r);
     }
 
     private String matchingAccept(String matchingId, String entryId) {
-        Resp r = request("PUT", "/api/matchings/" + matchingId + "/entries/" + entryId + "/accept", (Map<String, String>) null, new HashMap<String, String>());
-        dbgLog(nowStr() + "  [MATCH] accept " + matchingId + "/" + entryId + " HTTP " + r.status);
-        return okResult(r);
+        Resp r = requestOfficial("PUT", "/api/matchings/" + matchingId + "/entries/" + entryId + "/accept", (Map<String, String>) null);
+        dbgLog(nowStr() + "  [MATCH] accept " + matchingId + "/" + entryId + " HTTP " + r.status + " vsns=" + r.vsns);
+        return okResultStatus(r);
     }
 
     private String matchingRefuse(String matchingId, String entryId) {
-        Resp r = request("PUT", "/api/matchings/" + matchingId + "/entries/" + entryId + "/refuse", (Map<String, String>) null, new HashMap<String, String>());
-        dbgLog(nowStr() + "  [MATCH] refuse " + matchingId + "/" + entryId + " HTTP " + r.status);
-        return okResult(r);
+        Resp r = requestOfficial("PUT", "/api/matchings/" + matchingId + "/entries/" + entryId + "/refuse", (Map<String, String>) null);
+        dbgLog(nowStr() + "  [MATCH] refuse " + matchingId + "/" + entryId + " HTTP " + r.status + " vsns=" + r.vsns);
+        return okResultStatus(r);
     }
 
     /** 自分の matching_info を読んで、待機中 / マッチ成立 / 相互OK を判定して返す。 */
@@ -8550,8 +8900,9 @@ public class KoeSession {
         try {
             JSONObject out = new JSONObject().put("ok", true).put("my_user_id", me);
             int[] st0 = new int[]{0};
-            String raw = rtdbGet("users/" + me + "/matching_info.json", st0);
+            String raw = rtdbGet("api/users/" + me + "/matching_info.json", st0);
             out.put("rtdb", st0[0] == 200 ? "ok" : ((st0[0] == 401 || st0[0] == 403) ? "denied" : "error"));
+            dbgLog(nowStr() + "  [MATCH] rtdb HTTP " + st0[0] + " " + truncate(redactLog(raw), 160));
             if (raw.length() == 0 || "null".equals(raw.trim())) return out.put("state", "waiting").toString();
             JSONObject o;
             try { o = new JSONObject(raw); } catch (Exception e) { return out.put("state", "waiting").toString(); }
@@ -8573,6 +8924,11 @@ public class KoeSession {
             out.put("matched_fresh", mAt != 0 && nowMs < mAt + 15000L);
             long uAt = instantMillis(mutualAt);
             out.put("mutual_fresh", uAt != 0 && Math.abs(nowMs - uAt) <= 15000L);
+            // 公式は Firebase の push で即座に気づくので 15 秒で足りるが、こちらは定期確認なので
+            // 端末がスリープ/バックグラウンドで JS が止まると 15 秒窓を跨いで取りこぼす。
+            // 取りこぼし救済用に「何秒前か」も渡す(公式と同じローカル時刻解釈で計算)。
+            out.put("matched_age_local", mAt != 0 ? (nowMs - mAt) / 1000L : -1L);
+            out.put("mutual_age_local", uAt != 0 ? (nowMs - uAt) / 1000L : -1L);
             out.put("state", mutualAt.length() > 0 ? "mutual" : (matchedAt.length() > 0 ? "matched" : "waiting"));
             return out.toString();
         } catch (Exception ex) {
@@ -8583,7 +8939,7 @@ public class KoeSession {
     /** 相手が断ったか(相手側 matching_info の refused_at)。 */
     private String matchingRefused(String targetId, String matchingId) {
         try {
-            String raw = rtdbGet("users/" + targetId + "/matching_info/" + matchingId + "/refused_at.json");
+            String raw = rtdbGet("api/users/" + targetId + "/matching_info/" + matchingId + "/refused_at.json");
             boolean refused = raw.length() > 0 && !"null".equals(raw.trim());
             return new JSONObject().put("ok", true).put("refused", refused).toString();
         } catch (Exception e) {
@@ -8598,7 +8954,7 @@ public class KoeSession {
         f.put("target_id", targetId);
         f.put("call_method", "skyway");
         f.put("origin", "10");
-        Resp r = request("POST", "/api/dive/requests", (Map<String, String>) null, f);
+        Resp r = requestOfficial("POST", "/api/dive/requests", f);
         dbgLog(nowStr() + "  [DIVE] request target=" + targetId + " HTTP " + r.status + " " + truncate(redactLog(r.body != null ? r.body.toString() : "(null)"), 200));
         try {
             if (r.status != 200 && r.status != 201) {
@@ -8630,7 +8986,7 @@ public class KoeSession {
     private String diveConfirmStatus(String token) {
         if (token == null || token.length() == 0) return jsonErr("token不明");
         try {
-            String raw = rtdbGet("request_connections/" + token + "/confirm_status.json");
+            String raw = rtdbGet("api/request_connections/" + token + "/confirm_status.json");
             boolean ready = raw.length() > 0 && !"null".equals(raw.trim());
             return new JSONObject().put("ok", true).put("ready", ready).put("value", raw).toString();
         } catch (Exception e) {
@@ -8655,7 +9011,16 @@ public class KoeSession {
     }
 
     private String diveRequestCancel() {
-        return okResult(request("POST", "/api/dive/request_cancels", (Map<String, String>) null, new HashMap<String, String>()));
+        return diveRequestCancel(null);
+    }
+
+    /** 発信の取り消し。公式は target_id を必ず載せるので、分かっていれば付ける。 */
+    private String diveRequestCancel(String targetId) {
+        HashMap<String, String> f = new HashMap<String, String>();
+        if (targetId != null && targetId.length() > 0) f.put("target_id", targetId);
+        Resp r = requestOfficial("POST", "/api/dive/request_cancels", f);
+        dbgLog(nowStr() + "  [DIVE] cancel target=" + (targetId == null ? "-" : targetId) + " HTTP " + r.status + " vsns=" + r.vsns);
+        return okResultStatus(r);
     }
 
     /** グッドトークを出せる最短の通話秒数(公式: client_system_params.dive.min_good_talk_second)。 */
@@ -8699,7 +9064,7 @@ public class KoeSession {
         long me = userId();
         if (me == 0) return jsonErr("ログインが必要です");
         try {
-            String raw = rtdbGet("users/" + me + "/is_incoming.json");
+            String raw = rtdbGet("api/users/" + me + "/is_incoming.json");
             boolean inc = "true".equals(raw.trim());
             return new JSONObject().put("ok", true).put("incoming", inc).toString();
         } catch (Exception e) {
@@ -9128,6 +9493,41 @@ public class KoeSession {
         }
     }
 
+    /**
+     * 公式アプリの「advertisement」設定のうち、koetomo自身の宣伝(subscription=定期購入の自社バナー)だけを返す。
+     * AdMob / AdGeneration などの第三者広告ネットワークは、非公式アプリから koetomo の広告枠IDで
+     * 読み込むと koetomo の広告アカウントに不正インプレッションが乗る(各社の規約違反)ため一切扱わない。
+     * ここで返すのは koetomo が自前で配信する宣伝画像＋遷移先だけ。
+     */
+    private String getOfficialAd() {
+        try {
+            JSONObject sys = this.clientDefines != null ? this.clientDefines.optJSONObject("client_system_params") : null;
+            JSONObject adv = sys != null ? sys.optJSONObject("advertisement") : null;
+            JSONObject cfg = adv != null ? adv.optJSONObject("config") : null;
+            JSONObject andr = cfg != null ? cfg.optJSONObject("android_for_g") : null;
+            String url = andr != null ? andr.optString("url", "") : "";
+            if (url.length() == 0) return new JSONObject().put("ok", true).put("has", false).toString();
+            Resp r = http("GET", url, (Map<String, String>) null, (Map<String, String>) null);
+            JSONObject body = r.body;
+            if (body == null) return new JSONObject().put("ok", true).put("has", false).toString();
+            JSONObject data = body.optJSONObject("data");
+            JSONObject root = data != null ? data : body;
+            // koetomo 自社宣伝(定期購入バナー)だけ取り出す
+            JSONObject sub = root.optJSONObject("subscription");
+            if (sub == null) return new JSONObject().put("ok", true).put("has", false).toString();
+            int enabled = sub.optInt("enabled", 0);
+            String img = firstStr(sub, "image_url", "imageUrl", "banner_image_url", "image");
+            String link = firstStr(sub, "link_url", "linkUrl", "url", "redirect_url");
+            if (link == null || link.length() == 0) link = "https://r.koetomo.fun/contents/coin_get_2022";
+            boolean has = enabled == 1 && img != null && img.length() > 0;
+            return new JSONObject().put("ok", true).put("has", has)
+                    .put("image_url", img == null ? "" : img).put("link_url", link)
+                    .put("label", "PR").toString();
+        } catch (Exception e) {
+            try { return new JSONObject().put("ok", true).put("has", false).toString(); } catch (Exception ig) { return errJson(e); }
+        }
+    }
+
     private String getSkyflagOfferWallUrl() {
         Resp resp = request("GET", "/api/skyflag/ow_url", (Map<String, String>) null, (Map<String, String>) null);
         try {
@@ -9444,6 +9844,7 @@ public class KoeSession {
         try {
             JSONObject out = new JSONObject().put("ok", ok).put("status", r.status);
             if (r.sessionExpired) out.put("session_expired", true);
+            if (r.authError) out.put("auth_error", true);
             return out.toString();
         } catch (Exception e) {
             return errJson(e);
@@ -9636,7 +10037,9 @@ public class KoeSession {
                         str3 = "header_image_file_path";
                         str4 = "/api/account/header_images";
                         v2Path = "/api/v2/account/header_images";
-                    } else if ("background".equals(str2)) {
+                    } else if ("background".equals(str2) || TIMELINE_IMAGE_KIND.equals(str2)) {
+                        // 投稿デコレーション(公式の timeline_images)。全ユーザーに公開されるため、
+                        // JS 側は必ず「このように表示されます」の確認を経てから呼ぶ。
                         str3 = "timeline_image_file_path";
                         str4 = "/api/account/timeline_images";
                     } else {
@@ -9918,6 +10321,35 @@ public class KoeSession {
     //    B6 直近ログイン(1時間以内)                +0.5
     //  A全成立 かつ B合計 >= 6.0 → 自動申請 / 3.0以上 → 画面上の「⚠ 業者?」表示のみ
     private static final long BOT_APP_START_MS = System.currentTimeMillis();
+    /* ===== 業者判定ルールの文字列難読化 =====
+       正規表現や判定理由をそのまま定数に置くと、APK を展開して strings を眺めるだけで
+       「どう避ければ検知されないか」が分かってしまう。実行時に組み立てて復元する。 */
+    private static final byte[] BK = new byte[]{107,84,43,98,111,116,47,50,48,50,54};
+    private static String dx(String b64) {
+        try {
+            byte[] a = android.util.Base64.decode(b64, android.util.Base64.NO_WRAP);
+            byte[] o = new byte[a.length];
+            for (int i = 0; i < a.length; i++) o[i] = (byte) (a[i] ^ BK[i % BK.length]);
+            return new String(o, "UTF-8");
+        } catch (Exception e) { return ""; }
+    }
+    private static final String R_ICON = dx("NQ9qTzUVAkgAHw82LxpUEigBGkBcURc+WwdQE1NFVVBGQnA=");
+    private static final String R_NAME = dx("NQ91PhwpVAMcAAYWDxtPVilUAU0W");
+    private static final String R_DIGIT = dx("NQ8bT1YpBBY=");
+    private static final String L_ON1 = dx("WrKy4IbivNaLl9Pt0Q==");
+    private static final String L_ON2 = dx("jtythtTRyrS1");
+    private static final String L_ON3 = dx("iNaBgezHzLGZ0bTPt6jR");
+    private static final String N_ICON = dx("gtOkhfvXyqy70bTJt6nGjPac0bOB0/vZ");
+    private static final String N_NOICON = dx("iNaJge3QzLCD0bXYsrfIh9yC156o");
+    private static final String N_ZERO = dx("j+6PhNr1H9Gzid7s/s7V3pObi9SJvYjVgYHu48yxi9eP372WwIjWldqav9Xq/sjj+A==");
+    private static final String N_NAME = dx("jsSmh+b5zLO817vzvIH8REfJk7HUo9uxhvU=");
+    private static final String N_NEAR = dx("jcOJhfDRTV1E0bfDHW+L79fIp5o=");
+    private static final String N_FEAT = dx("jcOJhfDRTV1E0bfDsbvui8yvVFVTQh4mTg==");
+    private static final String N_RM = dx("iNeCgezHzLGw0bXLt6j8jPes0bOzeSV/z9jLkpqzAA==");
+    private static final String N_LOGIN = dx("jM+fitDlzLGd0bTbt6nGjPec");
+    private static final String N_POST = dx("jM+fitDlHtSpsN/9x8jjxA==");
+    private static final String N_POST2 = dx("j++dhOXhyJqP");
+
     private static final double BOT_AUTO_SCORE = 6.0;
     private static final double BOT_MARK_SCORE = 3.0;
 
@@ -10005,6 +10437,26 @@ public class KoeSession {
     }
 
     // 判定本体。u は API から取り直した生のユーザー情報。
+    /**
+     * 画面表示用の業者判定。ルールは全てネイティブ側にあり、通信もしない。
+     * app.js に判定式を置くと APK を展開しただけで回避方法が分かるため、JS からはこれを呼ぶだけにする。
+     */
+    private String botEvalLocal(String rawJson, String uidStr) {
+        try {
+            long uid = 0;
+            try { uid = Long.parseLong(String.valueOf(uidStr).trim()); } catch (Exception ig) {}
+            JSONObject u = (rawJson == null || rawJson.length() == 0) ? new JSONObject() : new JSONObject(rawJson);
+            JSONObject r = botEval(u, uid, false);
+            return new JSONObject().put("ok", true)
+                    .put("level", r.optString("level", ""))
+                    .put("hard", r.optBoolean("hard", false))
+                    .put("reasons", r.optJSONArray("reasons") == null ? new JSONArray() : r.optJSONArray("reasons"))
+                    .toString();
+        } catch (Exception e) {
+            return errJson(e);
+        }
+    }
+
     private JSONObject botEval(JSONObject u, long uid, boolean allowPostFetch) {
         JSONObject out = new JSONObject();
         try {
@@ -10016,7 +10468,11 @@ public class KoeSession {
             String fn = icon;
             int sl = fn.lastIndexOf('/'); if (sl >= 0) fn = fn.substring(sl + 1);
             int qm = fn.indexOf('?'); if (qm >= 0) fn = fn.substring(0, qm);
-            boolean a1 = fn.matches("^[A-Za-z0-9]{16}\\.(png|jpe?g|webp)$");
+            /* アイコンが「16文字の自動生成名」だけでなく「未設定」も同じ扱いにする。
+               アイコンを付けないだけで検知を抜けられていたため。 */
+            boolean genIcon = fn.matches(R_ICON);
+            boolean noIcon = (icon.trim().length() == 0);
+            boolean a1 = genIcon || noIcon;
 
             int fol = u.optInt("follower_count", -1), fee = u.optInt("followee_count", -1), fr = u.optInt("friend_count", -1);
             long liked = u.optLong("liked_count", -1);
@@ -10029,33 +10485,36 @@ public class KoeSession {
             boolean a4 = (av == 0);
 
             boolean hard = a1 && a2 && a3 && a4;
+            if (hard) { rs.put(genIcon ? N_ICON : N_NOICON); rs.put(N_ZERO); }
             ev.put("icon_file", fn).put("follower_count", fol).put("followee_count", fee)
               .put("friend_count", fr).put("liked_count", liked).put("comment_empty", a3)
               .put("age_verification_status", av)
-              .put("A1_icon16", a1).put("A2_all_zero", a2).put("A3_no_bio", a3).put("A4_no_age_verify", a4);
+              .put("A1_icon16", a1).put("A2_all_zero", a2).put("A3_no_bio", a3).put("A4_no_age_verify", a4)
+              .put("icon_kind", genIcon ? "generated" : (noIcon ? "none" : "normal"));
 
             double sc = 0;
             String nm = u.optString("name", "");
             ev.put("name", nm);
-            if (nm.matches("^[^\\s]{1,20}[0-9]{3}$") && !nm.matches("^[0-9]+$")) { sc += 3; rs.put("名前が単語+3桁数字"); }
-            if (hard && botKnownNear(uid)) { sc += 3; rs.put("既知botとID連番"); }
+            if (nm.matches(R_NAME) && !nm.matches(R_DIGIT)) { sc += 3; rs.put(N_NAME); }
+            if (hard && noIcon) { sc += 1; rs.put(N_NOICON); }
+            if (hard && botKnownNear(uid)) { sc += 3; rs.put(N_NEAR); }
             String feat = u.isNull("feature") ? "" : u.optString("feature", "");
             ev.put("feature", feat.length() > 120 ? feat.substring(0, 120) : feat);
-            if (hard && botKnownFeature(uid, feat)) { sc += 2; rs.put("既知botと同一feature"); }
+            if (hard && botKnownFeature(uid, feat)) { sc += 2; rs.put(N_FEAT); }
             boolean rm = truthy(u.opt("random_match_enabled"));
             JSONObject st = u.optJSONObject("settings");
             if (!rm && st != null) rm = truthy(st.opt("random_match_enabled"));
             ev.put("random_match_enabled", rm);
-            if (rm && a2) { sc += 1.5; rs.put("ランダムマッチON+交流0"); }
+            if (rm && a2) { sc += 1.5; rs.put(N_RM); }
             String ls = u.optString("login_status_with_unit", "");
             ev.put("login_status", ls);
-            if (ls.indexOf("1時間以内") >= 0 || ls.indexOf("分以内") >= 0 || ls.indexOf("オンライン") >= 0) { sc += 0.5; rs.put("直近ログイン"); }
+            if (ls.indexOf(L_ON1) >= 0 || ls.indexOf(L_ON2) >= 0 || ls.indexOf(L_ON3) >= 0) { sc += 0.5; rs.put(N_LOGIN); }
             // B5 は通信が増えるので、結果を左右するとき(3.0〜6.0)だけ数えに行く
             int recent = -1;
             if (hard && allowPostFetch && sc >= BOT_MARK_SCORE && sc < BOT_AUTO_SCORE) {
                 recent = botRecentPosts(uid, 3600000L);
                 ev.put("posts_last_hour", recent);
-                if (recent >= 5) { sc += 2; rs.put("直近1時間に" + recent + "件投稿"); }
+                if (recent >= 5) { sc += 2; rs.put(N_POST + recent + N_POST2); }
             }
 
             String level = hard ? (sc >= BOT_AUTO_SCORE ? "high" : (sc >= BOT_MARK_SCORE ? "mid" : "")) : "";
@@ -10370,6 +10829,9 @@ public class KoeSession {
                 if (str.equals("moderation_auto_spam")) {
                     return moderationAutoSpam(jSONArray.optString(0), jSONArray.optString(1));
                 }
+                if (str.equals("bot_eval_local")) {
+                    return botEvalLocal(jSONArray.optString(0, ""), jSONArray.optString(1, ""));
+                }
                 if (str.equals("moderation_report_spam")) {
                     return moderationReportSpam(jSONArray.optString(0), jSONArray.optString(1));
                 }
@@ -10453,7 +10915,12 @@ public class KoeSession {
                     return createPostWithVoice("/api/timeline_posts", jSONArray.optString(0), jSONArray.optString(1), jSONArray.optString(2), jSONArray.optString(3), "0", jSONArray.optString(4, "0"));
                 }
                 if (str.equals("upload_account_image")) {
-                    return uploadAccountImage(jSONArray.optString(0), jSONArray.optString(1, "profile"));
+                    String kind = jSONArray.optString(1, "profile");
+                    if (!"profile".equals(kind) && !"header".equals(kind)) {
+                        // 投稿デコレーション(background)は公開機能のため現在は無効化中(要望時に有効化)
+                        return jsonErr("この画像種別はアップロードできません: " + kind);
+                    }
+                    return uploadAccountImage(jSONArray.optString(0), kind);
                 }
                 if (str.equals("change_password")) {
                     return changePassword(jSONArray.optString(0), jSONArray.optString(1), jSONArray.optString(2));
@@ -10636,7 +11103,7 @@ public class KoeSession {
                     return diveConfirm(jSONArray.optString(0));
                 }
                 if (str.equals("dive_request_cancel")) {
-                    return diveRequestCancel();
+                    return diveRequestCancel(jSONArray.optString(0, ""));
                 }
                 if (str.equals("dive_incoming")) {
                     return diveIncoming();
@@ -10745,6 +11212,9 @@ public class KoeSession {
                 }
                 if (str.equals("get_community_rules")) {
                     return getCommunityRules(jSONArray.optString(0));
+                }
+                if (str.equals("get_followee_ids")) {
+                    return getFolloweeIds();
                 }
                 if (str.equals("get_followees")) {
                     return followList(jSONArray.optString(0), jSONArray.optString(1, "1"), "followees");
@@ -10916,6 +11386,9 @@ public class KoeSession {
                 if (str.equals("room_join_trial")) {
                     return roomJoinTrial(jSONArray.optString(0, ""));
                 }
+                if (str.equals("clear_public_timeline_image")) {
+                    return clearPublicTimelineImage();
+                }
                 if (str.equals("room_invite")) {
                     return roomInvite(jSONArray.optString(0), jSONArray.optString(1));
                 }
@@ -11035,6 +11508,12 @@ public class KoeSession {
                 }
                 if (str.equals("start_cheering_call")) {
                     return startCheeringCall(jSONArray.optString(0), jSONArray.optString(1), jSONArray.optString(2));
+                }
+                if (str.equals("cheering_confirm_status")) {
+                    return cheeringConfirmStatus(jSONArray.optString(0));
+                }
+                if (str.equals("cheering_receiver_connected")) {
+                    return cheeringReceiverConnected(jSONArray.optString(0));
                 }
                 if (str.equals("check_cheering_call")) {
                     return checkCheeringCall();
@@ -11158,6 +11637,9 @@ public class KoeSession {
                 }
                 if (str.equals("get_skyflag_offer_wall_url")) {
                     return getSkyflagOfferWallUrl();
+                }
+                if (str.equals("get_official_ad")) {
+                    return getOfficialAd();
                 }
                 if (str.equals("get_official_links")) {
                     return getOfficialLinks();

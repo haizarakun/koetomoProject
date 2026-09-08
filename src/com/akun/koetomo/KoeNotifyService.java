@@ -79,6 +79,8 @@ public class KoeNotifyService extends Service {
         }
         if (!running) {
             running = true;
+            // 前面で既読にした分が残らないよう、開始時に未読数の基準はリセット(初回の確認で取り直す)
+            try { getSharedPreferences(PREF, 0).edit().remove("last_cnt").apply(); } catch (Exception ig) {}
             worker = new Thread(new Runnable() {
                 public void run() {
                     Context app = getApplicationContext();
@@ -89,16 +91,18 @@ public class KoeNotifyService extends Service {
                         return;
                     }
                     int n = 0;
+                    int idle = 0; // 新着が無かった連続回数(多いほど間隔を広げて電池と通信を節約)
                     while (running) {
+                        long wait = n == 0 ? 5000 : (idle < 6 ? 30000 : (idle < 20 ? 60000 : 120000));
                         try {
-                            Thread.sleep(n == 0 ? 5000 : 20000);
+                            Thread.sleep(wait);
                         } catch (InterruptedException e) {
                             return;
                         }
                         if (!running) return;
                         n++;
                         try {
-                            pollOnce(app, session);
+                            if (pollOnce(app, session)) idle = 0; else idle++;
                         } catch (Throwable t) {
                         }
                     }
@@ -157,15 +161,31 @@ public class KoeNotifyService extends Service {
      * 既読位置(last_ts)は MainActivity 側のポーラーと同じ SharedPreferences を共有するので、
      * 前面/背面が切り替わっても同じ通知が二重に出ることはない。
      */
-    static void pollOnce(Context c, KoeSession session) {
+    /** 1回分の確認。新着を通知したら true。まず軽い未読数だけ見て、増えていなければ一覧は取りに行かない。 */
+    static boolean pollOnce(Context c, KoeSession session) {
         try {
-            if (session == null || !session.hasAuthToken()) return;
+            if (session == null || !session.hasAuthToken()) return false;
+            SharedPreferences sp0 = c.getSharedPreferences(PREF, 0);
+            try {
+                String cr = session.dispatch("get_unread_notif_count", new org.json.JSONArray());
+                if (cr != null) {
+                    org.json.JSONObject co = new org.json.JSONObject(cr);
+                    int cnt = co.optInt("count", co.optInt("unread_count", -1));
+                    if (co.optBoolean("ok", true) && cnt >= 0) {
+                        int lastCnt = sp0.getInt("last_cnt", -1);
+                        sp0.edit().putInt("last_cnt", cnt).apply();
+                        // 未読数が増えていない = 新着なし。一覧(重い: ユーザー名解決つき)は取らない
+                        if (lastCnt >= 0 && cnt <= lastCnt) return false;
+                    }
+                }
+            } catch (Exception ig) {
+            }
             String res = session.dispatch("get_notifications", new org.json.JSONArray().put("normal"));
-            if (res == null) return;
+            if (res == null) return false;
             org.json.JSONObject o = new org.json.JSONObject(res);
-            if (!o.optBoolean("ok")) return;
+            if (!o.optBoolean("ok")) return false;
             org.json.JSONArray arr = o.optJSONArray("notifications");
-            if (arr == null) return;
+            if (arr == null) return false;
             SharedPreferences sp = c.getSharedPreferences(PREF, 0);
             long last = sp.getLong("last_ts", -1);
             long newest = 0;
@@ -179,9 +199,9 @@ public class KoeNotifyService extends Service {
             }
             if (last < 0) {
                 sp.edit().putLong("last_ts", newest).apply();
-                return;
+                return false;
             }
-            if (fresh.isEmpty()) return;
+            if (fresh.isEmpty()) return false;
             sp.edit().putLong("last_ts", Math.max(newest, last)).apply();
             int shown = 0;
             for (int i = 0; i < fresh.size(); i++) {
@@ -197,7 +217,9 @@ public class KoeNotifyService extends Service {
             if (fresh.size() > shown) {
                 KoeApiBridge.postNotifyFromBackground(c, "声とも+", "ほか " + (fresh.size() - shown) + " 件の新しい通知");
             }
+            return true;
         } catch (Exception e) {
         }
+        return false;
     }
 }

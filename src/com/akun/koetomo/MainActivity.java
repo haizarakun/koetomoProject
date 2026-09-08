@@ -26,6 +26,7 @@ import android.widget.TextView;
 import java.util.ArrayList;
 
 public class MainActivity extends Activity {
+    private ImageThumbCache thumbCache;
     private static final int FILE_CHOOSER_REQUEST = 100;
     /* access modifiers changed from: private */
     public ValueCallback<Uri[]> filePathCallback;
@@ -356,18 +357,17 @@ public class MainActivity extends Activity {
             settings.setLoadWithOverviewMode(true);
         } catch (Exception e) {
         }
-        try {
-            settings.setRenderPriority(WebSettings.RenderPriority.HIGH);
-        } catch (Exception e) {
-        }
         // スクロールの滑らかさ向上(オフスクリーン先読みラスタライズ)
         try {
+            // オフスクリーン先読みラスタライズは常時GPUで余分に描画して発熱の一因になるため無効化。
+            // 画面外のスキップは CSS の content-visibility 側で行う。
             if (Build.VERSION.SDK_INT >= 23) {
-                settings.setOffscreenPreRaster(true);
+                settings.setOffscreenPreRaster(false);
             }
         } catch (Exception e) {
         }
         WebView.setWebContentsDebuggingEnabled(false);
+        this.thumbCache = new ImageThumbCache(this);
         this.webView.setWebViewClient(new WebViewClient() {
             private boolean handleNav(String url) {
                 try {
@@ -384,6 +384,18 @@ public class MainActivity extends Activity {
                 } catch (Exception e) { return true; }
             }
             @Override public boolean shouldOverrideUrlLoading(WebView v, String url) { return handleNav(url); }
+            /** アイコン画像(koe_w= 付き)はネイティブで縮小したサムネイルを返す。発熱・メモリ対策。 */
+            @Override public android.webkit.WebResourceResponse shouldInterceptRequest(WebView v, android.webkit.WebResourceRequest req) {
+                try {
+                    String url = req != null && req.getUrl() != null ? req.getUrl().toString() : null;
+                    if (ImageThumbCache.handles(url)) {
+                        android.webkit.WebResourceResponse thumb = MainActivity.this.thumbCache.serve(url);
+                        if (thumb != null) return thumb;
+                    }
+                } catch (Throwable ignored) {
+                }
+                return super.shouldInterceptRequest(v, req);
+            }
             @Override public void onPageFinished(WebView v, String url) {
                 super.onPageFinished(v, url);
                 MainActivity.this.bootLog("ページ読み込み完了");
@@ -619,16 +631,18 @@ public class MainActivity extends Activity {
             bgNotifThread = new Thread(new Runnable() {
                 public void run() {
                     int n = 0;
+                    int idle = 0; // 新着なしが続くほど間隔を広げる(バックグラウンド発熱・電池対策)
                     while (bgNotifRunning) {
+                        long wait = n == 0 ? 6000 : (idle < 5 ? 12000 : (idle < 15 ? 30000 : 60000));
                         try {
-                            Thread.sleep(n == 0 ? 6000 : 12000); // 通知の反映を早める(60秒→30秒)
+                            Thread.sleep(wait);
                         } catch (InterruptedException e) {
                             return;
                         }
                         if (!bgNotifRunning) return;
                         n++;
                         try {
-                            pollNotificationsOnce(bridge);
+                            if (pollNotificationsOnce(bridge)) idle = 0; else idle++;
                         } catch (Throwable t) {
                         }
                     }
@@ -673,15 +687,15 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void pollNotificationsOnce(KoeApiBridge bridge) {
+    private boolean pollNotificationsOnce(KoeApiBridge bridge) {
         try {
-            if (bridge == null || bridge.session == null || !bridge.session.hasAuthToken()) return; // 未ログイン時は取得しない
+            if (bridge == null || bridge.session == null || !bridge.session.hasAuthToken()) return false; // 未ログイン時は取得しない
             String res = bridge.session.dispatch("get_notifications", new org.json.JSONArray().put("normal"));
-            if (res == null) return;
+            if (res == null) return false;
             org.json.JSONObject o = new org.json.JSONObject(res);
-            if (!o.optBoolean("ok")) return;
+            if (!o.optBoolean("ok")) return false;
             org.json.JSONArray arr = o.optJSONArray("notifications");
-            if (arr == null) return;
+            if (arr == null) return false;
             android.content.SharedPreferences sp = getSharedPreferences("koe_bgnotif", 0);
             long last = sp.getLong("last_ts", -1);
             long newest = 0;
@@ -696,9 +710,9 @@ public class MainActivity extends Activity {
             if (last < 0) {
                 // 初回は基準時刻だけ覚える(過去分を一斉通知しない)
                 sp.edit().putLong("last_ts", newest).apply();
-                return;
+                return false;
             }
-            if (fresh.isEmpty()) return;
+            if (fresh.isEmpty()) return false;
             sp.edit().putLong("last_ts", Math.max(newest, last)).apply();
             int shown = 0;
             for (org.json.JSONObject n : fresh) {
@@ -717,6 +731,7 @@ public class MainActivity extends Activity {
             }
         } catch (Exception e) {
         }
+        return true;
     }
 
     public void onPause() {
