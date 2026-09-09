@@ -241,3 +241,73 @@ body.koe-bg-hidden *{animation-play-state:paused!important}
 .koe-blk-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px 2px 8px; border-radius: 12px; font-size: 11px; background: rgba(128,128,128,.18); border: 1px solid var(--border, rgba(255,255,255,.1)); }
 .koe-blk-chip button { background: none; border: none; color: inherit; opacity: .7; font-size: 11px; padding: 0 2px; cursor: pointer; line-height: 1; }
 .koe-blk-chip button:hover { opacity: 1; color: #e5484d; }
+/* ===== 公式の装飾(プロフィール枠・バッジ)。公式 ProfileAvatar と同じ比率: アイコンは枠画像の 50.7%、バッジは右下 35% ===== */
+.koe-adorn{position:relative;display:inline-block;flex-shrink:0;line-height:0;vertical-align:middle}
+.koe-adorn>.avatar{position:relative;z-index:1}
+.koe-adorn-frame{position:absolute;left:50%;top:50%;width:197%;height:197%;transform:translate(-50%,-50%);object-fit:contain;pointer-events:none;z-index:2;background:none;border:0}
+.koe-adorn-badge{position:absolute;right:-6%;bottom:-6%;width:38%;height:38%;object-fit:contain;pointer-events:none;z-index:3;background:none;border:0;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5))}
+.koe-adorn.has-deco .koe-adorn-badge{width:69%;height:69%;right:-48%;bottom:-48%}
+#profileViewAvatar .koe-adorn,#profileAvatar .koe-adorn{display:block;width:100%;height:100%}
+.tl-avatar .koe-adorn{display:block}
+/* 通話の参加者タイル: 枠は少し控えめ(隣と重なりすぎない) */
+.callv2-deco{position:absolute;left:50%;top:50%;width:150%;height:150%;transform:translate(-50%,-50%);object-fit:contain;pointer-events:none;z-index:1}
+.callv2-pbadge{position:absolute;right:-8px;bottom:-8px;width:44%;height:44%;object-fit:contain;pointer-events:none;z-index:2;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5))}
+/* ===== 枠一覧: 知り合いの印・参加者プレビュー ===== */
+.koe-acq-tag{background:rgba(51,183,207,.18);color:var(--accent,#33b7cf);border:1px solid rgba(51,183,207,.35);margin-top:4px;display:inline-block}
+.room-card .room-count-badge{cursor:pointer}
+.koe-members-list{max-height:52vh;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.koe-member-row{display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid var(--border,rgba(255,255,255,.08));cursor:pointer}
+.koe-member-row:last-child{border-bottom:0}
+.koe-member-row .koe-adorn,.koe-member-row>.avatar{width:40px;height:40px}
+.koe-member-row .avatar{width:40px;height:40px;font-size:16px}
+.koe-member-body{min-width:0;flex:1}
+.koe-member-body .card-name{font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* ===== プロフィール: いま参加中の枠 ===== */
+.koe-pv-room{margin:8px 0 4px}
+.koe-pv-room-inner{border:1px solid rgba(51,183,207,.35);background:rgba(51,183,207,.08);border-radius:12px;padding:10px 12px}
+.koe-pv-room-title{font-size:13px;line-height:1.5;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.koe-pv-room-btns{display:flex;gap:8px;margin-top:8px}
+.koe-pv-room-btns button{width:auto;flex:1;padding:7px 10px;font-size:13px}
+/* ===== 枠カード: 参加者のアイコン列・すぐ参加ボタン ===== */
+.koe-faces{display:flex;align-items:center;margin:6px 0 2px;padding-left:4px}
+.koe-face{display:inline-block;width:30px;height:30px;margin-left:-8px;border-radius:50%;border:2px solid var(--bg-content,#14161c);background:var(--bg-content,#14161c);position:relative;overflow:visible}
+.koe-face:first-child{margin-left:0}
+.koe-face .avatar,.koe-face .koe-adorn{width:26px;height:26px;font-size:11px;display:block}
+.koe-face .koe-adorn>.avatar{width:26px;height:26px}
+.koe-face.owner{border-color:#e8a13c}
+.koe-face.acq{border-color:var(--accent,#33b7cf)}
+.koe-face .koe-adorn-frame{width:160%;height:160%}
+.koe-face .koe-adorn-badge{display:none}
+.koe-face-more{font-size:11px;opacity:.75;margin-left:6px}
+.koe-room-meta{flex-wrap:wrap;row-gap:4px}
+.koe-room-meta>span{white-space:nowrap;display:inline-flex;align-items:center;gap:3px}
+.koe-room-meta .koe-abs-time{opacity:.7;margin-left:2px}
+.koe-room-join{background:rgba(51,183,207,.15);border:1px solid rgba(51,183,207,.4);color:var(--accent,#33b7cf);border-radius:50%;width:44px;height:44px;display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:0;cursor:pointer}
+.koe-room-join .ico{width:22px;height:22px}
+.room-card .card-sub .profile-link{display:inline-flex;vertical-align:middle;opacity:.8;margin-left:2px}
+/* カード内では枠画像がはみ出しすぎないように */
+.room-card .koe-adorn-frame,.tl-avatar .koe-adorn-frame,.koe-member-row .koe-adorn-frame{width:170%;height:170%}
+/* ===== 公式「タイムライン背景画像」(投稿デコレーション)の表示: 相手が有効にしている画像を投稿カードの背景に ===== */
+.timeline-card.has-deco{background-image:linear-gradient(rgba(20,22,28,.72),rgba(20,22,28,.72)),var(--koe-deco);background-image:linear-gradient(color-mix(in srgb,var(--bg-sidebar) 74%,transparent),color-mix(in srgb,var(--bg-sidebar) 74%,transparent)),var(--koe-deco);background-size:cover;background-position:center}
+/* 編集プレビューの自己紹介は 4 行まで(長い自己紹介で画面が埋まらないように) */
+.qe-preview-comment{display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+/* ===== プロフィール: もらったギフト(公式の飾り棚) ===== */
+.koe-pv-gifts{margin:8px 0 4px}
+.koe-gift-row{display:flex;gap:8px;overflow-x:auto;padding:4px 2px 6px;-webkit-overflow-scrolling:touch}
+.koe-gift{flex:0 0 auto;width:52px;height:52px;border-radius:12px;background:var(--bg-sidebar,#1a1c22);border:1px solid var(--border,rgba(255,255,255,.08));display:flex;align-items:center;justify-content:center;font-size:22px;cursor:pointer;overflow:hidden}
+.koe-gift img{width:44px;height:44px;object-fit:contain}
+.koe-gift.unopened{opacity:.55}
+/* ===== セレクトの選択シート(Android 標準ダイアログの代わり) ===== */
+.koe-sheet-bg{position:fixed;inset:0;z-index:4000;background:rgba(0,0,0,0);display:flex;align-items:flex-end;justify-content:center;transition:background .18s ease}
+.koe-sheet-bg.open{background:rgba(0,0,0,.55)}
+.koe-sheet{width:100%;max-width:520px;max-height:70vh;background:var(--bg-sidebar,#161616);border:1px solid var(--border,#262626);border-bottom:0;border-radius:20px 20px 0 0;box-shadow:0 -12px 40px rgba(0,0,0,.45);transform:translateY(100%);transition:transform .22s cubic-bezier(.2,.8,.2,1);display:flex;flex-direction:column;padding-bottom:max(10px,env(safe-area-inset-bottom))}
+.koe-sheet-bg.open .koe-sheet{transform:translateY(0)}
+.koe-sheet-grip{width:40px;height:4px;border-radius:2px;background:var(--text-muted,#949ba4);opacity:.45;margin:10px auto 6px}
+.koe-sheet-title{font-size:13px;color:var(--text-muted,#949ba4);padding:2px 18px 8px;font-weight:600;letter-spacing:.02em}
+.koe-sheet-list{overflow-y:auto;-webkit-overflow-scrolling:touch;padding:0 10px}
+.koe-sheet-item{display:flex;align-items:center;justify-content:space-between;width:100%;text-align:left;background:none;border:0;color:var(--text-normal,#dbdee1);font:inherit;font-size:15px;padding:14px 12px;border-radius:12px;cursor:pointer}
+.koe-sheet-item:active{background:var(--bg-hover,#232323)}
+.koe-sheet-item.on{color:var(--accent,#2AC1C7);background:rgba(42,193,199,.10)}
+.koe-sheet-check{width:22px;display:inline-flex;justify-content:flex-end;color:var(--accent,#2AC1C7)}
+.koe-sheet-txt{flex:1;padding-right:10px}
+@media (min-width:700px){.koe-sheet-bg{align-items:center}.koe-sheet{border-radius:18px;border-bottom:1px solid var(--border,#262626);max-width:420px;transform:translateY(12px) scale(.98);opacity:0;transition:transform .18s ease,opacity .18s ease}.koe-sheet-bg.open .koe-sheet{transform:none;opacity:1}}

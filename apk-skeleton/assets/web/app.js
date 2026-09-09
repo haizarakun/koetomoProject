@@ -1778,6 +1778,7 @@ function isFilteredPost(p) {
     if (__mf === "voice" && !p.voice_url) return !0;
     if (__mf === "explicit" && !p.is_explicit) return !0;
     if (isMutedUser(p.user_id)) return !0;
+    if (koeIsHiddenBiz(p)) return !0; /* 業者を表示しない設定 */
     const words = getFilterWords();
     if (words.length) {
       const t = ((p.text || "") + " " + (p.name || "")).toLowerCase();
@@ -3843,6 +3844,23 @@ function __initUiExtras() {
           } catch (e) {}
         });
       }
+      const sh = document.getElementById("spamHideChk");
+      if (sh) {
+        try {
+          sh.checked = koeSpamHide();
+        } catch (e) {}
+        sh.addEventListener("change", function () {
+          try {
+            localStorage.setItem("koe_spam_hide", sh.checked ? "1" : "0");
+          } catch (e) {}
+          toast(
+            sh.checked ? "業者と判定したアカウントの投稿・枠を表示しません" : "業者の投稿・枠も表示します",
+          );
+          try {
+            reloadCurrentView && reloadCurrentView();
+          } catch (e) {}
+        });
+      }
       const ba = document.getElementById("botAutoChk");
       if (ba) {
         try {
@@ -4020,6 +4038,11 @@ function __initUiExtras() {
     KoeSched.start("relTimes", refreshRelTimes, { ms: 6e4, hiddenMs: 0 }),
     KoeSched.start("notifCheck", checkNotifications, { ms: 6e4, hiddenMs: 0 }),
     setTimeout(checkNotifications, 3e3),
+    setTimeout(function () {
+      try {
+        koeDecoInit(false); /* 装飾アイテムの対応表(公式 decoration_items) */
+      } catch (e) {}
+    }, 1500),
     setTimeout(initSpeakIndicator, 0),
     (function () {
       const fab = document.createElement("button");
@@ -5618,7 +5641,7 @@ async function loadCallRecords(source) {
       (box.innerHTML = recs
         .map(
           (p, i) =>
-            `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}" data-pid="${p.id}" data-likes="${p.likes || 0}">\n      <div class="tl-head">\n        <span class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})'>${avatarHtml(p.name, p.icon_url)}</span>\n        <div class="tl-meta" onclick='viewProfile(${Number(p.user_id) || 0})'>\n          <div class="tl-name">${escapeHtml(p.name || "user " + p.user_id)}${p.other_name ? ` <span style="opacity:.55;font-weight:400;">↔ ${escapeHtml(p.other_name)}</span>` : ""} <span class="uid-tag">ID:${Number(p.user_id) || 0}</span></div>\n          <div class="tl-time" data-ts="${escapeHtml(p.created_at)}">${koeTimeLabel(p.created_at)}<span class="koe-tl-extra">${p.play_time ? " ・ 通話" + __fmtT(p.play_time) : ""}${p.play_count ? " ・ ▶" + p.play_count : ""}</span></div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : ""}\n      ${p.voice_url ? voicePlayerHtml(p.voice_url) : '<div class="empty-msg" style="font-size:12px;padding:4px 0;">(音声を取得できませんでした)</div>'}\n      <div class="tl-actions">\n        <span class="like-btn ${p.liked ? "liked" : ""}" data-rec-like="${i}">\n          ${p.liked ? '<svg class="ico" viewBox="0 0 24 24" fill="currentColor" style="color:#ff5a6a"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>' : '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>'} <span class="rec-like-n">${p.likes}</span>\n        </span>\n        <span class="comment-btn" data-rec-comment="${i}" style="cursor:pointer;"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8A2.5 2.5 0 0 1 17.5 16H9l-4 3.6a.8.8 0 0 1-1.3-.6V5.5Z"/></svg> ${p.comments}</span>\n      </div>\n    </div>`,
+            `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}${p.deco_url ? " has-deco" : ""}" data-pid="${p.id}" data-likes="${p.likes || 0}"${p.deco_url ? ` style="--koe-deco:url(${escAttr(JSON.stringify(String(p.deco_url)))})"` : ""}>\n      <div class="tl-head">\n        <span class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})'>${koeAdornAvatar(p.name, p.icon_url, p.deco_item, p.badge_url)}</span>\n        <div class="tl-meta" onclick='viewProfile(${Number(p.user_id) || 0})'>\n          <div class="tl-name">${escapeHtml(p.name || "user " + p.user_id)}${p.other_name ? ` <span style="opacity:.55;font-weight:400;">↔ ${escapeHtml(p.other_name)}</span>` : ""} <span class="uid-tag">ID:${Number(p.user_id) || 0}</span></div>\n          <div class="tl-time" data-ts="${escapeHtml(p.created_at)}">${koeTimeLabel(p.created_at)}<span class="koe-tl-extra">${p.play_time ? " ・ 通話" + __fmtT(p.play_time) : ""}${p.play_count ? " ・ ▶" + p.play_count : ""}</span></div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : ""}\n      ${p.voice_url ? voicePlayerHtml(p.voice_url) : '<div class="empty-msg" style="font-size:12px;padding:4px 0;">(音声を取得できませんでした)</div>'}\n      <div class="tl-actions">\n        <span class="like-btn ${p.liked ? "liked" : ""}" data-rec-like="${i}">\n          ${p.liked ? '<svg class="ico" viewBox="0 0 24 24" fill="currentColor" style="color:#ff5a6a"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>' : '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>'} <span class="rec-like-n">${p.likes}</span>\n        </span>\n        <span class="comment-btn" data-rec-comment="${i}" style="cursor:pointer;"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8A2.5 2.5 0 0 1 17.5 16H9l-4 3.6a.8.8 0 0 1-1.3-.6V5.5Z"/></svg> ${p.comments}</span>\n      </div>\n    </div>`,
         )
         .join("")),
       box.querySelectorAll("[data-rec-comment]").forEach((el) => {
@@ -5726,7 +5749,7 @@ function toggleAudioPlayer(pl) {
     }));
 }
 function postCardHtml(p) {
-  return `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}" data-pid="${p.id}" data-likes="${p.likes || 0}">\n      <div class="tl-head">\n        <span class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})'>${avatarHtml(p.name, p.icon_url)}</span>\n        <div class="tl-meta" onclick='viewProfile(${Number(p.user_id) || 0})'>\n          <div class="tl-name">${escapeHtml(p.name)} <span class="uid-tag">ID:${Number(p.user_id) || 0}</span>${koeSpamTag(p)}${p.is_talk ? ' <span class="uid-tag koe-feedbadge">通話募集</span>' : ""}${p.is_explicit ? ' <span class="uid-tag koe-regbadge">⚠ 規制対象</span>' : ""}</div>\n          <div class="tl-time" data-ts="${escapeHtml(p.created_at)}" title="${escapeHtml(p.created_at)}">${koeTimeLabel(p.created_at)}</div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : !p.image_url && !p.voice_url ? `<div class="tl-text tl-empty">${p.has_voice || p.play_time ? "\ud83c\udfa7 音声投稿" + (p.play_time ? "（" + Math.round(Number(p.play_time)) + "秒）" : "") : p.is_talk ? "\ud83c\udf99 通話募集の投稿です（本文なし）" : "（本文なし）"}</div>` : ""}\n      ${p.image_url ? `<img class="post-image" loading="lazy" decoding="async" src="${escAttr(p.image_url)}" onclick='event.stopPropagation(); openLightbox(${escAttr(JSON.stringify(p.image_url || ""))})' onerror="this.style.display='none'">` : ""}\n      ${p.voice_url ? VOICE_BADGE + voicePlayerHtml(p.voice_url) : ""}\n      <div class="tl-actions">\n        <span class="comment-btn" onclick='openPostDetail(event, ${Number(p.id) || 0})'><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8A2.5 2.5 0 0 1 17.5 16H9l-4 3.6a.8.8 0 0 1-1.3-.6V5.5Z"/></svg> ${p.comments}</span>\n        <span class="like-btn ${postLiked(p) ? "liked" : ""}" onclick='toggleTimelineLike(event, ${Number(p.id) || 0}, ${!!postLiked(p)})'>\n          ${postLiked(p) ? '<svg class="ico" viewBox="0 0 24 24" fill="currentColor" style="color:#ff5a6a"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>' : '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>'} ${Math.max(p.likes || 0, postLiked(p) ? 1 : 0)}\n        </span>\n        <span class="bookmark-btn ${p.bookmarked || koeBmHas(p.id) ? "marked" : ""}" onclick='toggleBookmark(event, ${Number(p.id) || 0}, ${!!(p.bookmarked || koeBmHas(p.id))}, ${p.is_talk ? 1 : 0})' title="ブックマーク"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M6 3.5h12a1 1 0 0 1 1 1V21l-7-4-7 4V4.5a1 1 0 0 1 1-1Z"/></svg></span>\n        ${p.user_id === myUserId ? `<span class="report-btn" onclick='deleteOwnPost(event, ${Number(p.id) || 0}, ${p.is_talk ? 1 : 0})'><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg> 削除</span>` : `<span class="report-btn" onclick='promptTimelineReport(event, ${Number(p.user_id) || 0})'><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="3" width="1.8" height="18" rx=".9"/><path d="M6 4h11l-2 3 2 3H6V4Z"/></svg> 通報</span>`}\n      </div>\n    </div>`;
+  return `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}${p.deco_url ? " has-deco" : ""}" data-pid="${p.id}" data-likes="${p.likes || 0}"${p.deco_url ? ` style="--koe-deco:url(${escAttr(JSON.stringify(String(p.deco_url)))})"` : ""}>\n      <div class="tl-head">\n        <span class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})'>${koeAdornAvatar(p.name, p.icon_url, p.deco_item, p.badge_url)}</span>\n        <div class="tl-meta" onclick='viewProfile(${Number(p.user_id) || 0})'>\n          <div class="tl-name">${escapeHtml(p.name)} <span class="uid-tag">ID:${Number(p.user_id) || 0}</span>${koeSpamTag(p)}${p.is_talk ? ' <span class="uid-tag koe-feedbadge">通話募集</span>' : ""}${p.is_explicit ? ' <span class="uid-tag koe-regbadge">⚠ 規制対象</span>' : ""}</div>\n          <div class="tl-time" data-ts="${escapeHtml(p.created_at)}" title="${escapeHtml(p.created_at)}">${koeTimeLabel(p.created_at)}</div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : !p.image_url && !p.voice_url ? `<div class="tl-text tl-empty">${p.has_voice || p.play_time ? "\ud83c\udfa7 音声投稿" + (p.play_time ? "（" + Math.round(Number(p.play_time)) + "秒）" : "") : p.is_talk ? "\ud83c\udf99 通話募集の投稿です（本文なし）" : "（本文なし）"}</div>` : ""}\n      ${p.image_url ? `<img class="post-image" loading="lazy" decoding="async" src="${escAttr(p.image_url)}" onclick='event.stopPropagation(); openLightbox(${escAttr(JSON.stringify(p.image_url || ""))})' onerror="this.style.display='none'">` : ""}\n      ${p.voice_url ? VOICE_BADGE + voicePlayerHtml(p.voice_url) : ""}\n      <div class="tl-actions">\n        <span class="comment-btn" onclick='openPostDetail(event, ${Number(p.id) || 0})'><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8A2.5 2.5 0 0 1 17.5 16H9l-4 3.6a.8.8 0 0 1-1.3-.6V5.5Z"/></svg> ${p.comments}</span>\n        <span class="like-btn ${postLiked(p) ? "liked" : ""}" onclick='toggleTimelineLike(event, ${Number(p.id) || 0}, ${!!postLiked(p)})'>\n          ${postLiked(p) ? '<svg class="ico" viewBox="0 0 24 24" fill="currentColor" style="color:#ff5a6a"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>' : '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>'} ${Math.max(p.likes || 0, postLiked(p) ? 1 : 0)}\n        </span>\n        <span class="bookmark-btn ${p.bookmarked || koeBmHas(p.id) ? "marked" : ""}" onclick='toggleBookmark(event, ${Number(p.id) || 0}, ${!!(p.bookmarked || koeBmHas(p.id))}, ${p.is_talk ? 1 : 0})' title="ブックマーク"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M6 3.5h12a1 1 0 0 1 1 1V21l-7-4-7 4V4.5a1 1 0 0 1 1-1Z"/></svg></span>\n        ${p.user_id === myUserId ? `<span class="report-btn" onclick='deleteOwnPost(event, ${Number(p.id) || 0}, ${p.is_talk ? 1 : 0})'><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg> 削除</span>` : `<span class="report-btn" onclick='promptTimelineReport(event, ${Number(p.user_id) || 0})'><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="3" width="1.8" height="18" rx=".9"/><path d="M6 4h11l-2 3 2 3H6V4Z"/></svg> 通報</span>`}\n      </div>\n    </div>`;
 }
 async function loadBookmarks() {
   const box = document.getElementById("bookmarksList");
@@ -6004,7 +6027,7 @@ async function loadTimeline(append) {
     .filter((p) => !isFilteredPost(p) && (!window.__tlKeep || window.__tlKeep(p.id, append)))
     .map(
       (p) =>
-        `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}" data-pid="${p.id}" data-likes="${p.likes || 0}">\n      <div class="tl-head">\n        <span class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})'>${avatarHtml(p.name, p.icon_url)}</span>\n        <div class="tl-meta" onclick='viewProfile(${Number(p.user_id) || 0})'>\n          <div class="tl-name">${escapeHtml(p.name)} <span class="uid-tag">ID:${Number(p.user_id) || 0}</span>${koeSpamTag(p)}${p.is_talk ? ' <span class="uid-tag koe-feedbadge">通話募集</span>' : ""}${p.is_explicit ? ' <span class="uid-tag koe-regbadge">⚠ 規制対象</span>' : ""}</div>\n          <div class="tl-time" data-ts="${escapeHtml(p.created_at)}" title="${escapeHtml(p.created_at)}">${koeTimeLabel(p.created_at)}</div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : !p.image_url && !p.voice_url ? `<div class="tl-text tl-empty">${p.has_voice || p.play_time ? "\ud83c\udfa7 音声投稿" + (p.play_time ? "（" + Math.round(Number(p.play_time)) + "秒）" : "") : p.is_talk ? "\ud83c\udf99 通話募集の投稿です（本文なし）" : "（本文なし）"}</div>` : ""}\n      ${p.image_url ? `<img class="post-image" loading="lazy" decoding="async" src="${escAttr(p.image_url)}" onclick='event.stopPropagation(); openLightbox(${escAttr(JSON.stringify(p.image_url || ""))})' onerror="this.style.display='none'">` : ""}\n      ${p.voice_url ? VOICE_BADGE + voicePlayerHtml(p.voice_url) : ""}\n      <div class="tl-actions">\n        <span class="comment-btn" onclick='openPostDetail(event, ${Number(p.id) || 0})'><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8A2.5 2.5 0 0 1 17.5 16H9l-4 3.6a.8.8 0 0 1-1.3-.6V5.5Z"/></svg> ${p.comments}</span>\n        <span class="like-btn ${postLiked(p) ? "liked" : ""}" onclick='toggleTimelineLike(event, ${Number(p.id) || 0}, ${!!postLiked(p)})'>\n          ${postLiked(p) ? '<svg class="ico" viewBox="0 0 24 24" fill="currentColor" style="color:#ff5a6a"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>' : '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>'} ${Math.max(p.likes || 0, postLiked(p) ? 1 : 0)}\n        </span>\n        <span class="bookmark-btn ${p.bookmarked || koeBmHas(p.id) ? "marked" : ""}" onclick='toggleBookmark(event, ${Number(p.id) || 0}, ${!!(p.bookmarked || koeBmHas(p.id))}, ${p.is_talk ? 1 : 0})' title="ブックマーク"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M6 3.5h12a1 1 0 0 1 1 1V21l-7-4-7 4V4.5a1 1 0 0 1 1-1Z"/></svg></span>\n        ${p.user_id === myUserId ? `<span class="report-btn" onclick='deleteOwnPost(event, ${Number(p.id) || 0}, ${p.is_talk ? 1 : 0})'><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg> 削除</span>` : `<span class="report-btn" onclick='promptTimelineReport(event, ${Number(p.user_id) || 0})'><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="3" width="1.8" height="18" rx=".9"/><path d="M6 4h11l-2 3 2 3H6V4Z"/></svg> 通報</span>`}\n      </div>\n    </div>\n  `,
+        `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}${p.deco_url ? " has-deco" : ""}" data-pid="${p.id}" data-likes="${p.likes || 0}"${p.deco_url ? ` style="--koe-deco:url(${escAttr(JSON.stringify(String(p.deco_url)))})"` : ""}>\n      <div class="tl-head">\n        <span class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})'>${koeAdornAvatar(p.name, p.icon_url, p.deco_item, p.badge_url)}</span>\n        <div class="tl-meta" onclick='viewProfile(${Number(p.user_id) || 0})'>\n          <div class="tl-name">${escapeHtml(p.name)} <span class="uid-tag">ID:${Number(p.user_id) || 0}</span>${koeSpamTag(p)}${p.is_talk ? ' <span class="uid-tag koe-feedbadge">通話募集</span>' : ""}${p.is_explicit ? ' <span class="uid-tag koe-regbadge">⚠ 規制対象</span>' : ""}</div>\n          <div class="tl-time" data-ts="${escapeHtml(p.created_at)}" title="${escapeHtml(p.created_at)}">${koeTimeLabel(p.created_at)}</div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : !p.image_url && !p.voice_url ? `<div class="tl-text tl-empty">${p.has_voice || p.play_time ? "\ud83c\udfa7 音声投稿" + (p.play_time ? "（" + Math.round(Number(p.play_time)) + "秒）" : "") : p.is_talk ? "\ud83c\udf99 通話募集の投稿です（本文なし）" : "（本文なし）"}</div>` : ""}\n      ${p.image_url ? `<img class="post-image" loading="lazy" decoding="async" src="${escAttr(p.image_url)}" onclick='event.stopPropagation(); openLightbox(${escAttr(JSON.stringify(p.image_url || ""))})' onerror="this.style.display='none'">` : ""}\n      ${p.voice_url ? VOICE_BADGE + voicePlayerHtml(p.voice_url) : ""}\n      <div class="tl-actions">\n        <span class="comment-btn" onclick='openPostDetail(event, ${Number(p.id) || 0})'><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8A2.5 2.5 0 0 1 17.5 16H9l-4 3.6a.8.8 0 0 1-1.3-.6V5.5Z"/></svg> ${p.comments}</span>\n        <span class="like-btn ${postLiked(p) ? "liked" : ""}" onclick='toggleTimelineLike(event, ${Number(p.id) || 0}, ${!!postLiked(p)})'>\n          ${postLiked(p) ? '<svg class="ico" viewBox="0 0 24 24" fill="currentColor" style="color:#ff5a6a"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>' : '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>'} ${Math.max(p.likes || 0, postLiked(p) ? 1 : 0)}\n        </span>\n        <span class="bookmark-btn ${p.bookmarked || koeBmHas(p.id) ? "marked" : ""}" onclick='toggleBookmark(event, ${Number(p.id) || 0}, ${!!(p.bookmarked || koeBmHas(p.id))}, ${p.is_talk ? 1 : 0})' title="ブックマーク"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M6 3.5h12a1 1 0 0 1 1 1V21l-7-4-7 4V4.5a1 1 0 0 1 1-1Z"/></svg></span>\n        ${p.user_id === myUserId ? `<span class="report-btn" onclick='deleteOwnPost(event, ${Number(p.id) || 0}, ${p.is_talk ? 1 : 0})'><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg> 削除</span>` : `<span class="report-btn" onclick='promptTimelineReport(event, ${Number(p.user_id) || 0})'><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="3" width="1.8" height="18" rx=".9"/><path d="M6 4h11l-2 3 2 3H6V4Z"/></svg> 通報</span>`}\n      </div>\n    </div>\n  `,
     )
     .join("");
   (append
@@ -6979,13 +7002,28 @@ async function loadCallHistory() {
   renderCallHistoryList(mb, res[0] && res[0].ok ? res[0].items : [], "不在着信");
   renderCallHistoryList(tb, res[1] && res[1].ok ? res[1].items : [], "トークリクエスト");
 }
+/* 知り合い = フォロー中 ∪ フォロワー ∪ 友達(相互)。枠の「フォロー中」タブと参加者一覧の印に使う */
+let followerUserIds = null,
+  friendUserIds = null;
+function koeRelationOf(uid) {
+  uid = Number(uid);
+  if (friendUserIds && friendUserIds.has(uid)) return "友達";
+  if (followedUserIds && followedUserIds.has(uid)) return "フォロー中";
+  if (followerUserIds && followerUserIds.has(uid)) return "フォロワー";
+  return "";
+}
 async function ensureFollowedSet() {
   if (followedUserIds) return followedUserIds;
   /* get_followees はページ1(20人)しか返さないので、21人目以降をフォローしていると
    その人の枠が「フォロー中」に出てこなかった。全ページを見る専用APIを使う。 */
   try {
     const idr = await callApi("get_followee_ids");
-    if (idr && idr.ok && idr.ids) return ((followedUserIds = new Set(idr.ids.map(Number))), followedUserIds);
+    if (idr && idr.ok && idr.ids) {
+      followedUserIds = new Set(idr.ids.map(Number));
+      followerUserIds = new Set((idr.followers || []).map(Number));
+      friendUserIds = new Set((idr.friends || []).map(Number));
+      return followedUserIds;
+    }
   } catch (e) {}
   const res = await callApi("get_followees", null, 1);
   return res.ok
@@ -7278,8 +7316,13 @@ try {
 function applyRoomView(keepScroll) {
   var __sc = keepScroll ? koeScrollTop() : 0;
   let rooms = (window.__roomsCache || []).slice();
+  /* 業者(BANリスト掲載・判定「高」)が主催する枠は出さない(設定で切替) */
+  rooms = rooms.filter(
+    (r) => !koeIsHiddenBiz({ user_id: r.owner_user_id, name: r.owner_name, icon_url: r.owner_icon }),
+  );
+  /* 「フォロー中」タブ: 主催者だけでなく、参加者(発言者・リスナー)に知り合いがいる枠も出す */
   if ("following" === roomFeed && followedUserIds)
-    rooms = rooms.filter((r) => followedUserIds.has(Number(r.owner_user_id)));
+    rooms = rooms.filter((r) => koeRoomAcquaintances(r).length > 0);
   const q = (
     (document.getElementById("roomSearchInput") && document.getElementById("roomSearchInput").value) ||
     ""
@@ -7296,12 +7339,14 @@ function applyRoomView(keepScroll) {
   const sort =
       (document.getElementById("roomSortSelect") && document.getElementById("roomSortSelect").value) || "pop",
     total = (r) => (r.speaker_count || 0) + (r.listener_count || 0);
+  const openedAt = (r) => String(r.created_at || "");
   ("pop" === sort
     ? rooms.sort((a, b) => total(b) - total(a))
     : "few" === sort
       ? rooms.sort((a, b) => total(a) - total(b))
-      : "new" === sort &&
-        rooms.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || ""))),
+      : "new" === sort
+        ? rooms.sort((a, b) => openedAt(b).localeCompare(openedAt(a)))
+        : "old" === sort && rooms.sort((a, b) => openedAt(a).localeCompare(openedAt(b))),
     renderRooms(rooms));
   if (keepScroll) koeScrollTo(__sc);
   /* 数字だけで検索して枠が無い場合は、そのIDのユーザーを直接開けるようにする */
@@ -7326,18 +7371,124 @@ function applyRoomView(keepScroll) {
     }
   } catch (e) {}
 }
+/* 枠にいる知り合い(フォロー中・フォロワー・友達)の user_id 一覧。主催者も含む */
+function koeRoomAcquaintances(r) {
+  if (!followedUserIds) return [];
+  const ids = [Number(r.owner_user_id)].concat(
+    (r.speaker_ids || []).map(Number),
+    (r.listener_ids || []).map(Number),
+  );
+  const out = [];
+  ids.forEach((u) => {
+    if (u && out.indexOf(u) < 0 && koeRelationOf(u)) out.push(u);
+  });
+  return out;
+}
+/* 枠カードの「知り合い N人」印(名前が分かっている人は名前で) */
+function koeRoomAcqTag(r) {
+  const ids = koeRoomAcquaintances(r);
+  if (!ids.length) return "";
+  const names = ids
+    .map(
+      (u) =>
+        (window.__koeUserNames && window.__koeUserNames[u]) ||
+        (u === Number(r.owner_user_id) ? r.owner_name : ""),
+    )
+    .filter(Boolean)
+    .slice(0, 2);
+  const label = names.length
+    ? escapeHtml(names.join("・")) + (ids.length > names.length ? " ほか" : "")
+    : ids.length + "人";
+  return `<span class="uid-tag koe-acq-tag" title="フォロー中・フォロワー・友達がいます">知り合い ${label}</span>`;
+}
+/* 枠カードにいる人のアイコン列(主催者→発言者→リスナー、最大 6 人)。名前・アイコンが未取得の人は後で取って描き直す */
+function koeRoomFaces(r) {
+  const owner = Number(r.owner_user_id);
+  const ids = [owner].concat(
+    (r.speaker_ids || []).map(Number).filter((u) => u && u !== owner),
+    (r.listener_ids || []).map(Number),
+  );
+  const uniq = [];
+  ids.forEach((u) => {
+    if (u && uniq.indexOf(u) < 0) uniq.push(u);
+  });
+  const shown = uniq.slice(0, 6);
+  const html = shown
+    .map((u) => {
+      const info =
+        window.__koeUserInfo[u] || (u === owner ? { name: r.owner_name, icon_url: r.owner_icon } : null);
+      const nm = (info && info.name) || "user " + u;
+      const rel = koeRelationOf(u);
+      return (
+        `<span class="koe-face${u === owner ? " owner" : ""}${rel ? " acq" : ""}" title="${escAttr(nm + (rel ? "(" + rel + ")" : ""))}">` +
+        (info
+          ? koeAdornAvatar(nm, info.icon_url, info.deco_item, info.badge_url)
+          : '<div class="avatar">…</div>') +
+        "</span>"
+      );
+    })
+    .join("");
+  const more = uniq.length - shown.length;
+  return `<div class="koe-faces">${html}${more > 0 ? `<span class="koe-face-more">+${more}</span>` : ""}</div>`;
+}
+/* 表示中の枠にいる人で、まだ名前・アイコンを知らない人をまとめて取り、取れたら描き直す */
+let __koeFacesFilling = false;
+async function koeFillRoomFaces(rooms) {
+  if (__koeFacesFilling) return;
+  const need = [];
+  (rooms || []).forEach((r) => {
+    [Number(r.owner_user_id)]
+      .concat((r.speaker_ids || []).map(Number), (r.listener_ids || []).map(Number))
+      .slice(0, 8)
+      .forEach((u) => {
+        if (u && !window.__koeUserInfo[u] && need.indexOf(u) < 0) need.push(u);
+      });
+  });
+  if (!need.length) return;
+  __koeFacesFilling = true;
+  try {
+    await koeResolveUsersCached(need.slice(0, 100));
+  } finally {
+    __koeFacesFilling = false;
+  }
+  try {
+    const act = document.querySelector(".page.active");
+    if (act && act.id === "page-call") applyRoomView(true);
+  } catch (e) {}
+}
 function renderRooms(rooms) {
   const list = document.getElementById("callList");
   rooms = rooms || [];
+  const micIco =
+    '<svg class="ico" viewBox="0 0 24 24" fill="currentColor"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><rect x="11" y="18" width="2" height="3.4" rx="1"/></svg>';
+  const earIco =
+    '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 13v-1a8 8 0 0 1 16 0v1"/><rect x="2.5" y="13" width="4" height="7" rx="2" fill="currentColor" stroke="none"/><rect x="17.5" y="13" width="4" height="7" rx="2" fill="currentColor" stroke="none"/></svg>';
   rooms.length
     ? (list.innerHTML = rooms
         .map((r) => {
           const total = (r.speaker_count || 0) + (r.listener_count || 0),
-            hot = total >= 5;
-          return `\n    <div class="card room-card ${hot ? "room-hot" : ""}" onclick="joinViaCard(this, () => joinGroupRoom(${Number(r.owner_user_id) || 0}))">\n      <div class="room-count-badge ${hot ? "hot" : ""}">${hot ? '<span class="room-fire">▲</span>' : ""}${total}<small>人</small></div>\n      ${avatarHtml(r.owner_name || r.title, r.owner_icon)}\n      <div class="card-body">\n        <div class="card-name">${escapeHtml(r.title)}</div>\n        <div class="card-sub"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M3 8l4.5 3.5L12 5l4.5 6.5L21 8l-1.5 10.5a1 1 0 0 1-1 .5H5.5a1 1 0 0 1-1-.5L3 8Z"/></svg> ${escapeHtml(r.owner_name || "user " + r.owner_user_id)} <span class="uid-tag">ID:${r.owner_user_id}</span></div>\n        <div class="card-meta"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><rect x="11" y="18" width="2" height="3.4" rx="1"/></svg> 発言 ${r.speaker_count ?? 0} ・ <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 13v-1a8 8 0 0 1 16 0v1"/><rect x="2.5" y="13" width="4" height="7" rx="2" fill="currentColor" stroke="none"/><rect x="17.5" y="13" width="4" height="7" rx="2" fill="currentColor" stroke="none"/></svg> リスナー ${r.listener_count ?? 0}</div>\n      </div>\n      <span class="profile-link" onclick='event.stopPropagation(); viewProfile(${Number(r.owner_user_id) || 0})' title="プロフィールを見る"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="8" r="4"/><path d="M4 20a8 8 0 0 1 16 0 1 1 0 0 1-1 1H5a1 1 0 0 1-1-1Z"/></svg></span>\n      <span style="font-size:20px;"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11 11 0 0 0 3.5.56 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.3a1 1 0 0 1 1 1 11 11 0 0 0 .56 3.5 1 1 0 0 1-.25 1L6.6 10.8Z"/></svg></span>\n    </div>\n  `;
+            hot = total >= 5,
+            rk = escAttr(koeRoomKey(r)),
+            oid = Number(r.owner_user_id) || 0;
+          /* カード本体のタップ = 参加者(主催者・発言者・リスナー)を見る。右の電話マーク = すぐ参加 */
+          return `
+    <div class="card room-card ${hot ? "room-hot" : ""}" onclick="koeShowRoomMembers('${rk}')">
+      <div class="room-count-badge ${hot ? "hot" : ""}">${hot ? '<span class="room-fire">▲</span>' : ""}${total}<small>人</small></div>
+      <div class="card-body">
+        <div class="card-name">${escapeHtml(r.title)}</div>
+        <div class="card-sub"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M3 8l4.5 3.5L12 5l4.5 6.5L21 8l-1.5 10.5a1 1 0 0 1-1 .5H5.5a1 1 0 0 1-1-.5L3 8Z"/></svg> ${escapeHtml(r.owner_name || "user " + oid)} <span class="uid-tag">ID:${oid}</span> <span class="profile-link" onclick='event.stopPropagation(); viewProfile(${oid})' title="主催者のプロフィール"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="8" r="4"/><path d="M4 20a8 8 0 0 1 16 0 1 1 0 0 1-1 1H5a1 1 0 0 1-1-1Z"/></svg></span></div>
+        ${koeRoomFaces(r)}
+        <div class="card-meta koe-room-meta"><span>${micIco} 発言 ${r.speaker_count ?? 0}</span><span>${earIco} リスナー ${r.listener_count ?? 0}</span>${r.created_at ? `<span>${koeTimeLabel(r.created_at)} 開始</span>` : ""}${koeRoomAcqTag(r)}</div>
+      </div>
+      <button type="button" class="koe-room-join" title="この枠に参加" onclick="event.stopPropagation(); joinViaCard(this.closest('.room-card'), () => joinGroupRoom(${oid}))"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11 11 0 0 0 3.5.56 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.3a1 1 0 0 1 1 1 11 11 0 0 0 .56 3.5 1 1 0 0 1-.25 1L6.6 10.8Z"/></svg></button>
+    </div>
+  `;
         })
         .join(""))
-    : (list.innerHTML = `<div class="empty-msg">${"following" === roomFeed ? "フォロー中の人が開いている枠はありません" : "現在開いているルームがありません"}</div>`);
+    : (list.innerHTML = `<div class="empty-msg">${"following" === roomFeed ? "知り合いが参加している枠はありません" : "現在開いているルームがありません"}</div>`);
+  try {
+    koeFillRoomFaces(rooms.slice(0, 30));
+  } catch (e) {}
 }
 async function switchRoomFeed(feed) {
   if (feed === roomFeed) return;
@@ -7353,6 +7504,384 @@ async function switchRoomFeed(feed) {
   applyRoomView();
   if ("following" === feed && !window.__roomsAllLoaded) koeSweepAllRooms("「フォロー中」の絞り込み");
   else if ("following" !== feed) koeRoomNotice("");
+}
+
+/* ===== 枠の参加者プレビュー・知り合い・プロフィールの「参加中の枠」 ===== */
+/* resolve_users の結果を端末内に覚える(名前・アイコン・装飾)。20 人ずつ、最大 100 人 */
+window.__koeUserNames = window.__koeUserNames || {};
+window.__koeUserInfo = window.__koeUserInfo || {};
+async function koeResolveUsersCached(ids) {
+  const need = [];
+  (ids || []).forEach((u) => {
+    u = Number(u);
+    if (u && !window.__koeUserInfo[u] && need.indexOf(u) < 0) need.push(u);
+  });
+  for (let i = 0; i < need.length && i < 100; i += 20) {
+    try {
+      const r = await callApi("resolve_users", need.slice(i, i + 20).join(","));
+      ((r && r.ok && r.users) || []).forEach((u) => {
+        const id = Number(u.user_id);
+        if (!id) return;
+        window.__koeUserInfo[id] = u;
+        if (u.name) window.__koeUserNames[id] = u.name;
+      });
+    } catch (e) {}
+  }
+  return (ids || []).map(
+    (u) => window.__koeUserInfo[Number(u)] || { user_id: Number(u), name: "user " + u, icon_url: "" },
+  );
+}
+function koeFindRoomByKey(key) {
+  return (window.__roomsCache || []).find((r) => koeRoomKey(r) === String(key)) || null;
+}
+/* 枠に入る前に、誰がいるか(発言者・リスナー)を見る */
+async function koeShowRoomMembers(key) {
+  const r = koeFindRoomByKey(key);
+  if (!r) return;
+  let m = document.getElementById("koeRoomMembersModal");
+  if (m) m.remove();
+  m = document.createElement("div");
+  m.className = "modal";
+  m.id = "koeRoomMembersModal";
+  m.style.display = "flex";
+  const total = (r.speaker_count || 0) + (r.listener_count || 0);
+  m.innerHTML =
+    '<div class="modal-content small"><div class="modal-header"><span>' +
+    escapeHtml(r.title || "枠") +
+    '</span><button type="button" class="modal-close" aria-label="閉じる">✕</button></div>' +
+    '<div class="modal-body">' +
+    '<div class="card-meta" style="margin-bottom:8px;">発言 ' +
+    (r.speaker_count || 0) +
+    " ・ リスナー " +
+    (r.listener_count || 0) +
+    (r.created_at ? " ・ " + koeTimeLabel(r.created_at) + " 開始" : "") +
+    "</div>" +
+    '<div id="koeRoomMembersList" class="koe-members-list"><div class="empty-msg">読み込み中…</div></div>' +
+    '<button type="button" class="btn-primary" id="koeRoomMembersJoin" style="margin-top:12px;">この枠に参加する（' +
+    total +
+    "人）</button></div></div>";
+  document.body.appendChild(m);
+  const close = () => {
+    try {
+      m.remove();
+    } catch (e) {}
+  };
+  m.querySelector(".modal-close").addEventListener("click", close);
+  m.addEventListener("click", (e) => {
+    if (e.target === m) close();
+  });
+  m.querySelector("#koeRoomMembersJoin").addEventListener("click", () => {
+    close();
+    joinGroupRoom(Number(r.owner_user_id) || 0);
+  });
+  try {
+    await ensureFollowedSet();
+  } catch (e) {}
+  const owner = Number(r.owner_user_id);
+  const spk = [owner].concat((r.speaker_ids || []).map(Number).filter((u) => u && u !== owner));
+  const lis = (r.listener_ids || []).map(Number).filter((u) => u && spk.indexOf(u) < 0);
+  const users = await koeResolveUsersCached(spk.concat(lis));
+  const box = m.querySelector("#koeRoomMembersList");
+  if (!box || !box.isConnected) return;
+  const row = (u, role) => {
+    const rel = koeRelationOf(u.user_id);
+    return (
+      `<div class="koe-member-row" onclick="viewProfile(${Number(u.user_id) || 0})">` +
+      koeAdornAvatar(u.name, u.icon_url, u.deco_item, u.badge_url) +
+      '<div class="koe-member-body"><div class="card-name">' +
+      escapeHtml(u.name || "user " + u.user_id) +
+      (Number(u.user_id) === owner ? ' <span class="uid-tag">主催</span>' : "") +
+      (rel ? ' <span class="uid-tag koe-acq-tag">' + rel + "</span>" : "") +
+      '</div><div class="card-sub"><span class="uid-tag">ID:' +
+      Number(u.user_id) +
+      "</span></div></div></div>"
+    );
+  };
+  let html = "";
+  if (spk.length)
+    html +=
+      '<div class="field-label">発言者</div>' +
+      users
+        .slice(0, spk.length)
+        .map((u) => row(u, "発言者"))
+        .join("");
+  if (lis.length)
+    html +=
+      '<div class="field-label" style="margin-top:8px;">リスナー</div>' +
+      users
+        .slice(spk.length)
+        .map((u) => row(u, "リスナー"))
+        .join("");
+  if (!html) html = '<div class="empty-msg">参加者の情報がありません</div>';
+  box.innerHTML = html;
+  try {
+    applyRoomView(true); /* 名前が分かったので一覧の「知り合い」印も名前に */
+  } catch (e) {}
+}
+/* 一覧の全ページを静かに読む(プロフィールの「参加中の枠」用。通話中は既存キャッシュだけ使う) */
+async function koeLoadAllRoomsQuiet() {
+  if (window.__koeRoomsLoading || currentRoomId) return window.__roomsCache || [];
+  const fresh =
+    window.__roomsAllLoaded && window.__roomsSweptAt && Date.now() - window.__roomsSweptAt < 300000;
+  if (fresh) return window.__roomsCache || [];
+  window.__koeRoomsLoading = true;
+  try {
+    let all = [];
+    for (let p = 1; p <= 10; p++) {
+      const r = await callApi("list_group_rooms", p);
+      const got = (r && r.ok && r.rooms) || [];
+      all = all.concat(got);
+      if (got.length < 20) break;
+    }
+    window.__roomsCache = all;
+    window.__roomPage = Math.max(1, Math.ceil(all.length / 20));
+    window.__roomsAllLoaded = true;
+    window.__roomsCacheAt = Date.now();
+    window.__roomsSweptAt = Date.now();
+  } finally {
+    window.__koeRoomsLoading = false;
+  }
+  return window.__roomsCache || [];
+}
+function koeRoomOfUser(uid) {
+  uid = Number(uid);
+  for (const r of window.__roomsCache || []) {
+    if (Number(r.owner_user_id) === uid) return { room: r, role: "主催" };
+    if ((r.speaker_ids || []).map(Number).indexOf(uid) >= 0) return { room: r, role: "発言者" };
+    if ((r.listener_ids || []).map(Number).indexOf(uid) >= 0) return { room: r, role: "リスナー" };
+  }
+  return null;
+}
+/* プロフィールに「いま参加中の枠」を出す(枠一覧を全部見て、その人がいる枠を探す) */
+async function koeShowUserRoomOnProfile(uid, seq) {
+  const box = document.getElementById("profileViewRoom");
+  if (!box) return;
+  box.style.display = "none";
+  box.innerHTML = "";
+  if (
+    !uid ||
+    Number(uid) === Number(window.__myUserId || (typeof myUserId !== "undefined" ? myUserId : 0) || 0)
+  )
+    return;
+  try {
+    await koeLoadAllRoomsQuiet();
+  } catch (e) {}
+  if (seq !== window.__pvSeq) return; /* 別の人に切り替わった */
+  const hit = koeRoomOfUser(uid);
+  if (!hit) return;
+  const r = hit.room,
+    total = (r.speaker_count || 0) + (r.listener_count || 0);
+  const inThis = currentRoomId && String(currentRoomId) === String(r.room_id);
+  box.innerHTML =
+    '<div class="koe-pv-room-inner">' +
+    '<div class="koe-pv-room-title"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><rect x="11" y="18" width="2" height="3.4" rx="1"/></svg> いま「' +
+    escapeHtml(r.title || "枠") +
+    "」に" +
+    hit.role +
+    'として参加中 <span class="uid-tag">' +
+    total +
+    "人</span></div>" +
+    '<div class="koe-pv-room-btns"><button type="button" class="btn-secondary" id="koePvRoomMembers">参加者を見る</button>' +
+    (inThis
+      ? '<button type="button" class="btn-secondary" disabled>参加中</button>'
+      : '<button type="button" class="btn-primary" id="koePvRoomJoin">この枠に参加</button>') +
+    "</div></div>";
+  box.style.display = "block";
+  const mb = box.querySelector("#koePvRoomMembers");
+  mb && mb.addEventListener("click", () => koeShowRoomMembers(koeRoomKey(r)));
+  const jb = box.querySelector("#koePvRoomJoin");
+  jb &&
+    jb.addEventListener("click", () => {
+      try {
+        document.getElementById("profileViewModal").style.display = "none";
+      } catch (e) {}
+      joinGroupRoom(Number(r.owner_user_id) || 0);
+    });
+}
+/* 相手のプロフィールの「もらったギフト」(公式 TargetPage の飾り棚。公開設定が非公開なら空) */
+async function koeShowGiftsOnProfile(uid, seq) {
+  const box = document.getElementById("profileViewGifts");
+  if (!box || !uid) return;
+  let r = null;
+  try {
+    r = await callApi("get_recent_gifts", String(uid));
+  } catch (e) {}
+  if (seq !== window.__pvSeq) return;
+  const gifts = (r && r.ok && r.gifts) || [];
+  if (!gifts.length) return;
+  box.innerHTML =
+    '<div class="field-label">もらったギフト <span class="uid-tag">' +
+    gifts.length +
+    "</span></div>" +
+    '<div class="koe-gift-row">' +
+    gifts
+      .slice(0, 30)
+      .map((g) => {
+        const who = g.sender_name ? escAttr(g.sender_name + " から") : "";
+        return (
+          `<span class="koe-gift${g.is_open === false ? " unopened" : ""}" title="${escAttr(g.name || "")}${who ? " (" + who + ")" : ""}"` +
+          (g.sender_id ? ` onclick="viewProfile(${Number(g.sender_id) || 0})"` : "") +
+          ">" +
+          (g.image_url
+            ? `<img loading="lazy" decoding="async" src="${escAttr(g.image_url)}" alt="" onerror="this.parentNode.textContent='🎁'">`
+            : "🎁") +
+          "</span>"
+        );
+      })
+      .join("") +
+    "</div>";
+  box.style.display = "block";
+}
+/* ===== 公式の装飾(プロフィール枠・バッジ)の表示 ===== */
+/* 公式 DecorationMaster 相当: decoration_item_id → 画像URL。一度読んで端末内に覚える */
+window.__koeDecoItems = null;
+let __koeDecoLoading = null;
+async function koeDecoInit(force) {
+  if (window.__koeDecoItems && !force) return window.__koeDecoItems;
+  if (__koeDecoLoading && !force) return __koeDecoLoading;
+  /* 端末内の控え(6時間)があればまず使い、取り直しは裏で行う */
+  try {
+    const c = JSON.parse(localStorage.getItem("koe_deco_items_v5") || "null");
+    if (c && c.at && Date.now() - c.at < 6 * 3600 * 1000 && c.map && Object.keys(c.map).length && !force) {
+      window.__koeDecoItems = c.map;
+      return window.__koeDecoItems;
+    }
+  } catch (e) {}
+  __koeDecoLoading = koeDecoFetch(force);
+  try {
+    return await __koeDecoLoading;
+  } finally {
+    __koeDecoLoading = null;
+  }
+}
+async function koeDecoFetch(force) {
+  try {
+    const r = await callApi("get_decoration_items", !!force);
+    const map = {};
+    ((r && r.ok && r.items) || []).forEach((it) => {
+      if (it.id && it.image_url) map[it.id] = it.image_url;
+    });
+    try {
+      callApi(
+        "js_diag_log",
+        "[DECO-JS] table loaded: " +
+          Object.keys(map).length +
+          " items" +
+          (r && r.cached ? " (native cache)" : "") +
+          " ids=" +
+          Object.keys(map).slice(0, 40).join(","),
+      );
+    } catch (e) {}
+    if (Object.keys(map).length) {
+      window.__koeDecoItems = map;
+      try {
+        localStorage.setItem("koe_deco_items_v5", JSON.stringify({ at: Date.now(), map: map }));
+      } catch (e) {}
+      koeApplyDecoToDom();
+    }
+  } catch (e) {}
+  return window.__koeDecoItems || {};
+}
+/* 公式 WebpGlideImage は png サーバーの画像を .png → .webp に置き換えて読む(装飾・バッジは webp で配信)。
+   読めなければ onerror で元の拡張子に一度だけ戻す */
+function koeWebp(url) {
+  return url ? String(url).replace(/\.png(\?|$)/i, ".webp$1") : "";
+}
+function koeDecoImgErr(img) {
+  try {
+    if (img.__koeAlt) {
+      img.style.display = "none";
+      try {
+        callApi("js_diag_log", "[DECO-JS] image failed: " + img.src);
+        if (!window.__koeDecoProbed) {
+          window.__koeDecoProbed = 1;
+          callApi("deco_probe", img.src); /* 置き場所の候補を当ててログに残す(1 回だけ) */
+        }
+      } catch (e) {}
+      return;
+    }
+    img.__koeAlt = 1;
+    img.src = /\.webp(\?|$)/i.test(img.src)
+      ? img.src.replace(/\.webp(\?|$)/i, ".png$1")
+      : img.src.replace(/\.png(\?|$)/i, ".webp$1");
+  } catch (e) {}
+}
+function koeDecoUrl(itemId) {
+  if (!itemId) return "";
+  if (!window.__koeDecoItems) {
+    /* 対応表がまだ無い: 取りに行き、届いたら koeApplyDecoToDom() で画面上の枠を後から付ける */
+    try {
+      koeDecoInit(false);
+    } catch (e) {}
+    return "";
+  }
+  const url = window.__koeDecoItems[itemId] || "";
+  if (!url) {
+    /* 表に無い ID(新しいアイテム or 古い控え): 10 分に 1 回だけ表を取り直す */
+    const now = Date.now();
+    if (!window.__koeDecoRefreshAt || now - window.__koeDecoRefreshAt > 600000) {
+      window.__koeDecoRefreshAt = now;
+      try {
+        callApi(
+          "js_diag_log",
+          "[DECO-JS] item " +
+            itemId +
+            " not in table (" +
+            Object.keys(window.__koeDecoItems).length +
+            " items) → refresh",
+        );
+      } catch (e) {}
+      try {
+        koeDecoInit(true);
+      } catch (e) {}
+    }
+  }
+  /* 装飾画像は公式アセット S3 に元の拡張子で置かれている(png サーバーの webp 置換はしない)。読めなければ onerror で拡張子を一度だけ入れ替える */
+  return url;
+}
+/* 公式 ProfileAvatar と同じ構成: 装飾枠があれば枠画像を全面に、アイコンはその 50.7% を中央に。
+   バッジは右下 35%。枠画像がまだ分からない(対応表の読み込み前)ときは data-deco に控えて後から付ける */
+function koeAdornAvatar(name, iconUrl, decoItem, badgeUrl) {
+  const inner = avatarHtml(name, iconUrl);
+  if (!decoItem && !badgeUrl) return inner;
+  const deco = koeDecoUrl(decoItem);
+  return (
+    '<span class="koe-adorn' +
+    (deco ? " has-deco" : "") +
+    '"' +
+    (decoItem ? ' data-deco="' + escAttr(String(decoItem)) + '"' : "") +
+    ">" +
+    inner +
+    (deco
+      ? '<img class="koe-adorn-frame" loading="lazy" decoding="async" src="' +
+        escAttr(deco) +
+        '" alt="" onerror="koeDecoImgErr(this)">'
+      : "") +
+    (badgeUrl
+      ? '<img class="koe-adorn-badge" loading="lazy" decoding="async" src="' +
+        escAttr(koeWebp(badgeUrl)) +
+        '" alt="" onerror="koeDecoImgErr(this)">'
+      : "") +
+    "</span>"
+  );
+}
+/* 対応表が後から届いたとき、画面に出ている data-deco 付きの要素へ枠画像を付ける */
+function koeApplyDecoToDom() {
+  try {
+    document.querySelectorAll(".koe-adorn[data-deco]:not(.has-deco)").forEach((el) => {
+      const url = koeDecoUrl(el.getAttribute("data-deco"));
+      if (!url) return;
+      const img = document.createElement("img");
+      img.className = "koe-adorn-frame";
+      img.src = url;
+      img.alt = "";
+      img.onerror = function () {
+        koeDecoImgErr(img);
+      };
+      el.insertBefore(img, el.children[1] || null);
+      el.classList.add("has-deco");
+    });
+  } catch (e) {}
 }
 let currentRoomId = null,
   currentRoomOwnerId = null,
@@ -7453,6 +7982,7 @@ function koeRtdbStop() {
     window.__rtdb.streams = {};
     window.__rtdb.retries = {};
     window.__rtdb.members = null;
+    window.__rtdb.muteStatus = {};
     window.__rtdb.comments = {};
     window.__rtdb.__cInit = false;
     window.__rtdb.roomId = null;
@@ -7510,6 +8040,17 @@ function koeRtdbStart(roomId) {
         if (/close|end|finish/.test(st)) {
           onRoomClosed();
         }
+      } catch (e) {}
+    },
+  };
+  /* 公式アプリのミュート表示は rooms/{id}/mute_status/{uid} (1/0)。SkyWay 側の配信停止と
+     合わせて見ることで、公式ユーザーのミュートも取りこぼさない */
+  window.__rtdb.muteStatus = {};
+  window.__rtdb.streams.mute_status = {
+    url: base + "/mute_status.json",
+    on: function (type, path, data) {
+      try {
+        koeRtdbApplyMuteStatus(type, path, data);
       } catch (e) {}
     },
   };
@@ -7627,6 +8168,30 @@ function koeRtdbSetPath(obj, path, data) {
   if (data === null) delete o[parts[parts.length - 1]];
   else o[parts[parts.length - 1]] = data;
   return cur;
+}
+/* mute_status の put/patch を {uid: true/false} に畳み込む。値は公式どおり 1/0(true/false も許容) */
+function koeRtdbApplyMuteStatus(type, path, data) {
+  var m = window.__rtdb.muteStatus || {};
+  if (type === "put") {
+    m = koeRtdbSetPath(path === "/" ? {} : m, path, data);
+  } else {
+    var base = path;
+    Object.keys(data || {}).forEach(function (k) {
+      m = koeRtdbSetPath(m, (base === "/" ? "" : base) + "/" + k, data[k]);
+    });
+  }
+  window.__rtdb.muteStatus = m && typeof m === "object" ? m : {};
+  try {
+    updateCallGrid();
+  } catch (e) {}
+}
+function koeMuteStatusOf(uid) {
+  try {
+    var v = window.__rtdb.muteStatus && window.__rtdb.muteStatus[String(uid)];
+    return v === 1 || v === true || v === "1" || v === "true";
+  } catch (e) {
+    return false;
+  }
 }
 async function koeRtdbApplyMembers(type, path, data) {
   try {
@@ -8597,7 +9162,7 @@ function koeBotQueue(uid) {
       s = [];
     }
     if (s.indexOf(uid) >= 0) return;
-    if (__koeBotQ.length >= 40) return;
+    if (__koeBotQ.length >= 200) return;
     __koeBotQ.push(uid);
     koeBotPump();
   } catch (e) {}
@@ -8635,16 +9200,31 @@ function koeBotPump() {
         } catch (e) {}
       })
       .catch(function () {});
-  }, 25000);
+  }, 10000);
 }
 try {
   document.addEventListener("visibilitychange", function () {
     if (!document.hidden && __koeBotQ.length) koeBotPump();
   });
 } catch (e) {}
+/* 業者(共有BANリスト掲載 or 判定「高」)の投稿・枠を表示しない。初期値はオン(設定で切替) */
 function koeSpamHide() {
   try {
-    return localStorage.getItem("koe_spam_hide") === "1";
+    var v = localStorage.getItem("koe_spam_hide");
+    return v === null ? true : v === "1";
+  } catch (e) {
+    return true;
+  }
+}
+function koeIsHiddenBiz(u) {
+  try {
+    if (!koeSpamHide() || !u) return false;
+    var uid = Number(u.user_id || u.id || 0);
+    if (!uid) return false;
+    if (typeof myUserId !== "undefined" && uid === Number(myUserId)) return false;
+    if (koeIsListedBiz(uid)) return true;
+    var r = koeSpamScore(u);
+    return !!(r && (r.hard || r.level === "high"));
   } catch (e) {
     return false;
   }
@@ -10078,11 +10658,31 @@ function callSetStatus(msg) {
   callLog(msg);
 }
 let __callSpeakerMuted = !1;
+/* 相手の音声は <audio> ではなく AudioContext のゲイン(人ごとの音量)を通して鳴らしている。
+   そのため <audio>.muted を切っても音は止まらなかった(「スピーカーOFF」が効かない)。
+   人ごとのゲインを全部この親ゲインに束ね、スピーカーOFF は親ゲインを 0 にして止める。 */
+function koeMasterGain() {
+  audioCtx || (audioCtx = new (window.AudioContext || window.webkitAudioContext)());
+  if (!window.__koeMasterGain || window.__koeMasterGain.context !== audioCtx) {
+    const g = audioCtx.createGain();
+    g.gain.value = __callSpeakerMuted ? 0 : 1;
+    g.connect(audioCtx.destination);
+    window.__koeMasterGain = g;
+  }
+  return window.__koeMasterGain;
+}
+function koeApplySpeakerMuted() {
+  try {
+    koeMasterGain().gain.value = __callSpeakerMuted ? 0 : 1;
+  } catch (e) {}
+  document.querySelectorAll("#remoteAudios audio").forEach((a) => {
+    /* ゲイン経由の要素は常に muted(二重再生防止)。ゲインを使えなかった要素だけ muted で切る */
+    if (!a.__koeGain) a.muted = __callSpeakerMuted;
+  });
+}
 function toggleCallSpeaker() {
-  ((__callSpeakerMuted = !__callSpeakerMuted),
-    document.querySelectorAll("#remoteAudios audio").forEach((a) => {
-      a.muted = __callSpeakerMuted;
-    }));
+  __callSpeakerMuted = !__callSpeakerMuted;
+  koeApplySpeakerMuted();
   const b = document.getElementById("callSpeakerBtn");
   b && b.classList.toggle("muted", __callSpeakerMuted);
   try {
@@ -11013,12 +11613,9 @@ async function koeSyncPublish(initial) {
     var mb = document.getElementById("callMuteBtn");
     if (can && !skMyPub) {
       skMyPub = await skMe.publish(skLocalStream, koeSkyWayPublishOptions());
-      try {
-        if (skMuted) skMyPub.disable();
-      } catch (e) {}
-      try {
-        skLocalStream.track && (skLocalStream.track.enabled = !skMuted);
-      } catch (e) {}
+      /* 配信開始前に押されたミュートをここで反映(状態確認つき) */
+      await koeApplyMuteState();
+      koeNotifyMuteState(skMuted);
       if (mb) {
         mb.disabled = false;
         mb.title = "";
@@ -11096,7 +11693,7 @@ function koeAttachGain(uid, a, ms) {
       g = audioCtx.createGain();
     g.gain.value = koeGetVol(uid);
     src.connect(g);
-    g.connect(audioCtx.destination);
+    g.connect(koeMasterGain());
     (window.__koeGains[uid] = window.__koeGains[uid] || []).push(g);
     a.muted = true;
     a.__koeGain = g;
@@ -11211,7 +11808,7 @@ function renderCallParticipants(participants) {
           p.icon_url && /^https?:\/\/[^'"()\\\s]+$/i.test(String(p.icon_url))
             ? `background-image:url('${escAttr(koeThumb(p.icon_url, 96))}')`
             : `background-color:${callAvatarColor(p.user_id)}`;
-      return `<div class="callv2-pcard" onclick="koeCallUserMenu(${Number(p.user_id) || 0})">\n      <div class="callv2-pav ${("applicant" === p.role ? "raised" : "listener" === p.role ? "listener" : "") + (p.just_changed ? " just-changed" : "")}" data-uid="${p.user_id}" style="${bg}">\n        ${p.icon_url ? "" : escapeHtml(initial)}\n        ${p.is_owner ? '<span class="callv2-crown"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 8l4.5 3.5L12 5l4.5 6.5L21 8l-1.5 10.5a1 1 0 0 1-1 .5H5.5a1 1 0 0 1-1-.5L3 8Z"/></svg></span>' : ""}\n        ${p.is_mute && "listener" !== p.role ? '<span class="callv2-pmute"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="#ccc" stroke-width="2"><rect x="9" y="3" width="6" height="9" rx="3" fill="#ccc" stroke="none"/><path d="M6 11a6 6 0 0 0 12 0" stroke-linecap="round"/><path d="M4 3l16 16" stroke-linecap="round"/></svg></span>' : ""}\n        ${"applicant" === p.role ? '<span class="callv2-phand"><svg viewBox="0 0 24 24" width="13" height="13" fill="#fff"><path d="M7 11V6a1.4 1.4 0 0 1 2.8 0v4m0 0V4.4a1.4 1.4 0 0 1 2.8 0V10m0 0V6a1.4 1.4 0 0 1 2.8 0v6m0-2a1.4 1.4 0 0 1 2.8 0v4a6 6 0 0 1-6 6h-1a6 6 0 0 1-5.4-3.4L4.6 13a1.5 1.5 0 0 1 2.6-1.4"/></svg></span>' : ""}\n        ${"speaker" === p.role && Number(p.user_id) !== Number(window.__myUserId || 0) ? `<button class="callv2-vol" data-uid="${p.user_id}" data-name="${escAttr(nm)}" title="音量" onclick="event.stopPropagation();koeShowVolume(${Number(p.user_id) || 0},this.dataset.name)"><svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M4 9v6h4l5 4V5L8 9H4Z"/><path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>` : ""}\n      </div>\n      <div class="callv2-pname"><span>${escapeHtml(nm)}</span></div>\n    </div>`;
+      return `<div class="callv2-pcard" onclick="koeCallUserMenu(${Number(p.user_id) || 0})">\n      <div class="callv2-pav ${("applicant" === p.role ? "raised" : "listener" === p.role ? "listener" : "") + (p.just_changed ? " just-changed" : "")}" data-uid="${p.user_id}" style="${bg}">\n        ${p.icon_url ? "" : escapeHtml(initial)}\n        ${koeDecoUrl(p.deco_item) ? `<img class="callv2-deco" src="${escAttr(koeDecoUrl(p.deco_item))}" alt="" onerror="koeDecoImgErr(this)">` : ""}${p.badge_url ? `<img class="callv2-pbadge" src="${escAttr(koeWebp(p.badge_url))}" alt="" onerror="koeDecoImgErr(this)">` : ""}\n        ${p.is_owner ? '<span class="callv2-crown"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 8l4.5 3.5L12 5l4.5 6.5L21 8l-1.5 10.5a1 1 0 0 1-1 .5H5.5a1 1 0 0 1-1-.5L3 8Z"/></svg></span>' : ""}\n        ${p.is_mute && "listener" !== p.role ? '<span class="callv2-pmute"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="#ccc" stroke-width="2"><rect x="9" y="3" width="6" height="9" rx="3" fill="#ccc" stroke="none"/><path d="M6 11a6 6 0 0 0 12 0" stroke-linecap="round"/><path d="M4 3l16 16" stroke-linecap="round"/></svg></span>' : ""}\n        ${"applicant" === p.role ? '<span class="callv2-phand"><svg viewBox="0 0 24 24" width="13" height="13" fill="#fff"><path d="M7 11V6a1.4 1.4 0 0 1 2.8 0v4m0 0V4.4a1.4 1.4 0 0 1 2.8 0V10m0 0V6a1.4 1.4 0 0 1 2.8 0v6m0-2a1.4 1.4 0 0 1 2.8 0v4a6 6 0 0 1-6 6h-1a6 6 0 0 1-5.4-3.4L4.6 13a1.5 1.5 0 0 1 2.6-1.4"/></svg></span>' : ""}\n        ${"speaker" === p.role && Number(p.user_id) !== Number(window.__myUserId || 0) ? `<button class="callv2-vol" data-uid="${p.user_id}" data-name="${escAttr(nm)}" title="音量" onclick="event.stopPropagation();koeShowVolume(${Number(p.user_id) || 0},this.dataset.name)"><svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M4 9v6h4l5 4V5L8 9H4Z"/><path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>` : ""}\n      </div>\n      <div class="callv2-pname"><span>${escapeHtml(nm)}</span></div>\n    </div>`;
     },
     total = participants.length;
   (el.classList.remove("size-lg", "size-md", "size-sm", "size-xs"),
@@ -11282,6 +11879,15 @@ function addSpeakAnalyser(uid, mediaStream) {
   try {
     if (!uid || !mediaStream) return;
     audioCtx || (audioCtx = new (window.AudioContext || window.webkitAudioContext)());
+    /* 同じ人の古い解析器(マイク差し替え・ミュート解除で止まったトラック)は捨てる。
+       残すと表示の class を取り合って発話表示・マイクメーターが止まって見える */
+    callAnalysers = callAnalysers.filter((a) => {
+      if (a.uid !== uid) return true;
+      try {
+        a.analyser.disconnect();
+      } catch (e) {}
+      return false;
+    });
     const src = audioCtx.createMediaStreamSource(mediaStream),
       an = audioCtx.createAnalyser();
     ((an.fftSize = 256),
@@ -11837,7 +12443,9 @@ async function __updateCallGridInner() {
         const uid = Number(u.user_id);
         if (!uid || seen.has(uid)) return null;
         seen.add(uid);
-        let muted = !!muteByUid[uid];
+        /* SkyWay の配信状態が分かる人はそれを正とし、分からない人だけ公式の mute_status を見る
+           (退室時に 1 が残ることがあるため、配信中の人には使わない) */
+        let muted = muteByUid[uid] !== undefined ? !!muteByUid[uid] : koeMuteStatusOf(uid);
         uid === myUid && (muted = skMuted);
         const justChanged =
           (window.__justRaisedUids && window.__justRaisedUids.has(uid)) ||
@@ -11846,6 +12454,8 @@ async function __updateCallGridInner() {
           user_id: uid,
           name: u.name || "user " + uid,
           icon_url: u.icon_url || "",
+          deco_item: u.deco_item || 0,
+          badge_url: u.badge_url || "",
           is_owner: uid === ownerUid,
           is_mute: muted,
           role: role,
@@ -11890,7 +12500,7 @@ async function __updateCallGridInner() {
   renderCallParticipants(
     skUids.map((uid) => {
       const u = resolved[uid] || {};
-      let muted = !!muteByUid[uid];
+      let muted = muteByUid[uid] !== undefined ? !!muteByUid[uid] : koeMuteStatusOf(uid);
       uid === myUid && (muted = skMuted);
       const raised = !(!window.__handRaisedUids || !window.__handRaisedUids.has(uid));
       const hasAudio = Object.prototype.hasOwnProperty.call(muteByUid, uid) || uid === myUid;
@@ -12027,30 +12637,45 @@ async function startInWindowCall(call) {
     document.getElementById("callOwnerControls").style.display = __showOwnerUi ? "block" : "none";
     document.getElementById("callCloseRoomBtn").style.display = __showOwnerUi ? "block" : "none";
   }
-  if (
-    (0,
-    renderCallParticipants(call.participants || []),
-    await populateCallDevices(),
-    "undefined" != typeof skyway_room)
-  )
+  /* teardownCall() で名簿(__roomRoster)が消えるため、参加APIの応答から名簿をすぐ作り直す。
+     名簿が無いと koeAllowedSpeaker が主催者以外を「名簿外」と判断し、先に居た発言者の音声を
+     次の名簿取得(RTDB か 数秒〜十数秒後の定期取得)まで購読しなかった。「入ってもすぐ声が聞こえない」の原因。 */
+  koeSeedRosterFromJoin(call);
+  renderCallParticipants(call.participants || []);
+  /* デバイス一覧(enumerateDevices)は接続を待たせない(裏で更新) */
+  try {
+    populateCallDevices().catch(function () {});
+  } catch (e) {}
+  if ("undefined" != typeof skyway_room)
     try {
-      callSetStatus("SkyWayContext.Create 実行中...");
+      callSetStatus("接続中…");
       const {
           SkyWayContext: SkyWayContext,
           SkyWayRoom: SkyWayRoom,
           SkyWayStreamFactory: SkyWayStreamFactory,
         } = skyway_room,
         context = await SkyWayContext.Create(call.auth_token);
-      callSetStatus("マイク取得中...(許可を求められたら許可してください)");
+      /* 「入った瞬間に相手の声」を最優先にする:
+         マイク取得(getUserMedia: 許可ダイアログや端末によって数百ms〜数秒)は部屋への参加と並行して始め、
+         参加 → 既存配信の購読 を先に済ませる。自分の配信(publish)はマイクが取れてから。 */
       const savedMic = localStorage.getItem(CALL_LS_MIC);
-      ((skLocalStream = await SkyWayStreamFactory.createMicrophoneAudioStream(
+      const micPromise = SkyWayStreamFactory.createMicrophoneAudioStream(
         savedMic ? { deviceId: { exact: savedMic } } : void 0,
-      )),
-        callSetStatus("接続中…"),
-        (skRoom = await SkyWayRoom.FindOrCreate(context, {
-          type: koeSkyWayRoomType(call),
-          name: (window.__callChannel = call.channel),
-        })),
+      ).catch(async (err) => {
+        /* 覚えていたマイクが無い(抜かれた等)なら既定のマイクで取り直す */
+        if (savedMic) {
+          try {
+            return await SkyWayStreamFactory.createMicrophoneAudioStream();
+          } catch (e2) {
+            throw e2;
+          }
+        }
+        throw err;
+      });
+      ((skRoom = await SkyWayRoom.FindOrCreate(context, {
+        type: koeSkyWayRoomType(call),
+        name: (window.__callChannel = call.channel),
+      })),
         (skMe = await skRoom.join({ name: call.member || "me" })),
         (document.getElementById("callMemberCount").textContent = skRoom.members.length),
         updateCallGrid());
@@ -12131,6 +12756,8 @@ async function startInWindowCall(call) {
               window.__skSubs[pub.id] = { sub: subscription, audio: a, uid: pubUid };
             } catch (_) {}
             document.getElementById("remoteAudios").appendChild(a);
+            /* スピーカーOFF 中に配信を始めた人も鳴らさない */
+            if (__callSpeakerMuted && !a.__koeGain) a.muted = true;
             callSetStatus("接続中");
           })
           .catch(() => {
@@ -12181,10 +12808,15 @@ async function startInWindowCall(call) {
       // マイク許可待ち/ICEネゴシエーション中は相手の声が聞こえなかった。「参加してもすぐ音が聞こえない」の再発対応)。
       skRoom.onStreamPublished.add(async (e) => {
         updateCallGrid();
-        /* 誰かが配信を始めた=昇格の可能性。名簿を即時更新してから購読判定 */ try {
-          await refreshRoomStateNow();
-        } catch (_) {}
+        /* 名簿に載っている人ならその場で購読(名簿の取り直しを待たない)。載っていなければ
+           昇格した可能性があるので名簿を取り直してからもう一度判定する */
         skSubscribeToPublication(e.publication);
+        if (!(e.publication && skSubscribedPubIds.has(e.publication.id))) {
+          try {
+            await refreshRoomStateNow();
+          } catch (_) {}
+          skSubscribeToPublication(e.publication);
+        }
         try {
           window.__koeSyncSubs && window.__koeSyncSubs();
         } catch (_) {}
@@ -12194,10 +12826,27 @@ async function startInWindowCall(call) {
       try {
         (skRoom.publications || []).forEach(skSubscribeToPublication);
       } catch (e) {}
+      // 参加APIの名簿が古い可能性に備え、最新の名簿も取りに行って取りこぼしを購読する(待たない)
+      try {
+        refreshRoomStateNow().catch(function () {});
+      } catch (e) {}
       skMyPub = null;
+      /* ここまでで相手の音声は鳴り始めている。ここからは自分のマイク(取得を待つ) */
+      callSetStatus("マイク取得中...(許可を求められたら許可してください)");
+      skLocalStream = await micPromise;
       try {
         const mine = skLocalStream.track ? new MediaStream([skLocalStream.track]) : null;
         mine && addSpeakAnalyser(window.__myUserId, mine);
+        /* ミュート解除やマイク切替で SkyWay がトラックを作り直したら、解析器も新しいトラックに付け替える
+           (以前は最初のトラックのままだったので、一度ミュートすると自分の発話表示が戻らなかった) */
+        skLocalStream.onTrackUpdated &&
+          skLocalStream.onTrackUpdated.add((track) => {
+            try {
+              if (track && track.readyState === "live" && !skMuted) {
+                addSpeakAnalyser(window.__myUserId, new MediaStream([track]));
+              }
+            } catch (e) {}
+          });
       } catch (e) {}
       await koeSyncPublish(true);
       (startCallTimer(), callSetStatus("接続完了"), koeVibrate(40));
@@ -12288,6 +12937,30 @@ async function startInWindowCall(call) {
       (callSetStatus("エラー: " + (err && err.message ? err.message : err)), console.error(err));
     }
   else callSetStatus("エラー: SkyWay SDKが読み込まれていません(ネットワーク/CDNを確認)");
+}
+/* 参加APIの応答(participants: role / is_owner 付き)から通話用の名簿を作る */
+function koeSeedRosterFromJoin(call) {
+  try {
+    const parts = (call && call.participants) || [];
+    if (!parts.length) return;
+    const owner = Number((call && call.owner_user_id) || window.__callOwnerUid || 0);
+    const speakers = [],
+      listeners = [];
+    parts.forEach((p) => {
+      const uid = Number(p.user_id || p.userId);
+      if (!uid) return;
+      const u = { user_id: uid, name: p.name || "user " + uid, icon_url: p.icon_url || "" };
+      if (p.deco_item) u.deco_item = p.deco_item;
+      if (p.badge_url) u.badge_url = p.badge_url;
+      if (p.role === "speaker" || p.is_owner || uid === owner) speakers.push(u);
+      else listeners.push(u);
+    });
+    const applicants = ((call && call.speaker_applicants) || []).map((a) => ({
+      user_id: Number(a.user_id || a.userId),
+      name: a.name || "",
+    }));
+    window.__roomRoster = { speakers: speakers, listeners: listeners, applicants: applicants, owner: owner };
+  } catch (e) {}
 }
 async function teardownCall(notifyServer) {
   if (notifyServer) {
@@ -12391,29 +13064,65 @@ async function leaveInWindowCall() {
     await teardownCall(!0);
   } catch (e) {}
 }
-function setCallMuted(muted) {
-  if (!skLocalStream) return;
-  ((skMuted = muted), sfx(muted ? "mute" : "unmute"), koeVibrate(25));
-  try {
-    csEvent(muted ? "mute" : "unmute", window.__myUserId || 0, "あなた");
-  } catch (e) {}
-  try {
-    var __mb = document.getElementById("callMuteBtn");
-    if (__mb) {
-      var __sp = __mb.querySelector("span");
-      if (__sp) __sp.textContent = muted ? "ミュート解除" : "ミュート";
-      __mb.classList.toggle("muted", !!muted);
+/* ---- 自分のミュート ----
+   SkyWay の publication.disable()/enable() は非同期で、内部の状態確認より前に待ち時間がある。
+   そのため「ミュート→すぐ解除」「解除→すぐミュート」のように連続で押すと、後の操作が
+   「もう同じ状態」と判断されて何もせず、ボタン表示と実際の送信状態が食い違うことがあった
+   (ミュート表示なのに相手に聞こえる)。ここでは操作を 1 本の列に並べ、終わった後に
+   publication の状態が skMuted と一致するか確かめ、違っていれば掛け直す。 */
+let __muteChain = Promise.resolve();
+function koeApplyMuteState() {
+  const run = async () => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const want = skMuted;
+      if (!skMyPub || !skLocalStream) {
+        /* 未配信(聞き専など)。配信開始時に koeSyncPublish が改めて反映する */
+        return;
+      }
+      try {
+        if (want) await skMyPub.disable();
+        else await skMyPub.enable();
+      } catch (e) {
+        try {
+          callLog("ミュート反映エラー(" + (attempt + 1) + "回目): " + (e && e.message ? e.message : e));
+        } catch (_) {}
+      }
+      if (!skMyPub) return;
+      const nowMuted = skMyPub.state === "disabled";
+      if (nowMuted === skMuted) break;
+      await new Promise((r) => setTimeout(r, 250));
     }
-  } catch (e) {}
+    /* 3 回やっても合わない時:
+       ・ミュートしたいのに配信停止が通らない → 下の track.enabled=false で送信自体を止める(表示はミュートのまま)
+       ・解除したいのにマイクを取り直せない → 表示を実際(ミュート)に合わせて知らせる */
+    if (skMyPub && skMyPub.state === "disabled" && !skMuted) {
+      skMuted = true;
+      koeRenderMuteButton();
+      try {
+        toast("ミュート解除できませんでした(マイクの許可を確認してください)");
+      } catch (e) {}
+    }
+    /* 保険: 送信トラック自体も止める(disable 後は無音のダミートラックに差し替わっているので害はない) */
+    try {
+      skLocalStream && skLocalStream.track && (skLocalStream.track.enabled = !skMuted);
+    } catch (e) {}
+    try {
+      updateCallGrid();
+    } catch (e) {}
+  };
+  __muteChain = __muteChain.then(run, run);
+  return __muteChain;
+}
+/* 公式アプリと同じ合図を送る: rooms/{id}/mute_status/{自分} = 1/0(公式のミュートアイコン)。
+   ミュート時はマイクレベル表示を消す Volume コマンド(volume 0)も送る。 */
+function koeNotifyMuteState(muted) {
   try {
-    skLocalStream.track && (skLocalStream.track.enabled = !skMuted);
+    if (!currentRoomId || !window.__myUserId) return;
+    callApi("room_mute_status", String(currentRoomId), muted ? "1" : "0").catch(function () {});
   } catch (e) {}
-  try {
-    skMyPub && (skMuted ? skMyPub.disable() : skMyPub.enable());
-  } catch (e) {}
-  try {
-    updateCallGrid();
-  } catch (e) {}
+}
+/* ミュートボタン(通話画面)と復帰バナーのマイク表示を skMuted に合わせる */
+function koeRenderMuteButton() {
   const b = document.getElementById("callMuteBtn");
   if (b) {
     const s2 = b.querySelector("span");
@@ -12425,6 +13134,19 @@ function setCallMuted(muted) {
       ? '<svg class="ico" viewBox="0 0 24 24" fill="currentColor"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M4 3l16 16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
       : '<svg class="ico" viewBox="0 0 24 24" fill="currentColor"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><rect x="11" y="18" width="2" height="3.4" rx="1"/></svg>'),
     m.classList.toggle("muted", skMuted));
+}
+function setCallMuted(muted) {
+  if (!skLocalStream) return;
+  ((skMuted = muted), sfx(muted ? "mute" : "unmute"), koeVibrate(25));
+  try {
+    csEvent(muted ? "mute" : "unmute", window.__myUserId || 0, "あなた");
+  } catch (e) {}
+  koeRenderMuteButton();
+  koeApplyMuteState();
+  koeNotifyMuteState(!!muted);
+  try {
+    updateCallGrid();
+  } catch (e) {}
 }
 function toggleCallMuteFromBanner() {
   setCallMuted(!skMuted);
@@ -13242,7 +13964,7 @@ async function loadCommunitiesFeed() {
     ? (box.innerHTML = posts
         .map(
           (p) =>
-            `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}" data-pid="${p.id}" data-likes="${p.likes || 0}">\n      <div class="tl-head">\n        <div class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})' style="cursor:pointer;">${avatarHtml(p.name, p.icon_url)}</div>\n        <div class="tl-meta">\n          <div class="tl-name">${escapeHtml(p.name || "user " + p.user_id)}</div>\n          <div class="tl-time">${p.community_name ? " " + escapeHtml(p.community_name) + " ・ " : ""}${koeTimeLabel(p.created_at)}</div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : ""}\n    </div>`,
+            `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}${p.deco_url ? " has-deco" : ""}" data-pid="${p.id}" data-likes="${p.likes || 0}"${p.deco_url ? ` style="--koe-deco:url(${escAttr(JSON.stringify(String(p.deco_url)))})"` : ""}>\n      <div class="tl-head">\n        <div class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})' style="cursor:pointer;">${avatarHtml(p.name, p.icon_url)}</div>\n        <div class="tl-meta">\n          <div class="tl-name">${escapeHtml(p.name || "user " + p.user_id)}</div>\n          <div class="tl-time">${p.community_name ? " " + escapeHtml(p.community_name) + " ・ " : ""}${koeTimeLabel(p.created_at)}</div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : ""}\n    </div>`,
         )
         .join(""))
     : (box.innerHTML = '<div class="empty-msg">参加中コミュニティの投稿がありません</div>');
@@ -13338,7 +14060,13 @@ async function loadProfile() {
           card && card.classList.add("has-header"))
         : ((mh.style.display = "none"), card && card.classList.remove("has-header")));
   }
-  document.getElementById("profileAvatar").innerHTML = avatarHtml(p.name, p.icon_url);
+  window.__koeMyProfile = p;
+  document.getElementById("profileAvatar").innerHTML = koeAdornAvatar(
+    p.name,
+    p.icon_url,
+    p.deco_item,
+    p.badge_url,
+  );
   {
     const myAvImg = document.querySelector("#profileAvatar img.avatar");
     if (myAvImg && p.icon_url) {
@@ -13471,11 +14199,7 @@ async function uploadProfileOrHeaderImage(kind) {
       const file = input.files && input.files[0];
       if (!file) return;
       const status = document.getElementById("profileImageStatus"),
-        btn = document.getElementById(
-          "header" === kind
-            ? "uploadHeaderImageBtn"
-            : "uploadProfileImageBtn",
-        ),
+        btn = document.getElementById("header" === kind ? "uploadHeaderImageBtn" : "uploadProfileImageBtn"),
         reader = new FileReader();
       ((reader.onload = (ev) => {
         const img = new Image();
@@ -13653,7 +14377,7 @@ async function loadActivityHeatmap() {
       let cur = 0;
       {
         const d = new Date();
-        for (has(d) || d.setDate(d.getDate() - 1); has(d); ) (cur++, d.setDate(d.getDate() - 1));
+        for (has(d) || d.setDate(d.getDate() - 1); has(d);) (cur++, d.setDate(d.getDate() - 1));
       }
       let longest = 0,
         run = 0,
@@ -14743,6 +15467,12 @@ async function viewProfile(userId) {
   document.getElementById("profileViewComment").textContent = "";
   const _pvd = document.getElementById("profileViewDetails");
   _pvd && (_pvd.innerHTML = "");
+  {
+    const _pvr = document.getElementById("profileViewRoom");
+    _pvr && ((_pvr.style.display = "none"), (_pvr.innerHTML = ""));
+    const _pvg = document.getElementById("profileViewGifts");
+    _pvg && ((_pvg.style.display = "none"), (_pvg.innerHTML = ""));
+  }
   const _pvb = document.getElementById("profileViewBadges");
   (_pvb && (_pvb.innerHTML = ""), (badgeImg.style.display = "none"), (followBtn.style.display = "none"));
   {
@@ -14811,7 +15541,14 @@ async function viewProfile(userId) {
         }
       }));
   }
-  document.getElementById("profileViewAvatar").innerHTML = avatarHtml(p.name, p.icon_url);
+  document.getElementById("profileViewAvatar").innerHTML = koeAdornAvatar(
+    p.name,
+    p.icon_url,
+    p.deco_item,
+    p.badge_url,
+  );
+  koeShowUserRoomOnProfile(p.user_id, __pvSeq); /* いま参加中の枠(あれば) */
+  koeShowGiftsOnProfile(p.user_id, __pvSeq); /* もらったギフト(公式の飾り棚) */
   {
     const avImg = document.querySelector("#profileViewAvatar img.avatar");
     if (avImg && p.icon_url) {
@@ -21977,17 +22714,19 @@ async function __koeDoUserSearchModal() {
       }
       var name = (document.getElementById("quickEditName") || {}).value || "";
       var cmt = (document.getElementById("quickEditComment") || {}).value || "";
+      /* 自分のアイコン(マイページに出ているもの)と装飾をそのまま使う */
       var icon = "";
       try {
-        var im =
-          document.querySelector("#profileViewAvatar img.avatar") ||
-          document.querySelector("#myProfileAvatar img.avatar");
-        if (im) icon = im.src;
+        var im = document.querySelector("#profileAvatar img.avatar");
+        if (im) icon = im.getAttribute("src") || im.src;
       } catch (e) {}
+      var mine = window.__koeMyProfile || {};
       box.innerHTML =
         '<div class="qe-preview-label">保存後はこう見えます</div>' +
         '<div class="qe-preview-card">' +
-        (typeof avatarHtml === "function" ? avatarHtml(name || "?", icon) : "") +
+        (typeof koeAdornAvatar === "function"
+          ? koeAdornAvatar(name || "?", icon, mine.deco_item, mine.badge_url)
+          : avatarHtml(name || "?", icon)) +
         '<div class="qe-preview-body">' +
         '<div class="qe-preview-name">' +
         escapeHtml(name || "(名前なし)") +
@@ -24782,4 +25521,147 @@ try {
     },
     true,
   );
+})();
+
+/* ===== セレクトの選択肢を Android 標準のダイアログではなく、アプリの見た目に合わせたシートで出す =====
+   すべての <select> に共通(後から作られるものも含む)。値の反映は元の select に行い、change を発火するので
+   既存の処理はそのまま動く。multiple / disabled / data-native="1" の select は標準のまま。 */
+(function () {
+  if (window.__koeSelectSheetInit) return;
+  window.__koeSelectSheetInit = true;
+  let sheet = null,
+    current = null;
+  function labelOf(sel) {
+    try {
+      if (sel.getAttribute("aria-label")) return sel.getAttribute("aria-label");
+      if (sel.id) {
+        const lb = document.querySelector('label[for="' + sel.id + '"]');
+        if (lb && lb.textContent.trim()) return lb.textContent.trim();
+      }
+      let p = sel.previousElementSibling;
+      for (let i = 0; p && i < 2; i++, p = p.previousElementSibling) {
+        if (
+          /^(LABEL|SPAN|DIV|P)$/.test(p.tagName) &&
+          p.textContent.trim().length <= 24 &&
+          !p.querySelector("select,input,button")
+        )
+          return p.textContent.trim();
+      }
+    } catch (e) {}
+    return "選択";
+  }
+  function close() {
+    if (!sheet) return;
+    const s = sheet;
+    sheet = null;
+    current = null;
+    s.classList.remove("open");
+    setTimeout(() => {
+      try {
+        s.remove();
+      } catch (e) {}
+    }, 180);
+  }
+  function open(sel) {
+    close();
+    current = sel;
+    const opts = Array.from(sel.options || []);
+    if (!opts.length) return;
+    sheet = document.createElement("div");
+    sheet.className = "koe-sheet-bg";
+    const items = opts
+      .map((o, i) => {
+        if (o.hidden || o.disabled) return "";
+        const on = i === sel.selectedIndex;
+        return (
+          `<button type="button" class="koe-sheet-item${on ? " on" : ""}" data-i="${i}" role="option" aria-selected="${on}">` +
+          '<span class="koe-sheet-txt">' +
+          escapeHtml(o.textContent.trim()) +
+          "</span>" +
+          '<span class="koe-sheet-check">' +
+          (on
+            ? '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7"/></svg>'
+            : "") +
+          "</span></button>"
+        );
+      })
+      .join("");
+    sheet.innerHTML =
+      '<div class="koe-sheet" role="listbox"><div class="koe-sheet-grip"></div><div class="koe-sheet-title">' +
+      escapeHtml(labelOf(sel)) +
+      '</div><div class="koe-sheet-list">' +
+      items +
+      "</div></div>";
+    document.body.appendChild(sheet);
+    sheet.addEventListener("click", (e) => {
+      const it = e.target.closest(".koe-sheet-item");
+      if (it) {
+        const i = Number(it.dataset.i);
+        if (current && current.selectedIndex !== i) {
+          current.selectedIndex = i;
+          try {
+            current.dispatchEvent(new Event("input", { bubbles: true }));
+            current.dispatchEvent(new Event("change", { bubbles: true }));
+          } catch (err) {}
+        }
+        try {
+          haptic(10);
+        } catch (err) {}
+        close();
+        return;
+      }
+      if (e.target === sheet) close();
+    });
+    requestAnimationFrame(() => sheet && sheet.classList.add("open"));
+    try {
+      const on = sheet.querySelector(".koe-sheet-item.on");
+      on && on.scrollIntoView({ block: "center" });
+    } catch (e) {}
+  }
+  function wants(sel) {
+    return (
+      sel &&
+      sel.tagName === "SELECT" &&
+      !sel.multiple &&
+      !sel.disabled &&
+      sel.getAttribute("data-native") !== "1" &&
+      (sel.options || []).length > 0
+    );
+  }
+  /* 標準ダイアログが開く前(mousedown / touchend)に横取りする */
+  document.addEventListener(
+    "mousedown",
+    (e) => {
+      const sel = e.target && e.target.closest && e.target.closest("select");
+      if (!wants(sel)) return;
+      e.preventDefault();
+      sel.blur();
+      open(sel);
+    },
+    true,
+  );
+  /* 端末によっては click まで届いてから標準ダイアログが開くので、そこも止める */
+  document.addEventListener(
+    "click",
+    (e) => {
+      const sel = e.target && e.target.closest && e.target.closest("select");
+      if (!wants(sel)) return;
+      e.preventDefault();
+      if (!sheet) open(sel);
+    },
+    true,
+  );
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key === "Escape" && sheet) close();
+      const sel = e.target && e.target.tagName === "SELECT" ? e.target : null;
+      if (wants(sel) && (e.key === "Enter" || e.key === " ")) {
+        e.preventDefault();
+        open(sel);
+      }
+    },
+    true,
+  );
+  window.koeCloseSelectSheet = close;
 })();

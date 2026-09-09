@@ -53,13 +53,232 @@ public class KoeSession {
     /** このセッションでデコレーションを確認済みの user_id(名前は端末に永続キャッシュされるので、別途 1 回は取り直す)。 */
     private final java.util.Set<Long> decoChecked = java.util.Collections.synchronizedSet(new java.util.HashSet<Long>());
 
-    /** /api/v2/users のユーザー1件からデコレーション画像を覚える(無ければ消す)。 */
+    /**
+     * 公式の「装飾」: プロフィール枠(decoration_item_id → /api/decoration_items の image_file_path)と
+     * 表示バッジ(badge_image_file_path)。ユーザー情報を取るたびに覚え、一覧・投稿・通話の表示に添える。
+     * 値: [decoration_item_id("" なら無し), badge_image_file_path]
+     */
+    private final Map<Long, String[]> adornCache = java.util.Collections.synchronizedMap(new HashMap<Long, String[]>());
+
+    /** /api/v2/users のユーザー1件からデコレーション画像・装飾アイテム・バッジを覚える(無ければ消す)。 */
     private void rememberDecoration(long uid, JSONObject user) {
         if (uid == 0 || user == null) return;
         decoChecked.add(Long.valueOf(uid));
         String path = truthy(user.opt("timeline_image_enabled")) ? user.optString("timeline_image_file_path", "") : "";
         if (path.length() > 0 && !"null".equals(path)) decoCache.put(Long.valueOf(uid), path);
         else decoCache.remove(Long.valueOf(uid));
+        rememberAdornments(uid, user);
+    }
+
+    private boolean adornKeysLogged = false;
+    private void rememberAdornments(long uid, JSONObject user) {
+        if (uid == 0 || user == null) return;
+        // 初回だけ、ユーザー情報のキー一覧を診断ログに残す(decoration_item_id / badge_image_file_path が来ているかの確認用)
+        if (!adornKeysLogged) {
+            adornKeysLogged = true;
+            try { dbgLog(nowStr() + "  [ADORN] user keys=" + topKeys(user)); } catch (Exception ignore) {}
+        }
+        String item = "";
+        if (user.has("decoration_item_id") && !user.isNull("decoration_item_id")) {
+            long v = user.optLong("decoration_item_id", 0);
+            if (v > 0) item = String.valueOf(v);
+        }
+        String badge = user.optString("badge_image_file_path", "");
+        if ("null".equals(badge)) badge = "";
+        if (item.length() == 0 && badge.length() == 0) adornCache.remove(Long.valueOf(uid));
+        else adornCache.put(Long.valueOf(uid), new String[]{item, badge});
+    }
+
+    /** 公式 GameData.tippingAssetServerName = client_system_params.tipping.item_thumbnail_server_name。ギフト画像はここに置かれる。 */
+    private String tippingAssetUrl(String path) {
+        if (path == null || path.length() == 0 || "null".equals(path)) return "";
+        if (path.startsWith("http")) return path;
+        try {
+            ensureSkywayHost();
+            JSONObject csp = this.clientDefines != null ? this.clientDefines.optJSONObject("client_system_params") : null;
+            JSONObject tip = csp != null ? csp.optJSONObject("tipping") : null;
+            String base = tip != null ? tip.optString("item_thumbnail_server_name", "") : "";
+            if (base.length() > 0) return base + (base.endsWith("/") || path.startsWith("/") ? "" : "/") + path;
+        } catch (Exception ignore) {
+        }
+        return iconUrl(path);
+    }
+
+    /**
+     * 相手のプロフィールに出す「もらったギフト」(公式 TargetPageActivity.getRecentGift → GET api/receive_tippings?target_id=)。
+     * 応答 {"tippings":[{id,item_id,item_name,item_image_file_path,is_open,sender_info:{id,name}}]}。非公開なら空。
+     */
+    private String getRecentGifts(String targetId) {
+        try {
+            if (targetId == null || targetId.length() == 0) return jsonErr("target_id不明");
+            Resp r = httpApi2("GET", "/api/receive_tippings", q1("target_id", targetId), (Map<String, String>) null);
+            if (r.status != 200 || r.body == null) return new JSONObject().put("ok", false).put("status", r.status).toString();
+            JSONArray arr = firstArray(r.body, "tippings", "receive_tippings");
+            if (arr == null && r.body.optJSONObject("data") != null) arr = firstArray(r.body.optJSONObject("data"), "tippings", "receive_tippings", "data");
+            if (arr == null && r.body.optJSONArray("data") != null) arr = r.body.optJSONArray("data");
+            dbgLog(nowStr() + "  [GIFTS] target=" + targetId + " keys=" + topKeys(r.body) + " count=" + (arr == null ? -1 : arr.length()) + (arr == null ? " body=" + truncate(redactLog(r.body.toString()), 300) : (arr.length() > 0 ? " first=" + truncate(redactLog(arr.optJSONObject(0) != null ? arr.optJSONObject(0).toString() : ""), 300) : "")));
+            JSONArray out = new JSONArray();
+            if (arr != null) {
+                for (int i = 0; i < arr.length() && i < 50; i++) {
+                    JSONObject t = arr.optJSONObject(i);
+                    if (t == null) continue;
+                    JSONObject sender = t.optJSONObject("sender_info");
+                    out.put(new JSONObject()
+                            .put("id", t.opt("id"))
+                            .put("item_id", t.optInt("item_id", 0))
+                            .put("name", t.optString("item_name", ""))
+                            .put("image_url", tippingAssetUrl(t.optString("item_image_file_path", "")))
+                            .put("is_open", t.optBoolean("is_open", true))
+                            .put("sender_id", sender != null ? sender.optLong("id", sender.optLong("user_id", 0)) : 0)
+                            .put("sender_name", sender != null ? sender.optString("name", "") : "")
+                            .put("created_at", t.optString("created_at", "")));
+                }
+            }
+            return new JSONObject().put("ok", true).put("gifts", out).toString();
+        } catch (Exception e) {
+            return errJson(e);
+        }
+    }
+
+    /**
+     * 装飾アイテム画像の置き場所。png サーバー(cloudfront /images/)には無く(403)、
+     * 公式のアセット用 S3(assets.meetscom.com)の直下 decoration/ にある(端末での実測: 200 image/png)。
+     * client_defines に item_thumbnail_server_name があればそれを使い、無ければ実測した S3 の URL を使う。
+     */
+    private static final String ASSET_S3_BASE = "https://s3-ap-northeast-1.amazonaws.com/assets.meetscom.com/";
+    private String decoAssetUrl(String path) {
+        if (path == null || path.length() == 0 || "null".equals(path)) return "";
+        if (path.startsWith("http")) return path;
+        String base = "";
+        try {
+            ensureSkywayHost();
+            JSONObject csp = this.clientDefines != null ? this.clientDefines.optJSONObject("client_system_params") : null;
+            for (String k : new String[]{"iap", "tipping"}) {
+                JSONObject o = csp != null ? csp.optJSONObject(k) : null;
+                String b = o != null ? o.optString("item_thumbnail_server_name", "") : "";
+                if (b.indexOf("assets.meetscom.com") >= 0) { base = b; break; }
+            }
+        } catch (Exception ignore) {
+        }
+        if (base.length() == 0) base = ASSET_S3_BASE;
+        return base + (base.endsWith("/") || path.startsWith("/") ? "" : "/") + path;
+    }
+
+    /** 診断: 読めなかった装飾画像について、置き場所・拡張子の候補を HEAD で当ててステータスをログに残す。 */
+    private String decoProbe(String u0) {
+        if (u0 == null || !u0.startsWith("http")) return jsonErr("url不明");
+        String[] cands = new String[]{
+                u0,
+                u0.replace(".png", ".webp"),
+                u0.replace("/images/decoration/", "/decoration/"),
+                u0.replace("/images/decoration/", "/images/"),
+                u0.replace("/images/decoration/", "/decoration/").replace(".png", ".webp"),
+                u0.replace("d34we8vh702akg.cloudfront.net/images/", "s3-ap-northeast-1.amazonaws.com/assets.meetscom.com/")};
+        for (String cand : cands) {
+            HttpURLConnection c = null;
+            try {
+                c = (HttpURLConnection) new URL(cand).openConnection();
+                c.setRequestMethod("GET");
+                c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36");
+                c.setConnectTimeout(6000);
+                c.setReadTimeout(6000);
+                int st = c.getResponseCode();
+                dbgLog(nowStr() + "  [DECO] probe " + st + " " + c.getContentType() + " len=" + c.getContentLength() + " " + cand);
+            } catch (Exception pe) {
+                dbgLog(nowStr() + "  [DECO] probe ERR " + pe.getMessage() + " " + cand);
+            } finally {
+                if (c != null) try { c.disconnect(); } catch (Exception ig) {}
+            }
+        }
+        return "{\"ok\":true}";
+    }
+
+    /** 公式 ProfileAssetPaths.badgePath: バッジ画像は png サーバーの badge/ 配下。 */
+    private String badgeUrl(String raw) {
+        if (raw == null || raw.length() == 0) return "";
+        if (raw.startsWith("http")) return raw;
+        return iconUrl(raw.startsWith("badge/") ? raw : "badge/" + raw);
+    }
+
+    /** 表示用オブジェクトに装飾(deco_item / badge_url)を添える。覚えていなければ何も付けない。 */
+    private void putAdornments(JSONObject out, long uid) {
+        try {
+            String[] a = adornCache.get(Long.valueOf(uid));
+            if (a == null) return;
+            if (a[0].length() > 0) out.put("deco_item", Long.parseLong(a[0]));
+            if (a[1].length() > 0) out.put("badge_url", badgeUrl(a[1]));
+        } catch (Exception ignore) {
+        }
+    }
+
+    /**
+     * 公式 DecorationMaster 相当: /api/decoration_items(on_sale=false で販売終了分も含む全アイテム)を取り、
+     * id → 画像URL の対応表を返す。6 時間は端末に保存したものを使う。
+     */
+    private String getDecorationItems(boolean force) {
+        try {
+            long at = this.prefs.getLong("deco_items4_at", 0);
+            String cached = this.prefs.getString("deco_items4", "");
+            if (!force && cached.length() > 0 && System.currentTimeMillis() - at < 6L * 3600 * 1000) {
+                JSONArray ca = new JSONArray(cached);
+                dbgLog(nowStr() + "  [DECO] decoration_items from cache: " + ca.length() + " items");
+                return new JSONObject().put("ok", true).put("items", ca).put("cached", true).toString();
+            }
+            Resp r = request("GET", "/api/decoration_items", q1("on_sale", "false"), (Map<String, String>) null);
+            dbgLog(nowStr() + "  [DECO] decoration_items HTTP " + r.status + (r.body != null ? " keys=" + topKeys(r.body) + " body=" + truncate(redactLog(r.body.toString()), 400) : ""));
+            if (r.status != 200 || r.body == null) {
+                if (cached.length() > 0) return new JSONObject().put("ok", true).put("items", new JSONArray(cached)).put("cached", true).toString();
+                return new JSONObject().put("ok", false).put("status", r.status).toString();
+            }
+            JSONObject d = r.body.optJSONObject("data");
+            JSONArray packs = d != null ? d.optJSONArray("item_packs") : r.body.optJSONArray("item_packs");
+            if (packs == null && d != null) packs = d.optJSONArray("decoration_items");
+            JSONArray out = new JSONArray();
+            if (packs != null) {
+                for (int i = 0; i < packs.length(); i++) {
+                    JSONObject p = packs.optJSONObject(i);
+                    if (p == null) continue;
+                    long id = p.optLong("id", 0);
+                    String img = p.optString("image_file_path", "");
+                    if (id <= 0 || img.length() == 0) continue;
+                    // 装飾ストア画面(loadDecorationItems)も同じ一覧を使うので、価格などもそのまま添える
+                    String url = decoAssetUrl(img);
+                    out.put(new JSONObject().put("id", id).put("image_url", url).put("icon_url", url).put("name", p.optString("name", ""))
+                            .put("price", p.opt("price")).put("is_new", p.optBoolean("is_new", false)).put("on_sale", p.opt("on_sale")).put("description", p.optString("description", "")));
+                }
+            }
+            dbgLog(nowStr() + "  [DECO] parsed " + out.length() + " items" + (out.length() > 0 ? " first=" + truncate(out.optJSONObject(0).toString(), 200) : ""));
+            // 診断: 画像が実際に取れるか(拡張子違い・別ディレクトリの可能性を切り分ける)
+            try {
+                JSONObject f0 = out.optJSONObject(0);
+                String u0 = f0 != null ? f0.optString("image_url", "") : "";
+                if (u0.length() > 0) {
+                    for (String cand : new String[]{u0, u0.replace(".webp", ".png"), u0.replace("/images/decoration/", "/decoration/"), u0.replace("/images/decoration/", "/images/")}) {
+                        if (cand.equals(u0) && cand != u0) continue;
+                        HttpURLConnection c = null;
+                        try {
+                            c = (HttpURLConnection) new URL(cand).openConnection();
+                            c.setRequestMethod("HEAD");
+                            c.setConnectTimeout(6000);
+                            c.setReadTimeout(6000);
+                            int st = c.getResponseCode();
+                            dbgLog(nowStr() + "  [DECO] probe " + st + " " + c.getContentType() + " " + cand);
+                        } catch (Exception pe) {
+                            dbgLog(nowStr() + "  [DECO] probe ERR " + pe.getMessage() + " " + cand);
+                        } finally {
+                            if (c != null) try { c.disconnect(); } catch (Exception ig) {}
+                        }
+                    }
+                }
+            } catch (Exception ignore) {
+            }
+            if (out.length() > 0) {
+                this.prefs.edit().putString("deco_items4", out.toString()).putLong("deco_items4_at", System.currentTimeMillis()).apply();
+            }
+            return new JSONObject().put("ok", true).put("items", out).toString();
+        } catch (Exception e) {
+            return errJson(e);
+        }
     }
 
     private final Map<Long, String[]> nameCache = java.util.Collections.synchronizedMap(new java.util.LinkedHashMap<Long, String[]>(256, 0.75f, true) {
@@ -618,6 +837,11 @@ public class KoeSession {
             jSONObject2.put("comment", jSONObject != null ? jSONObject.optString("comment", "") : "");
             jSONObject2.put("icon_url", iconUrl(str2));
             jSONObject2.put("deco_url", decoPath.length() > 0 ? iconUrl(decoPath) : ""); // 投稿デコレーション(公開背景)
+            if (jSONObject != null) {
+                rememberAdornments(j, jSONObject);
+                putAdornments(jSONObject2, j);
+                try { dbgLog(nowStr() + "  [ADORN] profile uid=" + j + " decoration_item_id=" + jSONObject.opt("decoration_item_id") + " badge=" + jSONObject.opt("badge_image_file_path")); } catch (Exception ignore) {}
+            }
             String[] strArr = {"header_image_file_path", "headerImageFilePath", "header_image", "headerImage", "header_image_url", "headerImageUrl", "header_url", "cover_image", "cover_image_file_path", "coverImageFilePath", "header"};
             String str4 = "";
             JSONObject[] jSONObjectArr = {jSONObject, request2.body != null ? request2.body.optJSONObject("data") : null, request2.body};
@@ -1757,23 +1981,43 @@ public class KoeSession {
         return out;
     }
 
+    /** 枠の speakers/listeners(公式は user_id の配列。オブジェクト配列で来ても user_id/userId を拾う) → 数値配列 */
+    private static JSONArray idArray(JSONArray src) {
+        JSONArray out = new JSONArray();
+        if (src == null) return out;
+        for (int i = 0; i < src.length(); i++) {
+            JSONObject o = src.optJSONObject(i);
+            long v = o != null ? o.optLong("user_id", o.optLong("userId", 0)) : src.optLong(i, 0);
+            if (v != 0) out.put(v);
+        }
+        return out;
+    }
+
     /**
      * 自分がフォローしている全ユーザーIDを返す(最後のページまで捲る／内部キャッシュあり)。
      * 枠一覧の「フォロー中」絞り込みが 1 ページ目(20人)しか見ておらず、
      * 21人目以降をフォローしている人の枠が出てこなかったため追加。
+     * フォロワー(followers)と友達=相互(friends)の ID も返す(「知り合いがいる枠」の絞り込み用)。
      */
     private String getFolloweeIds() {
         try {
             ensureRelationSets();
-            java.util.Set<Long> set;
-            synchronized (this) { set = myFolloweeIds; }
-            JSONArray arr = new JSONArray();
+            java.util.Set<Long> set, fr;
+            synchronized (this) { set = myFolloweeIds; fr = myFollowerIds; }
+            JSONArray arr = new JSONArray(), followers = new JSONArray(), friends = new JSONArray();
             if (set != null) {
                 for (Long v : set) {
                     if (v != null && v.longValue() != 0) arr.put(v.longValue());
                 }
             }
-            return new JSONObject().put("ok", true).put("ids", arr).put("count", arr.length()).toString();
+            if (fr != null) {
+                for (Long v : fr) {
+                    if (v == null || v.longValue() == 0) continue;
+                    followers.put(v.longValue());
+                    if (set != null && set.contains(v)) friends.put(v.longValue());
+                }
+            }
+            return new JSONObject().put("ok", true).put("ids", arr).put("count", arr.length()).put("followers", followers).put("friends", friends).toString();
         } catch (Exception e) {
             return errJson(e);
         }
@@ -2672,8 +2916,12 @@ public class KoeSession {
     private String getCommunityMembers(String str) { return getCommunityMembers(str, null); }
 
     // cursor(= 前ページ最後の joined_at)を渡すと続きを取得できる（公式 max_joined_at）
-    private String getCommunityMembers(String str, String cursor) {
-        Resp request = request("GET", "/api/communities/" + str + "/members", cQ("count", "20", "max_joined_at", cursor), (Map<String, String>) null);
+    private String getCommunityMembers(String str, String cursor) { return getCommunityMembers(str, cursor, null); }
+
+    private String getCommunityMembers(String str, String cursor, String keyword) {
+        HashMap<String, String> q = cQ("count", "20", "max_joined_at", cursor);
+        if (keyword != null && keyword.trim().length() > 0) q.put("keyword", keyword.trim()); // 公式 getCommunityMemberList の絞り込み
+        Resp request = request("GET", "/api/communities/" + str + "/members", q, (Map<String, String>) null);
         try {
             if (request.status != 200 || request.body == null) {
                 return jsonStatus(request);
@@ -3167,7 +3415,7 @@ public class KoeSession {
                     jSONObject.put("id", optJSONObject2.optInt("item_id", optJSONObject2.optInt("id", 0)));
                     jSONObject.put("name", firstNonEmpty(optJSONObject2.optString("name", ""), optJSONObject2.optString("item_name", "")));
                     jSONObject.put("coin", optJSONObject2.optInt("coin_amount", optJSONObject2.optInt("coin", optJSONObject2.optInt("point", 0))));
-                    jSONObject.put("icon_url", iconUrl(firstNonEmpty(optJSONObject2.optString("image_file_path", ""), optJSONObject2.optString("thumbnail_file_path", ""), optJSONObject2.optString("icon_file_path", ""), optJSONObject2.optString("file_path", ""))));
+                    jSONObject.put("icon_url", tippingAssetUrl(firstNonEmpty(optJSONObject2.optString("image_file_path", ""), optJSONObject2.optString("thumbnail_file_path", ""), optJSONObject2.optString("icon_file_path", ""), optJSONObject2.optString("file_path", "")))); // 公式 downloadAsset(type "tipping") と同じサーバー
                     jSONArray2.put(jSONObject);
                 }
             }
@@ -5123,6 +5371,7 @@ public class KoeSession {
                     p.put("is_owner", o.optBoolean("isOwner", o.optBoolean("is_owner", false)));
                     p.put("is_mute", o.optBoolean("isMute", o.optBoolean("is_mute", false)));
                     p.put("role", o.optString("role", isSpeakerArray ? "speaker" : "listener"));
+                    putAdornments(p, uid);
                     participants.put(p);
                 }
             }
@@ -5326,7 +5575,14 @@ public class KoeSession {
                     int length = optJSONArray2 == null ? 0 : optJSONArray2.length();
                     int length2 = optJSONArray3 == null ? 0 : optJSONArray3.length();
                     String[] strArr = this.nameCache.get(Long.valueOf(optLong));
-                    jSONArray4.put(new JSONObject().put("owner_user_id", optLong).put("owner_name", strArr != null ? strArr[0] : "user " + optLong).put("owner_icon", strArr != null ? iconUrl(strArr[1]) : "").put("title", optJSONObject2.optString("description", "user " + optLong + " のルーム")).put("speaker_count", length).put("listener_count", length2).put("member_count", length2 + length).put("created_at", optJSONObject2.optString("created_at", optJSONObject2.optString("started_at", optJSONObject2.optString("created_time", "")))));
+                    // 公式 TalkRoom: id / owner / speakers[int] / listeners[int] / speaker_applicants / opened_at / close_at
+                    JSONObject ro = new JSONObject().put("owner_user_id", optLong).put("owner_name", strArr != null ? strArr[0] : "user " + optLong).put("owner_icon", strArr != null ? iconUrl(strArr[1]) : "").put("title", optJSONObject2.optString("description", "user " + optLong + " のルーム")).put("speaker_count", length).put("listener_count", length2).put("member_count", length2 + length).put("created_at", firstStr(optJSONObject2, "opened_at", "created_at", "started_at", "created_time"));
+                    ro.put("room_id", optJSONObject2.optLong("id", 0));
+                    ro.put("speaker_ids", idArray(optJSONArray2));
+                    ro.put("listener_ids", idArray(optJSONArray3));
+                    ro.put("comment_enabled", optJSONObject2.optBoolean("comment_enabled", true));
+                    putAdornments(ro, optLong);
+                    jSONArray4.put(ro);
                 }
             }
             return new JSONObject().put("ok", true).put("rooms", jSONArray4).toString();
@@ -5628,7 +5884,9 @@ public class KoeSession {
             long arrUid = arrUid(jSONArray, i);
             if (arrUid != 0) {
                 String[] strArr = this.nameCache.get(Long.valueOf(arrUid));
-                jSONArray2.put(new JSONObject().put("user_id", arrUid).put("name", strArr != null ? strArr[0] : "user " + arrUid).put("icon_url", strArr != null ? iconUrl(strArr[1]) : ""));
+                JSONObject u = new JSONObject().put("user_id", arrUid).put("name", strArr != null ? strArr[0] : "user " + arrUid).put("icon_url", strArr != null ? iconUrl(strArr[1]) : "");
+                putAdornments(u, arrUid);
+                jSONArray2.put(u);
             }
         }
         return jSONArray2;
@@ -5734,6 +5992,7 @@ public class KoeSession {
                 jSONObject.put("is_explicit", optExplicitFlag(optJSONObject));
                 String deco = decoCache.get(Long.valueOf(optLong));
                 if (deco != null) jSONObject.put("deco_url", iconUrl(deco));
+                putAdornments(jSONObject, optLong);
                 // 通話募集(Feed)投稿を区別するためのフィールドを保持
                 boolean hasPurpose = optJSONObject.has("purpose") && !optJSONObject.isNull("purpose");
                 if (hasPurpose) jSONObject.put("purpose", optJSONObject.opt("purpose"));
@@ -6193,6 +6452,7 @@ public class KoeSession {
             if (jSONArray == null) {
                 jSONArray = new JSONArray();
             }
+            absorbUserInfo(resp.body); // 同梱の user_info から名前・アイコン・装飾を覚える(別途の名前解決を減らす)
             JSONArray normalizePosts = normalizePosts(jSONArray);
             // 公式(FeedListResponse/TimelinePostsResponse)はブックマーク状態を投稿ごとの bookmarked ではなく
             // 応答トップレベル(or data配下)の bookmark_ids / feed_bookmark_ids / timeline_bookmark_ids で返す。
@@ -6426,6 +6686,8 @@ public class KoeSession {
     }
 
     private boolean roomStateLogged = false;
+    /** コミュニティ内からの通報で公式が付ける紐づけ(直前に set_report_context で指定。使い終わったら消す)。 */
+    private String reportCommunityId = null, reportCommunityRoomId = null;
 
     private String replyTimelinePost(String str, String str2) {
         HashMap hashMap = new HashMap();
@@ -6459,6 +6721,9 @@ public class KoeSession {
         // 公式 ReportScreen: -1=不明 0=Feed 1=Timeline 2=声とも 3=フォロー 7=相手プロフィール …
         // 公式は必ず referer_id を送る。当方はプロフィールからの通報なので 7(PeopleProfile)。
         q.put("referer_id", "7");
+        // 公式 RelationApi.report はコミュニティ内からの通報時に紐づけを送る(通常のプロフィール通報では送らない)
+        if (this.reportCommunityId != null && this.reportCommunityId.length() > 0) q.put("community_id", this.reportCommunityId);
+        if (this.reportCommunityRoomId != null && this.reportCommunityRoomId.length() > 0) q.put("community_talk_room_id", this.reportCommunityRoomId);
         q.put("version", "android_" + APP_VERSION);
         String atR = authToken();
         if (atR != null) q.put("auth_token", atR);
@@ -6580,6 +6845,7 @@ public class KoeSession {
             String icon = u.optString("profile_picture_file_path", "");
             if (icon.length() == 0 && prev != null && prev.length > 1) icon = prev[1];
             this.nameCache.put(Long.valueOf(uid), new String[]{nm, icon});
+            rememberDecoration(uid, u); // 投稿一覧の user_info にも装飾(decoration_item_id / badge)が入っている
             changed = true;
         }
         if (changed) saveNameCache();
@@ -6751,7 +7017,10 @@ public class KoeSession {
                         for (int i = 0; i < optJSONArray.length(); i++) {
                             JSONObject optJSONObject = optJSONArray.optJSONObject(i);
                             if (optJSONObject != null) {
-                                jSONArray.put(new JSONObject().put("user_id", optJSONObject.optLong("user_id")).put("name", optJSONObject.optString("name", "")).put("icon_url", iconUrl(optJSONObject.optString("profile_picture_file_path", ""))));
+                                JSONObject ru = new JSONObject().put("user_id", optJSONObject.optLong("user_id")).put("name", optJSONObject.optString("name", "")).put("icon_url", iconUrl(optJSONObject.optString("profile_picture_file_path", "")));
+                                rememberAdornments(optJSONObject.optLong("user_id"), optJSONObject);
+                                putAdornments(ru, optJSONObject.optLong("user_id"));
+                                jSONArray.put(ru);
                             }
                         }
                     }
@@ -6996,7 +7265,8 @@ public class KoeSession {
         if (communityId == null || communityId.length() == 0) {
             return jsonErr("community_id不明");
         }
-        Resp resp = request("GET", "/api/communities/" + communityId + "/talk_rooms", (Map<String, String>) null, (Map<String, String>) null);
+        // 公式 getTalkRoomList は page / order を送る(order 1=最新オープン)
+        Resp resp = request("GET", "/api/communities/" + communityId + "/talk_rooms", q2("page", "1", "order", "1"), (Map<String, String>) null);
         try {
             if (resp.status != 200 || resp.body == null) {
                 return jsonStatus(resp);
@@ -7298,16 +7568,22 @@ public class KoeSession {
     }
 
     private String searchCommunities(String str, String str2) {
-        HashMap hashMap = new HashMap();
-        hashMap.put("page", "1");
-        hashMap.put("count", "20");
-        if (str != null && str.length() > 0) {
-            hashMap.put("keyword", str);
-        }
-        if (str2 != null && str2.length() > 0 && !str2.equals("0") && !str2.equals("all")) {
-            hashMap.put("category_id", str2);
-        }
-        return communitiesResult(request("GET", "/api/communities/search", hashMap, (Map<String, String>) null));
+        return searchCommunities(str, str2, "", "", "1");
+    }
+
+    /**
+     * コミュニティ検索。公式 CommunityApi.search のクエリを全部送る:
+     *   count / keyword / category_id / page / order_condition(並び)
+     * (max_last_posted_at・max_created_at はカーソル用。page 指定と同時には使わない)
+     */
+    private String searchCommunities(String keyword, String categoryId, String participatingOnly, String orderCondition, String page) {
+        HashMap<String, String> q = new HashMap<String, String>();
+        q.put("page", (page == null || page.length() == 0) ? "1" : page);
+        q.put("count", "20");
+        if (keyword != null && keyword.length() > 0) q.put("keyword", keyword);
+        if (categoryId != null && categoryId.length() > 0 && !categoryId.equals("0") && !categoryId.equals("all")) q.put("category_id", categoryId);
+        if (orderCondition != null && orderCondition.length() > 0) q.put("order_condition", orderCondition);
+        return communitiesResult(request("GET", "/api/communities/search", q, (Map<String, String>) null));
     }
 
     private String searchUsers(String str, String str2) {
@@ -8934,6 +9210,28 @@ public class KoeSession {
         }
     }
 
+    /**
+     * 自分のミュート状態を公式アプリと同じ場所に書く(公式 TalkRoomViewModel.setMute 相当)。
+     *   api/rooms/{id}/mute_status/{自分} = 1/0 … 公式クライアントはこれでミュートアイコンを出す
+     *   ミュート時のみ room_data に Volume コマンド(2) {user_id, volume:0} … 公式のマイクレベル表示を消す
+     * 音声そのものの停止は SkyWay 側(publication.disable)で行い、ここは表示用の合図だけ。
+     */
+    private String roomMuteStatus(String roomId, boolean muted) {
+        if (roomId == null || roomId.length() == 0) return jsonErr("room_id不明");
+        long me = userId();
+        if (me <= 0) return jsonErr("user_id不明");
+        String r = rtdbPut("api/rooms/" + roomId + "/mute_status/" + me + ".json", muted ? "1" : "0");
+        if (muted) {
+            try {
+                JSONObject body = new JSONObject().put("command", 2)
+                        .put("args", new JSONObject().put("user_id", me).put("volume", 0));
+                rtdbPut("api/rooms/" + roomId + "/room_data.json", body.toString());
+            } catch (Exception ignore) {
+            }
+        }
+        return r;
+    }
+
     /** ISO / "yyyy-MM-dd HH:mm:ss" の時刻から経過秒。読めなければ -1。 */
     private static long ageSecOf(String s) {
         long t = botParseTime(s);
@@ -9307,11 +9605,12 @@ public class KoeSession {
             return new JSONObject().put("ok", true).put("post", data != null ? data : resp.body).toString();
         } catch (Exception e) { return errJson(e); }
     }
+    /** メンバーをBAN(公式 CommunityApi.banMembers: DELETE .../members/ban?target_ids[]=<id>)。 */
     private String banCommunityMember(String communityId, String userId) {
-        HashMap<String, String> f = new HashMap<String, String>();
-        f.put("user_id", userId == null ? "" : userId);
-        f.put("target_id", userId == null ? "" : userId);
-        return okResult(httpApi2("POST", "/api/communities/" + communityId + "/members/ban", (Map<String, String>) null, f));
+        if (communityId == null || communityId.length() == 0) return jsonErr("community_id不明");
+        if (userId == null || userId.length() == 0) return jsonErr("user_id不明");
+        return okResult(request("DELETE", "/api/communities/" + communityId + "/members/ban",
+                q1("target_ids[]", userId), (Map<String, String>) null));
     }
 
     private String setDisplayBadge(String userId, String badgeId) {
@@ -9377,8 +9676,11 @@ public class KoeSession {
         return okResult(httpJsonApi2("PUT", "/api/communities/" + communityId + "/talk_rooms/" + roomId + "/switch_comment_enabled", body));
     }
     // キャンペーン進捗
-    private String campaignChallengeProgress(String campaignId, String challengeId) {
-        return okResult(httpJson("POST", BASE_URL + "/api/user_campaigns/" + campaignId + "/challenges/" + challengeId + "/progress", new JSONObject()));
+    private String campaignChallengeProgress(String campaignId, String challengeId, String progress) {
+        // 公式 CampaignApi.updateChallengeProgress は @Body {"progress":Int}
+        JSONObject body = new JSONObject();
+        try { body.put("progress", parseIntSafe(progress, 1)); } catch (Exception ig) {}
+        return okResult(httpJson("POST", BASE_URL + "/api/user_campaigns/" + campaignId + "/challenges/" + challengeId + "/progress", body));
     }
     // 以下は旧API/用途不明のため best-effort（クエリ認証）。ダメなら診断ログで詰める。
     private String getDiveTargetFriends() {
@@ -9864,8 +10166,11 @@ public class KoeSession {
         }
     }
 
-    private String getSubscriptions() {
-        Resp resp = request("GET", "/api/subscriptions", (Map<String, String>) null, (Map<String, String>) null);
+    private String getSubscriptions() { return getSubscriptions(null); }
+
+    /** 公式 getSubscriptionInfo は購入トークンで1件を問い合わせられる。 */
+    private String getSubscriptions(String purchaseToken) {
+        Resp resp = request("GET", "/api/subscriptions", (purchaseToken == null || purchaseToken.length() == 0) ? null : q1("purchase_token", purchaseToken), (Map<String, String>) null);
         try {
             if (resp.status != 200 || resp.body == null) {
                 return jsonStatus(resp);
@@ -10050,6 +10355,11 @@ public class KoeSession {
             http = http(z ? "DELETE" : "POST", BASE_URL + str2, (Map<String, String>) null, hashMap);
         }
         return okResult(http);
+    }
+
+    /** 数値文字列を安全に int にする(空や不正値は既定値)。 */
+    private static int parseIntSafe(String s, int def) {
+        try { return Integer.parseInt(String.valueOf(s).trim()); } catch (Exception e) { return def; }
     }
 
     private static String truncate(String str, int i) {
@@ -10762,7 +11072,8 @@ public class KoeSession {
     }
 
     // 自動申請の暴走防止(端末内・ネイティブ側で管理)。
-    //  ・同一 user_id は生涯1回まで  ・30秒間隔  ・1時間3件 / 1日10件  ・起動から10秒は動かさない
+    //  ・同一 user_id は生涯1回まで  ・8秒間隔  ・1時間30件 / 1日150件  ・起動から10秒は動かさない
+    //  (作者指示「業者は発見次第自動で申請」。サーバー側にも流量制限と再検証があるので端末側は暴走防止だけ)
     private String botAutoGate(long uid) {
         try {
             if (System.currentTimeMillis() - BOT_APP_START_MS < 10000) return "起動直後は判定しません";
@@ -10775,9 +11086,9 @@ public class KoeSession {
                 long t = log.optLong(i, 0);
                 if (now - t < 86400000L) { inDay++; if (now - t < 3600000L) inHour++; if (t > last) last = t; }
             }
-            if (last > 0 && now - last < 30000) return "自動申請の間隔制限中";
-            if (inHour >= 3) return "自動申請は1時間3件までです";
-            if (inDay >= 10) return "自動申請は1日10件までです";
+            if (last > 0 && now - last < 8000) return "自動申請の間隔制限中";
+            if (inHour >= 30) return "自動申請は1時間30件までです";
+            if (inDay >= 150) return "自動申請は1日150件までです";
             return "";
         } catch (Exception e) { return ""; }
     }
@@ -11123,6 +11434,7 @@ public class KoeSession {
         }
     }
 
+
     public boolean consumeSessionExpired() {
         boolean z = this.sessionExpiredSeen;
         this.sessionExpiredSeen = false;
@@ -11405,6 +11717,18 @@ public class KoeSession {
                 if (str.equals("delete_all_posts")) {
                     return deleteAllPosts(jSONArray.optString(0, "feed"));
                 }
+                if (str.equals("deco_probe")) {
+                    return decoProbe(jSONArray.optString(0, ""));
+                }
+                if (str.equals("get_recent_gifts")) {
+                    return getRecentGifts(jSONArray.optString(0, ""));
+                }
+                if (str.equals("get_decoration_items")) {
+                    return getDecorationItems(jSONArray.optBoolean(0, false));
+                }
+                if (str.equals("room_mute_status")) {
+                    return roomMuteStatus(jSONArray.optString(0), "1".equals(jSONArray.optString(1)));
+                }
                 if (str.equals("room_data_send")) {
                     return roomDataSend(jSONArray.optString(0), jSONArray.optString(1), jSONArray.optString(2));
                 }
@@ -11502,7 +11826,7 @@ public class KoeSession {
                     return switchTalkRoomComment(jSONArray.optString(0), jSONArray.optString(1), jSONArray.optBoolean(2, true));
                 }
                 if (str.equals("campaign_challenge_progress")) {
-                    return campaignChallengeProgress(jSONArray.optString(0), jSONArray.optString(1));
+                    return campaignChallengeProgress(jSONArray.optString(0), jSONArray.optString(1), jSONArray.optString(2, "1"));
                 }
                 if (str.equals("get_dive_target_friends")) {
                     return getDiveTargetFriends();
@@ -11538,7 +11862,7 @@ public class KoeSession {
                     return getCommunityInfo(jSONArray.optString(0));
                 }
                 if (str.equals("get_community_members")) {
-                    return getCommunityMembers(jSONArray.optString(0), jSONArray.optString(1, ""));
+                    return getCommunityMembers(jSONArray.optString(0), jSONArray.optString(1, ""), jSONArray.optString(2, ""));
                 }
                 if (str.equals("get_community_posts")) {
                     return getCommunityPosts(jSONArray.optString(0));
@@ -11740,6 +12064,12 @@ public class KoeSession {
                 if (str.equals("get_owned_items")) {
                     return getOwnedItems();
                 }
+                if (str.equals("deco_probe")) {
+                    return decoProbe(jSONArray.optString(0, ""));
+                }
+                if (str.equals("get_recent_gifts")) {
+                    return getRecentGifts(jSONArray.optString(0, ""));
+                }
                 if (str.equals("get_decoration_items")) {
                     return getDecorationItems();
                 }
@@ -11750,7 +12080,7 @@ public class KoeSession {
                     return getVoiceProfiles();
                 }
                 if (str.equals("get_subscriptions")) {
-                    return getSubscriptions();
+                    return getSubscriptions(jSONArray.optString(0, ""));
                 }
                 if (str.equals("estimate_point_exchange")) {
                     return estimatePointExchange(jSONArray.optString(0));
@@ -12023,7 +12353,7 @@ public class KoeSession {
                     return getCommunityTalkRoomComments(jSONArray.optString(0), jSONArray.optString(1));
                 }
                 if (str.equals("search_communities")) {
-                    return searchCommunities(jSONArray.optString(0), jSONArray.optString(1));
+                    return searchCommunities(jSONArray.optString(0), jSONArray.optString(1), jSONArray.optString(2, ""), jSONArray.optString(3, ""), jSONArray.optString(4, "1"));
                 }
                 if (str.equals("send_message")) {
                     return sendMessage(jSONArray.optString(0), jSONArray.optString(1), jSONArray.optString(2));

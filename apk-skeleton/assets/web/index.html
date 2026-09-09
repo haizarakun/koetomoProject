@@ -243,10 +243,11 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 </div>
 <div class="room-controls">
 <input id="roomSearchInput" type="text" placeholder="ルーム名・主催者で検索">
-<select id="roomSortSelect">
+<select id="roomSortSelect" aria-label="並び替え">
 <option value="pop">人数が多い順</option>
 <option value="few">人数が少ない順</option>
-<option value="new">新しい順</option>
+<option value="new">開始が新しい順</option>
+<option value="old">開始が古い順（長く続いている）</option>
 </select>
 </div>
 <button id="refreshRoomsBtn" class="btn-secondary" style="margin-bottom:8px;">一覧を更新</button>
@@ -828,8 +829,10 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <summary><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M4 3l16 16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg> フィルター</summary>
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" id="spamMarkChk" checked> 業者っぽいアカウントに「⚠ 業者?」マークを表示</label>
 <p class="page-desc" style="margin-top:4px;">判定は量産型アイコン名・「単語＋3桁数字」の名前・フォロー0などの特徴からの推定です。マークをタップすると理由が出て、業者垢だと確認できたら「BANリストに申請する」で共有BANリストに申請できます（承認制）。</p>
-<label class="check-row" style="margin-top:8px;"><input type="checkbox" id="botAutoChk" checked> 明らかな業者アカウントを見つけたら自動でBANリストに申請</label>
-<p class="page-desc" style="margin-top:4px;white-space:normal;">必須条件（16文字ランダムのアイコン名・フォロー/フォロワー/友達/いいねが全て0・自己紹介なし・年齢確認なし）を<b>すべて</b>満たし、さらに「単語＋3桁数字」の名前・既知botとID連番・直近1時間に5件以上投稿などの加点が一定を超えたときだけ申請します。判定と証拠はアプリがAPIから取り直して作るので偽造できません。<b>自動で申請するだけで、ブロックはしません</b>（ブロックは管理者が承認してから）。申請は30秒あけて1時間3件・1日10件まで、同じ相手は1回だけです。</p>
+<label class="check-row" style="margin-top:8px;"><input type="checkbox" id="spamHideChk" checked> 業者と判定したアカウントの投稿・枠を表示しない</label>
+<p class="page-desc" style="margin-top:4px;white-space:normal;">共有BANリストに載っている相手と、判定「高」の相手の投稿・主催する枠を一覧から消します（プロフィールは ID から開けます）。</p>
+<label class="check-row" style="margin-top:8px;"><input type="checkbox" id="botAutoChk" checked> 業者アカウントを見つけたら自動でBANリストに申請</label>
+<p class="page-desc" style="margin-top:4px;white-space:normal;">量産型アイコン名・交流0・自己紹介なし・年齢確認なしといった特徴が重なり、さらに「単語＋3桁数字」の名前・既知botとのID連番・同一端末などの補強がある相手を、見つけ次第自動で申請します。判定と証拠はアプリが公式APIから取り直して作り、サーバー側でも同じ規則で再検証するので、申請内容の偽造はできません。<b>自動で申請するだけで、ブロックはしません</b>（ブロックは管理者が承認してから）。同じ相手は1回だけ、暴走防止のため 8秒間隔・1時間30件・1日150件までです。</p>
 <label class="field-label" style="margin-top:8px;">NGワード(1行に1つ。含む投稿を非表示)</label>
 <textarea id="ngWordsInput" rows="4" placeholder="例:&#10;宣伝&#10;スパム" style="width:100%;resize:vertical;"></textarea>
 <label class="field-label" style="margin-top:10px;">ミュート中のユーザー</label>
@@ -1106,6 +1109,8 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <img id="profileViewBadge" class="badge-icon" style="display:none;">
 </div>
 <p id="profileViewComment" class="profile-view-comment"></p>
+<div id="profileViewRoom" class="koe-pv-room" style="display:none;"></div>
+<div id="profileViewGifts" class="koe-pv-gifts" style="display:none;"></div>
 <div id="profileViewDetails" class="profile-view-details"></div>
 <div id="profileViewBadges" class="badge-row"></div>
 <div class="field-label" id="profileViewPostsLabel" style="margin-top:12px;display:none;">投稿</div>
