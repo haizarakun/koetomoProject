@@ -763,6 +763,32 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" id="bgNotifyChk"> アプリを閉じている間もAndroidの通知で知らせる</label>
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" id="autoDelRegChk"> 自分の投稿が規制対象になったら自動で削除して通知する</label>
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" id="voiceContinuousChk"> 音声投稿を連続再生する</label>
+<div class="settings-subhead"> 枠の防御（スパム・爆音）</div>
+<p class="card-sub" style="margin:4px 0 8px;">判定も対処もこの端末の中だけで行います。相手や他の参加者には何も送りません。</p>
+<label class="check-row"><input type="checkbox" id="guardSpamChk" data-guard="spamEnabled"> コメントの連投・同じ文の繰り返しを検知して、その人のコメントを非表示にする</label>
+<div style="display:flex;gap:8px;align-items:center;margin:6px 0 0 24px;">
+<span class="card-sub" style="flex:1;">10秒間に</span>
+<select id="guardSpamCountSel" data-guard="spamMaxPer10s" style="width:auto;"><option value="4">4件</option><option value="6">6件</option><option value="8">8件</option><option value="12">12件</option></select>
+<span class="card-sub">以上でスパム</span>
+</div>
+<div style="display:flex;gap:8px;align-items:center;margin:6px 0 0 24px;">
+<span class="card-sub" style="flex:1;">検知したら</span>
+<select id="guardSpamActionSel" data-guard="spamAction" style="width:auto;"><option value="none">非表示だけ</option><option value="listener">リスナーに戻す</option><option value="kick">キック</option></select>
+</div>
+<label class="check-row" style="margin-top:12px;"><input type="checkbox" id="guardLoudChk" data-guard="loudEnabled"> 爆音（大音量を出し続ける人）を検知して、その人の音量を自動で下げる</label>
+<label class="field-label" style="margin:6px 0 0 24px;">爆音の感度</label>
+<input id="guardLoudLevelRange" data-guard="loudLevel" type="range" min="1" max="10" step="1" value="5" style="width:calc(100% - 24px);margin-left:24px;">
+<div style="display:flex;gap:8px;align-items:center;margin:6px 0 0 24px;">
+<span class="card-sub" style="flex:1;">続いた秒数</span>
+<select id="guardLoudSecSel" data-guard="loudSeconds" style="width:auto;"><option value="1">1秒</option><option value="2">2秒</option><option value="4">4秒</option></select>
+<span class="card-sub">→ 音量を</span>
+<select id="guardLoudVolSel" data-guard="loudVolume" style="width:auto;"><option value="0">0%（無音）</option><option value="10">10%</option><option value="20">20%</option><option value="40">40%</option></select>
+</div>
+<div style="display:flex;gap:8px;align-items:center;margin:6px 0 0 24px;">
+<span class="card-sub" style="flex:1;">検知したら</span>
+<select id="guardLoudActionSel" data-guard="loudAction" style="width:auto;"><option value="none">音量を下げるだけ</option><option value="listener">リスナーに戻す</option><option value="kick">キック</option></select>
+</div>
+<p class="card-sub" style="margin:8px 0 0 24px;">キック／リスナーに戻すは自分の役割に関係なく要求します（権限が無いとサーバーが拒否し、その旨を通知します）。対処のたびに「戻す」付きの通知が出ます。枠を出ると判定はリセットされます。</p>
 <div class="settings-subhead"> 通話・発話</div>
 <label class="field-label" style="margin-top:10px;">発話ハイライトの感度</label>
 <input id="speakSensRange" type="range" min="2" max="10" step="1" value="4" style="width:100%;">
@@ -1285,6 +1311,7 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 </div>
 </div>
 <div class="callv2-topbtns">
+<button id="callGuardToggle" class="callv2-icon" title="枠の防御（スパム・爆音）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.6-3 8.4-7 10-4-1.6-7-5.4-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg><span id="callGuardBadge" class="callv2-badge" style="display:none;">0</span></button>
 <button id="callSettingsToggle" class="callv2-icon" title="設定"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1" stroke-linecap="round"/></svg></button>
 <button id="callMinimizeBtn" class="callv2-icon" title="最小化して枠に留まる"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
 <button id="callCloseBtn" class="callv2-icon" style="display:none;">✕</button>
@@ -1320,6 +1347,18 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <button id="callChatSendBtn" class="btn-secondary" style="width:auto;">送信</button>
 </div>
 <p class="callv2-note">コメントはリアルタイムで表示されます・Ctrl+Enterで送信</p>
+</div>
+<div id="callGuardPanel" class="callv2-panel" style="display:none;">
+<label class="field-label">枠の防御 — いま対処している人</label>
+<div id="callGuardList"></div>
+<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border,rgba(255,255,255,.08));">
+<label class="check-row"><input type="checkbox" data-guard="spamEnabled"> コメントの連投・繰り返しを検知</label>
+<div style="display:flex;gap:6px;align-items:center;margin:4px 0 0 24px;"><span class="callv2-note" style="flex:1;margin:0;">10秒に</span><select data-guard="spamMaxPer10s" style="width:auto;"><option value="4">4件</option><option value="6">6件</option><option value="8">8件</option><option value="12">12件</option></select><span class="callv2-note" style="margin:0;">→</span><select data-guard="spamAction" style="width:auto;"><option value="none">非表示だけ</option><option value="listener">リスナーに戻す</option><option value="kick">キック</option></select></div>
+<label class="check-row" style="margin-top:8px;"><input type="checkbox" data-guard="loudEnabled"> 爆音を検知</label>
+<div style="display:flex;gap:6px;align-items:center;margin:4px 0 0 24px;"><span class="callv2-note" style="flex:1;margin:0;">感度</span><input type="range" data-guard="loudLevel" min="1" max="10" step="1" style="flex:2;"></div>
+<div style="display:flex;gap:6px;align-items:center;margin:4px 0 0 24px;"><select data-guard="loudSeconds" style="width:auto;"><option value="1">1秒</option><option value="2">2秒</option><option value="4">4秒</option></select><span class="callv2-note" style="margin:0;">続いたら音量</span><select data-guard="loudVolume" style="width:auto;"><option value="0">0%</option><option value="10">10%</option><option value="20">20%</option><option value="40">40%</option></select><span class="callv2-note" style="margin:0;">→</span><select data-guard="loudAction" style="width:auto;"><option value="none">下げるだけ</option><option value="listener">リスナーに戻す</option><option value="kick">キック</option></select></div>
+<p class="callv2-note">判定・対処は自分の端末内だけ。キック／リスナー戻しは役割に関係なく要求し、権限が無ければサーバーの拒否を通知します。</p>
+</div>
 </div>
 <div id="callSettingsPanel" class="callv2-panel" style="display:none;">
 <label class="field-label">マイク(入力)</label>
@@ -1360,6 +1399,7 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <script src="android-bridge.js"></script>
 <script src="banlist-client.js"></script>
 <script src="sched.js"></script>
+<script src="roomguard.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

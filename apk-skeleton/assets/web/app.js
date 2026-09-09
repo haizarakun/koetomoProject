@@ -3974,6 +3974,7 @@ function __initUiExtras() {
       [
         ["callChatPanel", "callChatToggle"],
         ["callSettingsPanel", "callSettingsToggle"],
+        ["callGuardPanel", "callGuardToggle"],
       ].forEach(([pid, tid]) => {
         const panel = document.getElementById(pid);
         if (
@@ -7800,6 +7801,9 @@ function startRoomCommentPolling() {
   window.__chatStore = [];
   window.__chatSeq = 0;
   window.__chatSys = [];
+  try {
+    window.KoeGuard && KoeGuard.reset(); /* 枠ごとのスパム/爆音判定を捨てる */
+  } catch (e) {}
   window.__chatNotifiedInit = false;
   window.__chatUnread = 0;
   window.__callLogLines = [];
@@ -9161,6 +9165,7 @@ function koeChatRender() {
   /* コメントと出来事を受信時刻で並べる(同時刻ならコメントを先に) */
   var rows = [];
   S.forEach(function (c) {
+    if (window.KoeGuard && KoeGuard.isHidden(c.user_id)) return; /* スパム判定で非表示にした人 */
     var tags =
       (c.explicit
         ? '<span class="koe-chat-tag koe-chat-tag-reg" title="運営により規制対象と判定されたコメント">規制対象</span>'
@@ -9241,6 +9246,10 @@ async function reloadRoomComments(listOverride) {
   var added = S.filter(function (c) {
     return !c.__seen;
   });
+  /* スパム判定(連投・同文の繰り返し)。該当者のコメントは以降この端末では表示しない */
+  try {
+    window.KoeGuard && KoeGuard.onComments(added);
+  } catch (e) {}
   /* 送信中(pending)の自分の発言が届いたら pending から外し、その項目を自分の発言として確定 */
   try {
     var P = window.__chatPending || [];
@@ -9282,7 +9291,7 @@ async function reloadRoomComments(listOverride) {
   try {
     var first = !window.__chatNotifiedInit;
     var fresh = added.filter(function (c) {
-      return !first && !koeChatIsMine(c);
+      return !first && !koeChatIsMine(c) && !(window.KoeGuard && KoeGuard.isHidden(c.user_id));
     });
     window.__chatNotifiedInit = true;
     if (fresh.length) {
@@ -10088,9 +10097,11 @@ function toggleCallPanel(panelId, btnId) {
     cp = document.getElementById("callChatPanel");
   cp && (cp.style.display = "none");
   const sp = document.getElementById("callSettingsPanel");
+  const gp = document.getElementById("callGuardPanel");
+  gp && (gp.style.display = "none");
   if (
     (sp && (sp.style.display = "none"),
-    ["callChatToggle", "callSettingsToggle"].forEach((id) => {
+    ["callChatToggle", "callSettingsToggle", "callGuardToggle"].forEach((id) => {
       const e = document.getElementById(id);
       e && e.classList.remove("active");
     }),
@@ -11745,6 +11756,11 @@ function startSpeakLoop() {
           lvl = Math.sqrt(sum / b.length);
         } catch (e) {}
         const muteMe = a.uid === window.__myUserId && skMuted;
+        if (a.uid !== window.__myUserId) {
+          try {
+            window.KoeGuard && KoeGuard.onLevel(a.uid, lvl, __now); /* 爆音の検知 */
+          } catch (e) {}
+        }
         const rawSpeaking = lvl > THR && !muteMe;
         if (rawSpeaking) window.__lastSpoke[a.uid] = __now;
         const speaking = !!(window.__lastSpoke[a.uid] && __now - window.__lastSpoke[a.uid] < 500) && !muteMe;
@@ -12458,10 +12474,23 @@ function bindCallOverlayControls() {
     } catch (e) {}
   }),
     (document.getElementById("callTitleBtn").onclick = async () => {
+      const btn = document.getElementById("callTitleBtn");
       const t = document.getElementById("callTitleInput").value.trim();
-      if (!t || !skCurrentRoomId) return;
-      const r = await callApi("room_update_title", skCurrentRoomId, t);
-      callLog(r.ok ? "タイトルを変更しました: " + t : "タイトル変更失敗: " + JSON.stringify(r));
+      if (!t || !skCurrentRoomId || btn.disabled) return;
+      /* 送信中はボタンを止め、結果をトーストで返す(反応が無くて何度も押される→同じ PUT が十数回飛んでいた) */
+      btn.disabled = true;
+      try {
+        const r = await callApi("room_update_title", skCurrentRoomId, t);
+        callLog(r.ok ? "タイトルを変更しました: " + t : "タイトル変更失敗: " + JSON.stringify(r));
+        toast(r.ok ? "タイトルを変更しました" : "タイトル変更に失敗しました", r.ok ? undefined : "error");
+        if (r.ok) {
+          try {
+            refreshRoomStateNow();
+          } catch (e) {}
+        }
+      } finally {
+        btn.disabled = false;
+      }
     }),
     (document.getElementById("callCloseRoomBtn").onclick = async () => {
       if (!skCurrentRoomId) return;
@@ -15687,6 +15716,14 @@ window.addEventListener("pywebviewready", async () => {
   {
     const b = document.getElementById("callSettingsToggle");
     b && b.addEventListener("click", () => toggleCallPanel("callSettingsPanel", "callSettingsToggle"));
+    const g = document.getElementById("callGuardToggle");
+    g &&
+      g.addEventListener("click", () => {
+        toggleCallPanel("callGuardPanel", "callGuardToggle");
+        try {
+          window.KoeGuard && KoeGuard.renderPanel();
+        } catch (e) {}
+      });
   }
   {
     const l = document.getElementById("navOrderList");
@@ -21081,11 +21118,13 @@ function koeBootShell(acc) {
     EXEMPT = "koe_block_exempt",
     CONSENT = "koe_block_consent",
     SEED = "koe_block_seeded";
-  var SESSION_CAP = 25,
-    MIN_MS = 5000,
-    MAX_MS = 15000;
+  /* リストが 70 件を超えて「1 日 40 件・5〜15 秒おき」では追いつかなくなったため引き上げた。
+     それでも 1 分に十数件・1 日 200 件までなので、公式アプリで手動ブロックする速さの範囲に収まる。 */
+  var SESSION_CAP = 120,
+    MIN_MS = 3000,
+    MAX_MS = 8000;
   /* 外部サーバー依存への安全弁: 1日あたりの上限と、リストが急増した時の一時停止(確認制) */
-  var DAILY_CAP = 40,
+  var DAILY_CAP = 200,
     DAY_KEY = "koe_block_day",
     DAY_CNT = "koe_block_daycnt",
     LAST_N = "koe_block_lastn",
@@ -21114,12 +21153,14 @@ function koeBootShell(acc) {
     try {
       var n = bannedUids().length;
       var prev = parseInt(localStorage.getItem(LAST_N) || "-1", 10);
-      if (prev >= 0 && n > prev * 2 + 20) {
-        localStorage.setItem(PAUSE, "1");
-        T("共有BANリストが急増したため自動ブロックを一時停止しました(設定から再開できます)", "error");
+      if (prev >= 0 && n > prev * 3 + 50) {
+        localStorage.setItem(PAUSE, dayStr()); // その日だけ止める(翌日は自動で再開)
+        T("共有BANリストが急増したため自動ブロックを今日は一時停止しました(設定から再開できます)", "error");
         return true;
       }
-      if (localStorage.getItem(PAUSE) === "1") return true;
+      var p = localStorage.getItem(PAUSE);
+      if (p === "1" || p === dayStr()) return true;
+      if (p) localStorage.removeItem(PAUSE);
       localStorage.setItem(LAST_N, String(n));
       return false;
     } catch (e) {
@@ -21412,17 +21453,71 @@ function koeBootShell(acc) {
     return false;
   }
 
+  /* ブロック済みの名前(uid → 表示名)。BAN リストの name を優先し、無い分は resolve_users で 20 件ずつ解決 */
+  var NAMES_KEY = "koe_blk_names";
+  var resolvingNames = false;
+  function blockNames() {
+    var m = {};
+    try {
+      m = JSON.parse(localStorage.getItem(NAMES_KEY) || "{}") || {};
+    } catch (e) {}
+    try {
+      bannedList().forEach(function (b) {
+        if (b && b.uid != null && b.name && !m[String(b.uid)]) m[String(b.uid)] = String(b.name);
+      });
+    } catch (e) {}
+    return m;
+  }
+  async function resolveBlockNames(uids) {
+    if (resolvingNames) return;
+    var names = blockNames();
+    var missing = uids.filter(function (u) {
+      return names[u] === undefined;
+    });
+    if (!missing.length) return;
+    resolvingNames = true;
+    try {
+      for (var i = 0; i < missing.length && i < 100; i += 20) {
+        var r = await callApi("resolve_users", missing.slice(i, i + 20).join(","));
+        ((r && r.users) || []).forEach(function (u) {
+          if (u && u.user_id && u.name) names[String(u.user_id)] = String(u.name);
+        });
+      }
+      /* 解決できなかった相手(退会など)は次回また問い合わせないよう空文字で覚える */
+      missing.forEach(function (u) {
+        if (names[u] === undefined) names[u] = "";
+      });
+      try {
+        localStorage.setItem(NAMES_KEY, JSON.stringify(names));
+      } catch (e) {}
+      render();
+    } catch (e) {
+    } finally {
+      resolvingNames = false;
+    }
+  }
+
   function stats() {
     var uids = bannedUids(),
       done = 0;
     uids.forEach(function (u) {
       if (doneSet.has(u)) done++;
     });
+    var reason = "";
+    try {
+      var p = localStorage.getItem(PAUSE);
+      if (p === "1" || p === dayStr()) reason = "急増のため一時停止中";
+      else if (dayCount() >= DAILY_CAP) reason = "本日の上限(" + DAILY_CAP + "件)に達したため明日再開";
+      else if (sessionCount >= SESSION_CAP) reason = "この起動での上限に達しました(再起動で再開)";
+      else if (backoff) reason = "サーバーの制限待ち(1分後に再開)";
+      else if (!fg()) reason = "画面表示中だけ進みます";
+    } catch (e) {}
     return {
       total: uids.length,
       done: done,
       pct: uids.length ? Math.round((done * 100) / uids.length) : 100,
       remain: queueUids().length,
+      reason: reason,
     };
   }
 
@@ -21444,6 +21539,7 @@ function koeBootShell(acc) {
           s2.pct +
           "%)" +
           (s2.remain ? " ・残り" + s2.remain : " ・完了") +
+          (s2.remain && s2.reason ? " ・" + s2.reason : "") +
           (last ? " ・直近ID:" + last : "");
       }
     }
@@ -21461,28 +21557,45 @@ function koeBootShell(acc) {
         '<div style="height:8px;border-radius:6px;background:rgba(128,128,128,.25);overflow:hidden;margin:6px 0;"><div style="height:100%;width:' +
         s.pct +
         '%;background:var(--accent,#4a90d9);transition:width .3s;"></div></div>';
+      /* 件数が増えたので一覧は折りたたみ、開いた時だけチップ(名前・✕で解除)を並べる。
+         名前は BAN リストに載っていればそれを、無ければ開いた時にまとめて解決して端末内に覚える */
+      var LIMIT = 300;
+      var names = blockNames();
       var rows = done
-        .slice(0, 50)
+        .slice(0, LIMIT)
         .map(function (u) {
+          var nm = names[u] || "";
           return (
-            '<div class="card" style="display:block;"><div class="card-body" style="display:flex;justify-content:space-between;align-items:center;"><span class="card-name">ID:' +
+            '<span class="koe-blk-chip" title="ID:' +
             esc(u) +
-            '</span><button class="btn-secondary koe-unblk" data-uid="' +
+            '">' +
+            (nm ? esc(nm) : "ID:" + esc(u)) +
+            '<button class="koe-unblk" data-uid="' +
             esc(u) +
-            '" style="width:auto;padding:3px 10px;font-size:12px;">解除</button></div></div>'
+            '" title="ブロック解除">✕</button></span>'
           );
         })
         .join("");
       box.innerHTML =
         bar +
         (done.length
-          ? '<div style="font-size:12px;opacity:.8;margin:4px 0;">ブロック済み ' +
+          ? '<details class="koe-blk-details"' +
+            (box.__open ? " open" : "") +
+            '><summary style="font-size:12px;opacity:.85;cursor:pointer;">ブロック済み ' +
             done.length +
             "件" +
-            (done.length > 50 ? "(先頭50件)" : "") +
-            "</div>" +
-            rows
+            (done.length > LIMIT ? "(先頭" + LIMIT + "件を表示)" : "") +
+            ' — タップで一覧・✕で解除</summary><div class="koe-blk-chips">' +
+            rows +
+            "</div></details>"
           : '<div class="empty-msg" style="padding:6px 0;">まだブロックした相手はいません</div>');
+      var det = box.querySelector(".koe-blk-details");
+      if (det)
+        det.addEventListener("toggle", function () {
+          box.__open = det.open; /* 再描画されても開閉状態を保つ */
+          if (det.open) resolveBlockNames(done.slice(0, LIMIT));
+        });
+      if (box.__open) resolveBlockNames(done.slice(0, LIMIT));
       Array.prototype.forEach.call(box.querySelectorAll(".koe-unblk"), function (b) {
         b.addEventListener("click", async function () {
           b.disabled = true;

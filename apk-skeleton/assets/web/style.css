@@ -226,3 +226,18 @@ body.koe-bg-hidden *{animation-play-state:paused!important}
 /* 発熱対策: 画面外のカードは描画をスキップする(content-visibility) */
 .timeline-card,.card,.room-card,.account-item,.pd-comment{content-visibility:auto;contain-intrinsic-size:auto 88px}
 .koe-chat-row{content-visibility:auto;contain-intrinsic-size:auto 44px}
+
+/* 枠の防御(通話中パネル) */
+#callGuardToggle { position: relative; }
+#callGuardToggle .callv2-badge { position: absolute; top: -4px; right: -4px; }
+.koe-guard-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border, rgba(255,255,255,.08)); }
+.koe-guard-name { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.koe-guard-name small { display: block; opacity: .6; font-size: 11px; }
+.koe-guard-btns { display: flex; gap: 4px; }
+.koe-guard-btns button { width: auto; padding: 4px 8px; font-size: 12px; }
+
+/* 共有BANリスト: ブロック済み一覧のチップ表示 */
+.koe-blk-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; max-height: 240px; overflow-y: auto; }
+.koe-blk-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px 2px 8px; border-radius: 12px; font-size: 11px; background: rgba(128,128,128,.18); border: 1px solid var(--border, rgba(255,255,255,.1)); }
+.koe-blk-chip button { background: none; border: none; color: inherit; opacity: .7; font-size: 11px; padding: 0 2px; cursor: pointer; line-height: 1; }
+.koe-blk-chip button:hover { opacity: 1; color: #e5484d; }
