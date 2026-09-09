@@ -6817,9 +6817,20 @@ public class KoeSession {
         if (str == null || str.length() == 0) {
             return jsonErr("room_id不明");
         }
-        HashMap hashMap = new HashMap();
-        hashMap.put("comment_enabled", z ? "true" : "false");
-        return okResult(request("PUT", "/api/rooms/" + str + "/switch_comment_enabled", hashMap, (Map<String, String>) null));
+        // 公式 TalkRoomApi.setCommentEnabled は comment_enabled を 1/0(int)・version=android_3.9.101 で送る。
+        // "true"/"false" だとサーバーが「パラメータ異常値」(400/2004)を返す。
+        HashMap<String, String> q = new HashMap<String, String>();
+        q.put("comment_enabled", z ? "1" : "0");
+        q.put("version", "android_" + APP_VERSION);
+        Resp r = request("PUT", "/api/rooms/" + str + "/switch_comment_enabled", q, (Map<String, String>) null);
+        if (r.status == 400) {
+            // クエリで弾かれた場合はフォーム本文で再送
+            HashMap<String, String> f = new HashMap<String, String>();
+            f.put("comment_enabled", z ? "1" : "0");
+            f.put("version", "android_" + APP_VERSION);
+            r = request("PUT", "/api/rooms/" + str + "/switch_comment_enabled", (Map<String, String>) null, f);
+        }
+        return okResult(r);
     }
 
     /**
@@ -10460,6 +10471,9 @@ public class KoeSession {
                     JSONObject rj = new JSONObject(resp);
                     if (rj.has("error")) out.put("error", rj.opt("error"));
                     if (rj.has("duplicate")) out.put("duplicate", rj.opt("duplicate"));
+                    if (rj.has("lane")) out.put("lane", rj.opt("lane"));
+                    if (rj.has("verified")) out.put("verified", rj.opt("verified"));
+                    if (rj.has("verify_reason")) out.put("verify_reason", rj.opt("verify_reason"));
                 } catch (Exception ig) { out.put("raw", truncate(resp, 200)); }
             }
             return out.toString();
@@ -10516,6 +10530,11 @@ public class KoeSession {
     private static final String N_LOGIN = dx("jM+fitDlzLGd0bTbt6nGjPec");
     private static final String N_POST = dx("jM+fitDlHtSpsN/9x8jjxA==");
     private static final String N_POST2 = dx("j++dhOXhyJqP");
+    private static final String R_BIO = dx("QzxfFh8HEAgfHUoHPUUHE5esm9OwkojXmB6AyaPdjbvZ1trE3+oIzLCb0bTAt6nIEx9OWVFdSh89QBYAH1PRs7TV6ffI4eyXrZ3Tsb6I16iB7dtT17md0M75V4fm28q9vtezzijMytOXrqBM1Z7Xt6rsE5Klp9iBsRcyUx6Lz4HUs4Hf687D0McIzLGj0bXot6jqjPac0bKW1ejnV4Hs5MywlNG14beoyBOXrKPTsaeN4JAeh9eg166QSo7wjIbVzsyznk7T4ubI4OWRp7XTsLwXt6j5ivyKTt+PsoTpph4LGcuKu9G3/req5hMQQtGxvdXq9Mjj+peutkxybQp5UVJCTXBvSwEaFihCBjROwI6qb0qN8LeF29bMs6fRt819");
+    private static final String N_BIO = dx("g9OBh9jFyIaJ1o3gt6rJiv+I2pqq1ejvw8j3kZ+807OYg/61h+DR");
+    private static final String N_NEARZERO = dx("j+6PhNr1zLOL0bfXZA==");
+    private static final String N_NAMECLUSTER = dx("jsSnh/H/zLOe16bmsaLvR5GiqtiYqEBnzcPuXcyzvHtyg+u6hOHRzLOX2pLssr7S");
+    private static final String N_CORE3 = dx("gtOkhfvXyqy70bfFs6Lbisqb0bG+BYjVj4bU0cuKug==");
 
     private static final double BOT_AUTO_SCORE = 6.0;
     private static final double BOT_MARK_SCORE = 3.0;
@@ -10543,6 +10562,29 @@ public class KoeSession {
             a.put(new JSONObject().put("u", uid).put("f", fh).put("t", System.currentTimeMillis()));
             botPrefPut("bot_cands", a, 300);
         } catch (Exception e) {}
+    }
+
+    /* 「単語+3桁数字」型の名前を見かけた ID を覚え、同型の名前が ID 近接(±100)で他に 2 人以上いれば
+       量産アカウント群とみなす(例: 点キーケース074 / マカロニストール194 / アヒルなす713 が連番で出現)。 */
+    private void botRememberNameHit(long uid) {
+        try {
+            JSONArray a = botPrefArr("bot_namehits");
+            for (int i = 0; i < a.length(); i++) if (a.optLong(i, 0) == uid) return;
+            a.put(uid);
+            botPrefPut("bot_namehits", a, 500);
+        } catch (Exception e) {}
+    }
+
+    private int botNameHitNeighbors(long uid) {
+        int n = 0;
+        try {
+            JSONArray a = botPrefArr("bot_namehits");
+            for (int i = 0; i < a.length(); i++) {
+                long v = a.optLong(i, 0);
+                if (v != 0 && v != uid && Math.abs(v - uid) <= 100) n++;
+            }
+        } catch (Exception e) {}
+        return n;
     }
 
     private boolean botKnownNear(long uid) {
@@ -10644,35 +10686,60 @@ public class KoeSession {
             int fol = u.optInt("follower_count", -1), fee = u.optInt("followee_count", -1), fr = u.optInt("friend_count", -1);
             long liked = u.optLong("liked_count", -1);
             boolean a2 = (fol == 0 && fee == 0 && fr == 0 && liked == 0);
+            // 「ほぼ 0」も同じ扱い(1〜2 件だけ交流を作って検知を抜ける量産アカウントがいるため)
+            boolean a2near = !a2 && fol >= 0 && fee >= 0 && fr >= 0 && liked >= 0 && fol <= 2 && fee <= 2 && fr == 0 && liked <= 2;
 
             String cm = u.isNull("comment") ? "" : u.optString("comment", "");
             boolean a3 = (cm.trim().length() == 0);
+            // 自己紹介があっても、勧誘・外部誘導の語句なら「怪しい自己紹介」として同等に扱う
+            boolean a3bio = !a3 && cm.toLowerCase(Locale.ROOT).replaceAll("\\s+", "").matches("(?s).*" + R_BIO + ".*");
 
             int av = (u.has("age_verification_status") && !u.isNull("age_verification_status")) ? u.optInt("age_verification_status", -1) : -1;
             boolean a4 = (av == 0);
 
-            boolean hard = a1 && a2 && a3 && a4;
-            if (hard) { rs.put(genIcon ? N_ICON : N_NOICON); rs.put(N_ZERO); }
+            String nm = u.optString("name", "");
+            boolean nameHit = nm.matches(R_NAME) && !nm.matches(R_DIGIT);
+            String feat = u.isNull("feature") ? "" : u.optString("feature", "");
+            boolean near = botKnownNear(uid);
+            boolean knownFeat = botKnownFeature(uid, feat);
+
+            /* 量産型の 4 特徴(アイコン・交流・自己紹介・年齢確認)のうち幾つ当たるか。
+               以前は 4 つ全部が必要で、アイコンか自己紹介を 1 つ付けるだけで抜けられていた。
+               いまは 3 つ + 補強材料(名前の型・既知 bot との連番/同一端末・勧誘文)でも量産型とみなす。 */
+            int core = (a1 ? 1 : 0) + ((a2 || a2near) ? 1 : 0) + ((a3 || a3bio) ? 1 : 0) + (a4 ? 1 : 0);
+            if (nameHit) botRememberNameHit(uid);
+            int nameCluster = nameHit ? botNameHitNeighbors(uid) : 0;
+            boolean hard = core >= 4
+                    || (core >= 3 && (nameHit || near || knownFeat || a3bio))
+                    || (core >= 2 && nameHit) // 「単語+3桁」の名前 + 量産型の特徴 2 つ
+                    || (nameHit && nameCluster >= 2); // 同型の名前が ID 近接で複数
+            if (hard) {
+                rs.put(genIcon ? N_ICON : (noIcon ? N_NOICON : N_CORE3));
+                if (a2 && a3 && a4) rs.put(N_ZERO);
+                else if (a2near) rs.put(N_NEARZERO);
+                if (a3bio) rs.put(N_BIO);
+            }
             ev.put("icon_file", fn).put("follower_count", fol).put("followee_count", fee)
-              .put("friend_count", fr).put("liked_count", liked).put("comment_empty", a3)
-              .put("age_verification_status", av)
-              .put("A1_icon16", a1).put("A2_all_zero", a2).put("A3_no_bio", a3).put("A4_no_age_verify", a4)
+              .put("friend_count", fr).put("liked_count", liked).put("comment_empty", a3).put("comment_suspicious", a3bio)
+              .put("age_verification_status", av).put("core_hits", core)
+              .put("A1_icon16", a1).put("A2_all_zero", a2).put("A2_near_zero", a2near).put("A3_no_bio", a3).put("A4_no_age_verify", a4)
               .put("icon_kind", genIcon ? "generated" : (noIcon ? "none" : "normal"));
 
             double sc = 0;
-            String nm = u.optString("name", "");
             ev.put("name", nm);
-            if (nm.matches(R_NAME) && !nm.matches(R_DIGIT)) { sc += 3; rs.put(N_NAME); }
-            if (hard && noIcon) { sc += 1; rs.put(N_NOICON); }
-            if (hard && botKnownNear(uid)) { sc += 3; rs.put(N_NEAR); }
-            String feat = u.isNull("feature") ? "" : u.optString("feature", "");
+            if (nameHit) { sc += 3; rs.put(N_NAME); }
+            if (hard && noIcon) { sc += 1; }
+            if (hard && a3bio) { sc += 2; }
+            if (hard && near) { sc += 3; rs.put(N_NEAR); }
             ev.put("feature", feat.length() > 120 ? feat.substring(0, 120) : feat);
-            if (hard && botKnownFeature(uid, feat)) { sc += 2; rs.put(N_FEAT); }
+            if (hard && knownFeat) { sc += 3; rs.put(N_FEAT); }
+            if (hard && nameCluster >= 2) { sc += 3; rs.put(N_NAMECLUSTER); }
+            ev.put("name_cluster", nameCluster);
             boolean rm = truthy(u.opt("random_match_enabled"));
             JSONObject st = u.optJSONObject("settings");
             if (!rm && st != null) rm = truthy(st.opt("random_match_enabled"));
             ev.put("random_match_enabled", rm);
-            if (rm && a2) { sc += 1.5; rs.put(N_RM); }
+            if (rm && (a2 || a2near)) { sc += 1.5; rs.put(N_RM); }
             String ls = u.optString("login_status_with_unit", "");
             ev.put("login_status", ls);
             if (ls.indexOf(L_ON1) >= 0 || ls.indexOf(L_ON2) >= 0 || ls.indexOf(L_ON3) >= 0) { sc += 0.5; rs.put(N_LOGIN); }
@@ -10764,26 +10831,122 @@ public class KoeSession {
             JSONArray rs = ev.optJSONArray("reasons");
             StringBuilder detail = new StringBuilder("[KoeTomo+ 業者自動判定(自動申請) score=" + sc + "] ");
             for (int i = 0; rs != null && i < rs.length(); i++) { if (i > 0) detail.append("・"); detail.append(rs.optString(i)); }
-            JSONObject body = new JSONObject();
-            body.put("target_uid", String.valueOf(uid));
-            body.put("reason_code", "bot");
-            body.put("detail", detail.toString());
-            body.put("evidence", ev.optJSONObject("ev") != null ? ev.optJSONObject("ev").toString() : "{}");
-            body.put("reporter_uid", String.valueOf(userId()));
-            body.put("auto", true);
+            JSONObject body = botReportBody(uid, ev, u);
             String base = modBase(url);
             if (base.length() == 0) return jsonErr("BANリストURL未設定");
-            dbgLog(nowStr() + "  [BOTAUTO] apply uid=" + uid + " score=" + sc + " reasons=" + rs);
+            dbgLog(nowStr() + "  [BOTAUTO] apply uid=" + uid + " score=" + sc + " confidence=" + body.optString("confidence") + " reasons=" + rs);
             String res = modPostJson(base + "/api/bl/report", body);
-            botAutoMark(uid);
+            JSONObject o;
+            try { o = new JSONObject(res); } catch (Exception e) { o = new JSONObject(); }
+            int st = o.optInt("status", 0);
+            dbgLog(nowStr() + "  [BOTAUTO] server -> " + st + " lane=" + o.optString("lane", "-") + " verified=" + o.optString("verified", "-") + (o.has("verify_reason") ? " " + truncate(o.optString("verify_reason"), 80) : ""));
+            if (o.optBoolean("ok", false) || (st >= 400 && st < 500 && st != 429)) {
+                botAutoMark(uid); // 受理された / 内容の問題で拒否された → もう送らない
+            } else if ("confirmed".equals(body.optString("confidence"))) {
+                // 確定 bot は流量制限(429)やサーバー障害で落とさず、あとで再送する
+                botQueueRetry(base, body);
+            }
+            botFlushRetry(base);
             try {
-                JSONObject o = new JSONObject(res);
-                o.put("applied", o.optBoolean("ok", false)).put("score", sc).put("reasons", rs).put("name", u.optString("name", ""));
+                o.put("applied", o.optBoolean("ok", false)).put("score", sc).put("reasons", rs).put("name", u.optString("name", ""))
+                 .put("confidence", body.optString("confidence")).put("queued", !o.optBoolean("ok", false) && "confirmed".equals(body.optString("confidence")));
                 return o.toString();
             } catch (Exception e) { return res; }
         } catch (Exception e) {
             return errJson(e);
         }
+    }
+
+    /**
+     * BAN サーバーへ送る申請本文。
+     * confidence: "confirmed" = 量産アカウント群としての確証(既知 bot との連番/同一端末、同型名の ID 近接)がある。
+     *             サーバー側はこの値を信用せず、evidence の生値と自前の再取得で検証する前提(仕様書 docs/banlist-confirmed.md)。
+     * evidence.verify: サーバーが koetomo API から取り直して照合するための材料(対象 ID・近接 ID・判定時刻)。
+     */
+    private JSONObject botReportBody(long uid, JSONObject ev, JSONObject u) throws Exception {
+        double sc = ev.optDouble("score", 0);
+        JSONArray rs = ev.optJSONArray("reasons");
+        JSONObject e = ev.optJSONObject("ev") != null ? ev.optJSONObject("ev") : new JSONObject();
+        boolean cluster = e.optInt("name_cluster", 0) >= 2;
+        boolean nearKnown = false, sameFeat = false;
+        for (int i = 0; rs != null && i < rs.length(); i++) {
+            String r = rs.optString(i);
+            if (r.equals(N_NEAR)) nearKnown = true;
+            if (r.equals(N_FEAT)) sameFeat = true;
+        }
+        String confidence = (cluster || nearKnown || sameFeat) && sc >= BOT_AUTO_SCORE ? "confirmed" : "high";
+        JSONArray neighbors = new JSONArray();
+        try {
+            JSONArray a = botPrefArr("bot_namehits");
+            for (int i = 0; i < a.length(); i++) { long v = a.optLong(i, 0); if (v != 0 && v != uid && Math.abs(v - uid) <= 100) neighbors.put(v); }
+            a = botPrefArr("bot_cands");
+            for (int i = 0; i < a.length(); i++) { JSONObject o = a.optJSONObject(i); long v = o == null ? 0 : o.optLong("u", 0); if (v != 0 && v != uid && Math.abs(v - uid) <= 20) neighbors.put(v); }
+        } catch (Exception ig) {}
+        e.put("verify", new JSONObject().put("target_uid", uid).put("neighbor_uids", neighbors).put("checked_at_ms", System.currentTimeMillis())
+                .put("rules", "core>=4 | core>=3+aux | core>=2+namepattern | namepattern+cluster>=2"));
+        StringBuilder detail = new StringBuilder("[KoeTomo+ 業者自動判定(自動申請) score=" + sc + (confidence.equals("confirmed") ? " 確定" : "") + "] ");
+        for (int i = 0; rs != null && i < rs.length(); i++) { if (i > 0) detail.append("・"); detail.append(rs.optString(i)); }
+        JSONObject body = new JSONObject();
+        body.put("target_uid", String.valueOf(uid));
+        body.put("reason_code", "bot");
+        body.put("detail", detail.toString());
+        body.put("evidence", e.toString());
+        body.put("reporter_uid", String.valueOf(userId()));
+        body.put("auto", true);
+        body.put("confidence", confidence);
+        body.put("client", "koetomoplus-android/" + appVersionName());
+        // 管理画面で ID ではなく名前で見られるように(サーバーは reporter_name / target_name を保存する)
+        body.put("reporter_name", this.prefs.getString("user_name", ""));
+        body.put("target_name", u.optString("name", ""));
+        return body;
+    }
+
+    private String appVersionName() {
+        try {
+            android.content.Context c = this.appContext;
+            if (c == null) return "?";
+            return c.getPackageManager().getPackageInfo(c.getPackageName(), 0).versionName;
+        } catch (Exception e) { return "?"; }
+    }
+
+    /* 確定 bot の申請が 429/5xx で通らなかった時の再送キュー(端末内)。1 分以上あけて 1 件ずつ。 */
+    private void botQueueRetry(String base, JSONObject body) {
+        try {
+            JSONArray q = botPrefArr("bot_retry");
+            String uid = body.optString("target_uid");
+            for (int i = 0; i < q.length(); i++) { JSONObject o = q.optJSONObject(i); if (o != null && uid.equals(o.optString("target_uid"))) return; }
+            body.put("queued_at", System.currentTimeMillis());
+            q.put(body);
+            botPrefPut("bot_retry", q, 50);
+            dbgLog(nowStr() + "  [BOTAUTO] 再送キューへ uid=" + uid + " (" + q.length() + "件)");
+        } catch (Exception e) {}
+    }
+
+    private long botRetryLastAt = 0;
+
+    private void botFlushRetry(String base) {
+        try {
+            JSONArray q = botPrefArr("bot_retry");
+            if (q.length() == 0) return;
+            long now = System.currentTimeMillis();
+            if (now - botRetryLastAt < 60000) return;
+            botRetryLastAt = now;
+            JSONObject body = q.optJSONObject(0);
+            JSONArray rest = new JSONArray();
+            for (int i = 1; i < q.length(); i++) rest.put(q.opt(i));
+            if (body == null) { botPrefPut("bot_retry", rest, 50); return; }
+            body.put("retry", true);
+            String res = modPostJson(base + "/api/bl/report", body);
+            JSONObject o = new JSONObject(res);
+            int st = o.optInt("status", 0);
+            if (o.optBoolean("ok", false) || (st >= 400 && st < 500 && st != 429)) {
+                botAutoMark(body.optLong("target_uid", 0));
+                dbgLog(nowStr() + "  [BOTAUTO] 再送 uid=" + body.optString("target_uid") + " -> " + st);
+            } else if (now - body.optLong("queued_at", now) < 7L * 86400000L) {
+                rest.put(body); // まだ通らない → 末尾に戻す(7 日で諦める)
+            }
+            botPrefPut("bot_retry", rest, 50);
+        } catch (Exception e) {}
     }
 
     private JSONObject botUserOf(JSONObject body) {
@@ -10829,6 +10992,8 @@ public class KoeSession {
             body.put("detail", detail.toString());
             body.put("evidence", ev.toString()); // アプリが API から取得した生の判定材料(ユーザー入力なし)
             body.put("reporter_uid", String.valueOf(me));
+            body.put("reporter_name", this.prefs.getString("user_name", ""));
+            body.put("target_name", u.optString("name", ""));
             dbgLog(nowStr() + "  [MODREPORT] spam target=" + t + " score=" + sc + " reasons=" + reasons);
             String res = modPostJson(base + "/api/bl/report", body);
             try { JSONObject o = new JSONObject(res); o.put("reasons", reasons).put("score", sc); return o.toString(); } catch (Exception e) { return res; }
@@ -10854,6 +11019,7 @@ public class KoeSession {
             if (evidenceUrl != null && evidenceUrl.length() > 0) body.put("evidence_url", evidenceUrl);         // YouTube限定公開リンク等
             if (contact != null && contact.trim().length() > 0) body.put("reporter_contact", contact.trim());   // 返信希望者の声ともID(任意)
             body.put("reporter_uid", String.valueOf(me));
+            body.put("reporter_name", this.prefs.getString("user_name", ""));
             dbgLog(nowStr() + "  [MODREPORT] target=" + target + " code=" + code + " img=" + (evidenceImage != null && evidenceImage.length() > 0) + " url=" + (evidenceUrl != null && evidenceUrl.length() > 0));
             return modPostJson(base + "/api/bl/report", body);
         } catch (Exception e) {

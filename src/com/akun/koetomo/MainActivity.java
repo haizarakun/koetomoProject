@@ -633,7 +633,7 @@ public class MainActivity extends Activity {
                     int n = 0;
                     int idle = 0; // 新着なしが続くほど間隔を広げる(バックグラウンド発熱・電池対策)
                     while (bgNotifRunning) {
-                        long wait = n == 0 ? 6000 : (idle < 5 ? 12000 : (idle < 15 ? 30000 : 60000));
+                        long wait = n == 0 ? 6000 : (idle < 3 ? 20000 : (idle < 10 ? 45000 : 90000));
                         try {
                             Thread.sleep(wait);
                         } catch (InterruptedException e) {
@@ -690,6 +690,19 @@ public class MainActivity extends Activity {
     private boolean pollNotificationsOnce(KoeApiBridge bridge) {
         try {
             if (bridge == null || bridge.session == null || !bridge.session.hasAuthToken()) return false; // 未ログイン時は取得しない
+            // まず未読数(軽い 1 リクエスト)だけ見る。前回から増えていなければ一覧(重い: 通知+ユーザー名解決)は取らない。
+            android.content.SharedPreferences spc = getSharedPreferences("koe_bgnotif", 0);
+            try {
+                String cres = bridge.session.dispatch("get_unread_notif_count", new org.json.JSONArray());
+                org.json.JSONObject co = cres == null ? null : new org.json.JSONObject(cres);
+                if (co != null && co.optBoolean("ok")) {
+                    int cnt = co.optInt("count", -1);
+                    int prev = spc.getInt("last_cnt", -1);
+                    spc.edit().putInt("last_cnt", cnt).apply();
+                    if (cnt >= 0 && prev >= 0 && cnt <= prev) return false;
+                }
+            } catch (Throwable t) {
+            }
             String res = bridge.session.dispatch("get_notifications", new org.json.JSONArray().put("normal"));
             if (res == null) return false;
             org.json.JSONObject o = new org.json.JSONObject(res);
@@ -741,10 +754,13 @@ public class MainActivity extends Activity {
             this.webView.onPause();
             this.webView.pauseTimers();
         }
-        startBgNotifPoller();
-        // Activity 内のスレッドだけだと、しばらくするとプロセスごと止められて通知が来なくなる。
-        // 通話中でなければ常駐サービスに引き継いで、アプリを離れていても鳴るようにする。
-        try { if (!this.inCall) KoeNotifyService.start(getApplicationContext()); } catch (Exception ig) {}
+        // 通知の裏側ポーリングは 1 系統だけ動かす(以前は Activity 内スレッドと常駐サービスの両方が回り、
+        // 同じ通知一覧を 2 重に取っていた)。通話中は常駐サービスを起こさず Activity 側で軽く見る。
+        if (this.inCall) {
+            startBgNotifPoller();
+        } else {
+            try { KoeNotifyService.start(getApplicationContext()); } catch (Exception ig) {}
+        }
         // 画面を離れたタイミングで一時ファイル(画像キャッシュ)が上限を超えていたら古い順に捨てる
         try {
             final android.content.Context c = getApplicationContext();
