@@ -439,11 +439,14 @@ async function koeDmToggleVoice() {
       __dmTimer = null;
     }
     var type = (__dmRec.mimeType || mime || "audio/webm").split(";")[0];
-    __dmType = type;
-    __dmExt = type.indexOf("mp4") >= 0 ? "m4a" : type.indexOf("ogg") >= 0 ? "ogg" : "webm";
     __dmSec = Math.max(1, Math.round((Date.now() - __dmStart) / 1000));
     var blob = new Blob(__dmChunks, { type: type }),
       fr = new FileReader();
+    koeVoiceForUpload(blob, type).then(function (v) {
+      __dmType = v.type;
+      __dmExt = v.ext;
+      fr.readAsDataURL(v.blob);
+    });
     fr.onload = function () {
       __dmData = fr.result;
       var r = document.getElementById("chatVoiceRow"),
@@ -451,7 +454,6 @@ async function koeDmToggleVoice() {
       if (a) a.src = __dmData;
       if (r) r.style.display = "flex";
     };
-    fr.readAsDataURL(blob);
     if (btn) btn.classList.remove("recording");
   };
   __dmRec.start();
@@ -1778,10 +1780,14 @@ function isFilteredPost(p) {
     if (__mf === "voice" && !p.voice_url) return !0;
     if (__mf === "explicit" && !p.is_explicit) return !0;
     if (isMutedUser(p.user_id)) return !0;
+    /* 見えない文字での照合すり抜けは、その投稿だけで分かる(プロフィールを開かなくてよい) */
+    if (koeNoteInvisible(p) && koeSpamHide()) return !0;
     if (koeIsHiddenBiz(p)) return !0; /* 業者を表示しない設定 */
     const words = getFilterWords();
     if (words.length) {
-      const t = ((p.text || "") + " " + (p.name || "")).toLowerCase();
+      /* 見えない文字を取り除いてから照合する。
+         「ラ　イ　ン」の間にゼロ幅スペースを挟むだけで NG ワードをすり抜けられるため。 */
+      const t = koeStripInvisible((p.text || "") + " " + (p.name || "")).toLowerCase();
       if (words.some((w) => t.includes(w.toLowerCase()))) return !0;
     }
   } catch (e) {}
@@ -4769,6 +4775,9 @@ function loadComposeImage(file) {
       ((canvas.width = w),
         (canvas.height = h),
         canvas.getContext("2d").drawImage(img, 0, 0, w, h),
+        /* ここは JPEG のままでよい（端末とアプリの間で渡すだけ）。
+           S3 へは端末側が必ず PNG に直してから上げる。サーバーが .webp を作るのが
+           PNG のときだけなので、.jpg で置くと本人以外に画像が出ない。 */
         (composeImageDataUrl = canvas.toDataURL("image/jpeg", 0.88)));
       const prev = document.getElementById("composeImagePreview");
       ((prev.src = composeImageDataUrl),
@@ -4837,9 +4846,11 @@ async function toggleVoiceRecord() {
       __voiceTimer && (clearInterval(__voiceTimer), (__voiceTimer = null));
       const type = (__mediaRecorder.mimeType || mime || "audio/webm").split(";")[0],
         blob = new Blob(__voiceChunks, { type: type });
-      ((composeVoiceType = type),
-        (composeVoiceExt = type.indexOf("mp4") >= 0 ? "m4a" : type.indexOf("ogg") >= 0 ? "ogg" : "webm"));
       const reader = new FileReader();
+      koeVoiceForUpload(blob, type).then((v) => {
+        ((composeVoiceType = v.type), (composeVoiceExt = v.ext));
+        reader.readAsDataURL(v.blob);
+      });
       ((reader.onload = () => {
         composeVoiceDataUrl = reader.result;
         const prev = document.getElementById("composeVoicePreview");
@@ -4847,7 +4858,6 @@ async function toggleVoiceRecord() {
         const c = document.getElementById("composeVoiceClear");
         c && (c.style.display = "inline");
       }),
-        reader.readAsDataURL(blob),
         btn &&
           ((btn.innerHTML =
             '<svg class="ico" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="7"/></svg> 再録音'),
@@ -5576,6 +5586,33 @@ function audioBufferToMp3(buffer, kbps) {
   }
   const end = enc.flush();
   return (end.length && data.push(new Int8Array(end)), new Blob(data, { type: "audio/mpeg" }));
+}
+
+/* 録音した音声を、みんなが再生できる形にしてから送る。
+   koetomo に上がっている音声はすべて m4a / mp4 で、WebM や Ogg は 1 件も無い。
+   端末が m4a で録れないときに WebM のまま送ると、iPhone では再生できない
+   （Safari と iOS のプレイヤーが WebM/Opus に対応していないため）。
+   その場合だけ MP3 に変換してから送る。変換できなければ元のまま送る。 */
+async function koeVoiceForUpload(blob, type) {
+  const orig = {
+    blob: blob,
+    type: type,
+    ext: type.indexOf("mp4") >= 0 ? "m4a" : type.indexOf("ogg") >= 0 ? "ogg" : "webm",
+  };
+  if (orig.ext === "m4a") return orig;
+  try {
+    if (typeof lamejs === "undefined") await loadScript("vendor/lame.min.js");
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const buf = await ctx.decodeAudioData(await blob.arrayBuffer());
+    const mp3 = audioBufferToMp3(buf, 96);
+    try {
+      ctx.close();
+    } catch (e) {}
+    if (!mp3 || !mp3.size) return orig;
+    return { blob: mp3, type: "audio/mpeg", ext: "mp3" };
+  } catch (e) {
+    return orig;
+  }
 }
 async function openRecordComments(recordId) {
   ((window.__recCommentId = recordId),
@@ -9149,6 +9186,15 @@ function koeBotHint(u) {
 var __koeBotQ = [],
   __koeBotSeen = {},
   __koeBotTimer = null;
+/* 判定の規則を変えたら「調べ済み」を一度だけ捨てる。
+   そうしないと、前の規則で見送った相手をもう一度調べに行かない。 */
+var KOE_BOT_RULES_VERSION = "2";
+try {
+  if (localStorage.getItem("koe_bot_rules") !== KOE_BOT_RULES_VERSION) {
+    localStorage.setItem("koe_bot_rules", KOE_BOT_RULES_VERSION);
+    localStorage.removeItem("koe_bot_scanned");
+  }
+} catch (e) {}
 function koeBotQueue(uid) {
   try {
     if (!uid || !koeBotAutoOn()) return;
@@ -9207,6 +9253,46 @@ try {
     if (!document.hidden && __koeBotQ.length) koeBotPump();
   });
 } catch (e) {}
+/* ===== 本文に混ぜられた「目に見えない文字」 =====
+   ゼロ幅スペース(U+200B)や方向制御(U+202A〜202E)は画面には何も出ない。
+   これを一文字ずつの間に挟むと、見た目は普通の文のまま NG ワードや通報の照合だけをすり抜けられる。
+   絵文字の異体字セレクタ(U+FE0E / U+FE0F)は正当な使い方なので数えない。 */
+var KOE_INVISIBLE =
+  /[\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
+function koeStripInvisible(s) {
+  return String(s == null ? "" : s).replace(KOE_INVISIBLE, "");
+}
+function koeCountInvisible(s) {
+  var m = String(s == null ? "" : s).match(KOE_INVISIBLE);
+  return m ? m.length : 0;
+}
+/* 実際のタイムライン 593 件で数えた結果:
+   普通の利用者は多くても 1 投稿に 1〜2 個、業者は 1 投稿に 39〜41 個を全投稿に混ぜていた。
+   1 投稿に 8 個以上ならその場で、3 個以上なら 2 投稿目を見つけた時点で業者とみなす。 */
+var KOE_INVISIBLE_MANY = 3,
+  KOE_INVISIBLE_SURE = 8;
+var __koeInvisHits = {};
+var KOE_INVISIBLE_REASON = "本文に見えない文字を大量に混ぜている(フィルター回避)";
+function koeNoteInvisible(p) {
+  try {
+    var n = koeCountInvisible(p && p.text);
+    if (n < KOE_INVISIBLE_MANY) return false;
+    var uid = String((p && (p.user_id || p.id)) || "");
+    if (!uid || uid === "0") return false;
+    if (typeof myUserId !== "undefined" && Number(uid) === Number(myUserId)) return false;
+    var rec = __koeInvisHits[uid] || (__koeInvisHits[uid] = { posts: [], max: 0 });
+    if (p.id != null && rec.posts.indexOf(p.id) < 0 && rec.posts.length < 10) rec.posts.push(p.id);
+    if (n > rec.max) rec.max = n;
+    if (n < KOE_INVISIBLE_SURE && rec.posts.length < 2) return false;
+    /* 画面側の判定は表示と自動申請のきっかけにするだけ。
+       申請するかどうかはネイティブ側が API から投稿を取り直して数え直して決める。 */
+    __koeSpamVerdict[uid] = { level: "high", hard: true, reasons: [KOE_INVISIBLE_REASON] };
+    koeBotQueue(uid);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 /* 業者(共有BANリスト掲載 or 判定「高」)の投稿・枠を表示しない。初期値はオン(設定で切替) */
 function koeSpamHide() {
   try {
@@ -16022,6 +16108,54 @@ async function withdrawAccountAction() {
       }, 800))
     : toast("退会に失敗しました (status " + (r.status || "?") + ")", "error");
 }
+// プライバシー設定のうち オン/オフ だけのもの。[キー, 見出し, 説明]
+const PRIVACY_TOGGLES = [
+  [
+    "random_match_enabled",
+    "ランダムマッチングを許可",
+    "オフにすると、知らない相手とのランダム通話マッチングを受けなくなります",
+  ],
+  ["is_online_status_public", "オンライン状態を公開", ""],
+  ["is_read_receipt_public", "既読を公開", "オフにすると相手に既読が表示されません"],
+  ["is_my_age_public", "年齢を公開", ""],
+  ["is_follow_list_public", "フォロー一覧を公開", ""],
+  ["is_follower_list_public", "フォロワー一覧を公開", ""],
+  ["timeline_image_enabled", "タイムラインの画像を表示", ""],
+];
+// DM(チャット)を受け付ける相手。値は公式アプリと同じ。
+const CHAT_PERMISSION_CUSTOM = 4;
+const CHAT_PERMISSION_LEVELS = [
+  [0, "全員"],
+  [1, "フォローまたは友達"],
+  [2, "友達のみ"],
+  [3, "受け付けない"],
+  [CHAT_PERMISSION_CUSTOM, "カスタム(相手を選ぶ)"],
+];
+// 「カスタム」を選んだときだけ使う相手の種類。呼び方は公式の設定画面に合わせてある。
+const CHAT_PERMISSION_SCOPES = [
+  ["chat_permission_friends", "声とものユーザー"],
+  ["chat_permission_followings", "あなたがフォローしているユーザー"],
+  ["chat_permission_followers", "あなたをフォローしているユーザー"],
+];
+function settingToggleHtml(key, label, desc, checked) {
+  return (
+    `<label class="check-row" style="margin-top:10px;"><input type="checkbox" data-setting="${key}" ${checked ? "checked" : ""}> ${label}</label>` +
+    (desc ? `<div class="card-sub" style="margin:-2px 0 2px 26px;line-height:1.3;">${desc}</div>` : "")
+  );
+}
+// 変えた項目だけをサーバーに送る(公式も変更分だけを送っている)。成功したら true。
+async function saveUserSetting(changes) {
+  const r = await callApi("set_user_settings", JSON.stringify(changes));
+  if (!r.ok) {
+    toast("更新に失敗しました (status " + (r.status || "?") + ")", "error");
+    return false;
+  }
+  toast("設定を更新しました");
+  try {
+    (sfx("success"), haptic(8));
+  } catch (e) {}
+  return true;
+}
 async function loadUserSettings() {
   const box = document.getElementById("privacySettingsBody");
   if (!box) return;
@@ -16030,39 +16164,33 @@ async function loadUserSettings() {
   if (!result.ok)
     return void (box.innerHTML = `<div class="empty-msg">読み込み失敗 (status ${result.status || "?"})</div>`);
   const s = result.settings || {};
-  ((box.innerHTML = [
-    [
-      "random_match_enabled",
-      "ランダムマッチングを許可",
-      "オフにすると、知らない相手とのランダム通話マッチングを受けなくなります",
-    ],
-    ["is_online_status_public", "オンライン状態を公開", ""],
-    ["is_read_receipt_public", "既読を公開", "オフにすると相手に既読が表示されません"],
-    ["is_my_age_public", "年齢を公開", ""],
-    ["is_follow_list_public", "フォロー一覧を公開", ""],
-    ["is_follower_list_public", "フォロワー一覧を公開", ""],
-    ["timeline_image_enabled", "タイムラインの画像を表示", ""],
-  ]
-    .map(
-      ([key, label, desc]) =>
-        `\n    <label class="check-row" style="margin-top:10px;"><input type="checkbox" data-setting="${key}" ${s[key] ? "checked" : ""}> ${label}</label>\n    ${desc ? `<div class="card-sub" style="margin:-2px 0 2px 26px;line-height:1.3;">${desc}</div>` : ""}\n  `,
-    )
-    .join("")),
-    box.querySelectorAll("input[data-setting]").forEach((inp) => {
-      inp.addEventListener("change", async () => {
-        const changes = {};
-        changes[inp.dataset.setting] = inp.checked;
-        const r = await callApi("set_user_settings", JSON.stringify(changes));
-        if (r.ok) {
-          toast("設定を更新しました");
-          try {
-            (sfx("success"), haptic(8));
-          } catch (e) {}
-        } else
-          (toast("更新に失敗しました (status " + (r.status || "?") + ")", "error"),
-            (inp.checked = !inp.checked));
-      });
-    }));
+  let level = Number(s.chat_permission_level || 0);
+  box.innerHTML =
+    PRIVACY_TOGGLES.map(([key, label, desc]) => settingToggleHtml(key, label, desc, s[key])).join("") +
+    `\n    <div class="field-label" style="margin-top:16px;">DM(チャット)を受け付ける相手</div>\n    <select id="chatPermLevel">${CHAT_PERMISSION_LEVELS.map(
+      ([value, label]) => `<option value="${value}"${value === level ? " selected" : ""}>${label}</option>`,
+    ).join("")}</select>\n    <div id="chatPermCustom"${level === CHAT_PERMISSION_CUSTOM ? "" : ' style="display:none;"'}>${CHAT_PERMISSION_SCOPES.map(
+      ([key, label]) => settingToggleHtml(key, label, "", s[key]),
+    ).join("")}</div>`;
+  box.querySelectorAll("input[data-setting]").forEach((inp) => {
+    inp.addEventListener("change", async () => {
+      const changes = {};
+      changes[inp.dataset.setting] = inp.checked;
+      if (!(await saveUserSetting(changes))) inp.checked = !inp.checked;
+    });
+  });
+  const levelSelect = document.getElementById("chatPermLevel");
+  const customBox = document.getElementById("chatPermCustom");
+  const showCustom = (v) => {
+    customBox.style.display = v === CHAT_PERMISSION_CUSTOM ? "" : "none";
+  };
+  levelSelect.addEventListener("change", async () => {
+    const next = Number(levelSelect.value);
+    showCustom(next);
+    // 失敗したら画面を元の選択に戻す
+    if (await saveUserSetting({ chat_permission_level: next })) level = next;
+    else ((levelSelect.value = String(level)), showCustom(level));
+  });
 }
 async function loadBlockedUsers() {
   const box = document.getElementById("blockedList");
