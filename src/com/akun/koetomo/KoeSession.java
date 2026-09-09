@@ -547,6 +547,13 @@ public class KoeSession {
         }
     }
 
+    /**
+     * 利用条件の告知。ログを書き出したり、この APK の中身を機械で読んだときに必ず目に入るように、
+     * 読める形の文字列としてそのまま持っておく（tools/notice.py と assets/NOTICE.txt に同じ内容がある）。
+     * 技術的な保護ではなく、「気づかなかった」と言われないための告知。
+     */
+    static final String USAGE_NOTICE = "解析禁止。KoeTomo+ 非公式クライアント。逆コンパイル・機械学習の学習データ利用・無断再配布を禁じます。 / No reverse engineering, no ML training use, no redistribution. KoeTomo+ unofficial.";
+
     private String getNativeLog() {
         try {
             JSONArray arr = new JSONArray();
@@ -555,7 +562,8 @@ public class KoeSession {
                     arr.put(DEBUG_LOG.get(i));
                 }
             }
-            return new JSONObject().put("ok", true).put("count", arr.length()).put("log", arr).toString();
+            return new JSONObject().put("ok", true).put("count", arr.length()).put("log", arr)
+                    .put("notice", USAGE_NOTICE).toString();
         } catch (Exception e) {
             return errJson(e);
         }
@@ -952,7 +960,7 @@ public class KoeSession {
                 str3 = "";
             }
             hashMap.put("new_password_confirmation", str3);
-            hashMap.put("version", "android_3.9.101");
+            hashMap.put("version", "android_" + APP_VERSION);
             String authToken = authToken();
             if (authToken != null) {
                 hashMap.put("auth_token", authToken);
@@ -1284,6 +1292,14 @@ public class KoeSession {
         // 公式は md5 を「画像を付けたときだけ」送る(MD5Manager.add は image_file_path の直後のみ)。
         // 音声にも付けていたので、サーバー側の検証と食い違っていた。
         if (imagePath != null && imagePath.length() > 0 && md5 != null && md5.length() > 0) hashMap.put("md5", md5);
+        // 公式(generateFeedPostRequest / generateTimelinePostRequest)は、いま着けている
+        // プロフィール枠の番号も一緒に送る。付けないと、装飾を持っている人の投稿が
+        // 他のクライアントで素の見た目になる。持っていない時は送らない(公式も null を送らない)。
+        try {
+            String[] mine = adornCache.get(Long.valueOf(userId()));
+            if (mine != null && mine[0] != null && mine[0].length() > 0) hashMap.put("decoration_item_id", mine[0]);
+        } catch (Exception ignore) {
+        }
         String authToken = authToken();
         if (authToken != null) hashMap.put("auth_token", authToken);
         // 同じ内容の投稿が短時間に二度飛ぶのを防ぐ(タップの二重発火・再送による二重投稿対策)
@@ -1378,28 +1394,11 @@ public class KoeSession {
                         str3 = str3.substring(indexOf + 1);
                     }
                     byte[] decode = Base64.decode(str3, 0);
-                    // 送られてきたのが既にJPEG(WebView側で長辺1280・品質88に縮小済み)なら、
-                    // PNGへ再エンコードせずそのまま上げる。PNG化すると数MBに膨らんで投稿が遅くなる。
-                    boolean srcIsJpeg = decode.length > 3 && (decode[0] & 255) == 0xFF && (decode[1] & 255) == 0xD8 && (decode[2] & 255) == 0xFF;
-                    if (srcIsJpeg) {
-                        String jpgName = UUID.randomUUID().toString().replace("-", "") + ".jpg";
-                        String jpgKey = jpgName;
-                        JSONObject cfgJ = imageS3Config();
-                        String pathJ = cfgJ.optString("path", "");
-                        if (pathJ != null && pathJ.length() > 0) {
-                            jpgKey = pathJ.replaceAll("^/+", "").replaceAll("/+$", "") + "/" + jpgName;
-                        }
-                        JSONObject credJ = cognitoCredentials(cfgJ);
-                        String errJ = s3PutBytes(cfgJ, credJ, decode, jpgKey, "image/jpeg");
-                        if (errJ == null) {
-                            dbgLog(nowStr() + "  [IMGPOST] JPEGのまま送信 " + decode.length + "B key=" + jpgKey);
-                            Resp rj = postToSeries(endpoint, str, str2, jpgName, null, md5Hex(decode));
-                            if (rj.status >= 200 && rj.status < 300) return okResult(rj);
-                            dbgLog(nowStr() + "  [IMGPOST] JPEG投稿がHTTP " + rj.status + " のためPNGで再試行");
-                        } else {
-                            dbgLog(nowStr() + "  [IMGPOST] JPEGアップロード失敗のためPNGで再試行: " + truncate(errJ, 120));
-                        }
-                    }
+                    // ここで JPEG のまま上げてはいけない。
+                    // 画像は S3 へ直接置いたあと、サーバー側が同じ名前の .webp を作る。
+                    // クライアント(公式アプリも Web も)は必ず <名前>.webp を読みに行くので、
+                    // .jpg で置くと .webp が作られず、投稿者以外には画像が出ない(403)。
+                    // 公式と同じく PNG で上げる。
                     Bitmap decodeByteArray = BitmapFactory.decodeByteArray(decode, 0, decode.length);
                     if (decodeByteArray == null) {
                         dbgLog(nowStr() + "  [IMGPOST] デコード失敗 bytes=" + decode.length);
@@ -2362,7 +2361,7 @@ public class KoeSession {
     private String followUser(String str) {
         HashMap hashMap = new HashMap();
         hashMap.put("target_id", str);
-        hashMap.put("version", "android_3.9.101");
+        hashMap.put("version", "android_" + APP_VERSION);
         String authToken = authToken();
         if (authToken != null) {
             hashMap.put("auth_token", authToken);
@@ -2390,7 +2389,7 @@ public class KoeSession {
 
     private String getAccountBalance() {
         HashMap hashMap = new HashMap();
-        hashMap.put("version", "android_3.9.101");
+        hashMap.put("version", "android_" + APP_VERSION);
         String authToken = authToken();
         if (authToken != null) {
             hashMap.put("auth_token", authToken);
@@ -2536,7 +2535,7 @@ public class KoeSession {
 
     private String getCallRecords() {
         HashMap hashMap = new HashMap();
-        hashMap.put("version", "android_3.9.101");
+        hashMap.put("version", "android_" + APP_VERSION);
         String authToken = authToken();
         if (authToken != null) {
             hashMap.put("auth_token", authToken);
@@ -3355,7 +3354,7 @@ public class KoeSession {
     private String getGiftHistory() {
         JSONArray jSONArray = null;
         HashMap hashMap = new HashMap();
-        hashMap.put("version", "android_3.9.101");
+        hashMap.put("version", "android_" + APP_VERSION);
         String authToken = authToken();
         if (authToken != null) {
             hashMap.put("auth_token", authToken);
@@ -3553,7 +3552,7 @@ public class KoeSession {
 
     private String getMyCallRecords() {
         HashMap hashMap = new HashMap();
-        hashMap.put("version", "android_3.9.101");
+        hashMap.put("version", "android_" + APP_VERSION);
         String authToken = authToken();
         if (authToken != null) {
             hashMap.put("auth_token", authToken);
@@ -3932,7 +3931,7 @@ public class KoeSession {
         JSONArray jSONArray = null;
         HashMap hashMap = new HashMap();
         hashMap.put("page", "1");
-        hashMap.put("version", "android_3.9.101");
+        hashMap.put("version", "android_" + APP_VERSION);
         String authToken = authToken();
         if (authToken != null) {
             hashMap.put("auth_token", authToken);
@@ -4271,7 +4270,7 @@ public class KoeSession {
     private String getTimelineComments(String postId, String page) throws org.json.JSONException {
         Map<String, String> q = new HashMap<>();
         q.put("page", (page == null || page.length() == 0) ? "1" : page);
-        q.put("version", "android_3.9.101");
+        q.put("version", "android_" + APP_VERSION);
         String at = authToken();
         if (at != null) {
             q.put("auth_token", at);
@@ -4354,7 +4353,7 @@ public class KoeSession {
     private String getTimelineLikers(String str) {
         HashMap<String, String> hashMap = new HashMap<String, String>();
         hashMap.put("page", "1");
-        hashMap.put("version", "android_3.9.101");
+        hashMap.put("version", "android_" + APP_VERSION);
         String authToken = authToken();
         if (authToken != null) {
             hashMap.put("auth_token", authToken);
@@ -4378,7 +4377,7 @@ public class KoeSession {
                     dbgLog(nowStr() + "  [LIKERS] post=" + str + " api1 HTTP " + r2.status + " users=0 body=" + truncate(redactLog(r2.body != null ? r2.body.toString() : "(null)"), 300));
                     // 投稿詳細に liked_users / liked_user_ids が同梱されていれば、そこから復元する
                     HashMap<String, String> q2 = new HashMap<String, String>();
-                    q2.put("version", "android_3.9.101");
+                    q2.put("version", "android_" + APP_VERSION);
                     if (authToken != null) q2.put("auth_token", authToken);
                     Resp d = http("GET", BASE_URL2 + "/api/feed_posts/" + str, q2, (Map<String, String>) null);
                     if (d.status == 200 && d.body != null) {
@@ -4581,9 +4580,45 @@ public class KoeSession {
         } catch (Exception ignore) {}
     }
 
+    /** 公式の user_settings のうち、この端末で読み書きする真偽値の設定。 */
+    private static final String[] SETTING_BOOL_KEYS = {
+            "random_match_enabled", "is_online_status_public", "is_read_receipt_public",
+            "is_my_age_public", "is_follow_list_public", "is_follower_list_public",
+            "is_friend_list_public", "timeline_image_enabled",
+            // DM の受付範囲を「カスタム」にしたときの相手の種類。公式の呼び方は
+            //   chat_permission_friends    = 声とものユーザー
+            //   chat_permission_followings = あなたがフォローしているユーザー
+            //   chat_permission_followers  = あなたをフォローしているユーザー
+            "chat_permission_friends", "chat_permission_followings", "chat_permission_followers"};
+
+    /**
+     * 数値で持つ設定。
+     * chat_permission_level: 0=全員 / 1=フォローまたは友達 / 2=友達のみ / 3=受け付けない / 4=カスタム
+     */
+    private static final String[] SETTING_INT_KEYS = {"chat_permission_level"};
+
+    private static boolean isIntSetting(String key) {
+        for (int i = 0; i < SETTING_INT_KEYS.length; i++) {
+            if (SETTING_INT_KEYS[i].equals(key)) return true;
+        }
+        return false;
+    }
+
+    /** 1/0・"1"/"0"・true/false・数値のいずれで来ても整数に直す。 */
+    private static int toInt(Object v, int fallback) {
+        if (v == null) return fallback;
+        if (v instanceof Number) return ((Number) v).intValue();
+        if (v instanceof Boolean) return ((Boolean) v).booleanValue() ? 1 : 0;
+        try {
+            return Integer.parseInt(String.valueOf(v).trim());
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+
     private String getUserSettings() {
         HashMap hashMap = new HashMap();
-        hashMap.put("version", "android_3.9.101");
+        hashMap.put("version", "android_" + APP_VERSION);
         String authToken = authToken();
         if (authToken != null) {
             hashMap.put("auth_token", authToken);
@@ -4610,9 +4645,14 @@ public class KoeSession {
                 optJSONObject3 = optJSONObject2;
             }
             JSONObject jSONObject = new JSONObject();
-            for (String str : new String[]{"random_match_enabled", "is_online_status_public", "is_read_receipt_public", "is_my_age_public", "is_follow_list_public", "is_follower_list_public", "is_friend_list_public", "timeline_image_enabled"}) {
+            for (String str : SETTING_BOOL_KEYS) {
                 if (optJSONObject3.has(str)) {
                     jSONObject.put(str, truthy(optJSONObject3.opt(str)));
+                }
+            }
+            for (String str : SETTING_INT_KEYS) {
+                if (optJSONObject3.has(str)) {
+                    jSONObject.put(str, toInt(optJSONObject3.opt(str), 0));
                 }
             }
             // 注意: /api/account/session を叩くとトークンが更新されて既存セッションが無効になる(403 ユーザーが見つかりません)。
@@ -4621,8 +4661,11 @@ public class KoeSession {
             if (jSONObject.length() == 0) {
                 try {
                     android.content.SharedPreferences sp = appContext.getSharedPreferences("koe_usersettings", 0);
-                    for (String k : new String[]{"random_match_enabled", "is_online_status_public", "is_read_receipt_public", "is_my_age_public", "is_follow_list_public", "is_follower_list_public", "is_friend_list_public", "timeline_image_enabled"}) {
+                    for (String k : SETTING_BOOL_KEYS) {
                         if (sp.contains(k)) jSONObject.put(k, sp.getBoolean(k, false));
+                    }
+                    for (String k : SETTING_INT_KEYS) {
+                        if (sp.contains(k)) jSONObject.put(k, sp.getInt(k, 0));
                     }
                     jSONObject.put("_local", true);
                 } catch (Exception ig) {
@@ -5221,7 +5264,7 @@ public class KoeSession {
     private String joinCallByRoomId(String roomId) {
         try {
             HashMap<String, String> q = new HashMap<String, String>();
-            q.put("version", APP_VERSION);
+            q.put("version", "android_" + APP_VERSION);
             String at = authToken();
             if (at != null) q.put("auth_token", at);
             Resp resp = http("GET", BASE_URL2 + "/api/rooms/" + roomId, q, (Map<String, String>) null);
@@ -6362,7 +6405,7 @@ public class KoeSession {
             str2 = "";
         }
         hashMap.put("text", str2);
-        hashMap.put("version", "android_3.9.101");
+        hashMap.put("version", "android_" + APP_VERSION);
         String authToken = authToken();
         if (authToken != null) {
             hashMap.put("auth_token", authToken);
@@ -6621,7 +6664,7 @@ public class KoeSession {
         try {
             if (roomId != null && roomId.length() > 0 && !roomId.equals("null") && !roomId.equals("0")) {
                 HashMap<String, String> q = new HashMap<String, String>();
-                q.put("version", APP_VERSION);
+                q.put("version", "android_" + APP_VERSION);
                 String at = authToken();
                 if (at != null) q.put("auth_token", at);
                 Resp r1 = http("GET", BASE_URL2 + "/api/rooms/" + roomId, q, (Map<String, String>) null);
@@ -6774,9 +6817,12 @@ public class KoeSession {
             }
         }
         if (!hashMap.containsKey("version")) {
-            // cheering_talk 系は公式アプリと同じ "android_3.9.101" 形式でないと
-            // パラメータ異常値で弾かれる。該当エンドポイントのみ厳密版を送る。
-            hashMap.put("version", (str2 != null && str2.startsWith("/api/cheering_talk/")) ? ("android_" + APP_VERSION) : APP_VERSION);
+            // 公式はパラメータの version を必ず "android_3.9.101" の形で送る。
+            // (OkHttpSingleton の urlForGetRequest / generateFormBuilder が全リクエストに付け、
+            //  Retrofit 側の各 API も同じ文字列を渡している。素の "3.9.101" は設定ファイルの
+            //  URL "config/release/3.9.101.json" にしか使っていない。)
+            // こちらも公式に合わせて全窓口を android_ 付きで統一する。
+            hashMap.put("version", "android_" + APP_VERSION);
         }
         String authToken = authToken();
         if (authToken != null && !hashMap.containsKey("auth_token")) {
@@ -7640,7 +7686,7 @@ public class KoeSession {
         hashMap.put("uid", String.valueOf(userId()));
         hashMap.put("text_message", str3);
         hashMap.put("message_type", "1");
-        hashMap.put("version", "android_3.9.101");
+        hashMap.put("version", "android_" + APP_VERSION);
         String authToken = authToken();
         if (authToken != null) {
             hashMap.put("auth_token", authToken);
@@ -7682,7 +7728,7 @@ public class KoeSession {
             // 旧実装は image_file_path で送っており、サーバー側で画像が付かなかった。
             hashMap.put("binary_file_path", bareName);
             hashMap.put("md5", md5);
-            hashMap.put("version", "android_3.9.101");
+            hashMap.put("version", "android_" + APP_VERSION);
             String authToken = authToken();
             if (authToken != null) hashMap.put("auth_token", authToken);
             return okResultStatus(http("POST", "https://api.meetscom.com/api/chat/messages", (Map<String, String>) null, hashMap));
@@ -7718,7 +7764,7 @@ public class KoeSession {
             hashMap.put("message_type", "3");
             hashMap.put("binary_file_path", bareName);
             hashMap.put("play_time", (playTimeSec == null || playTimeSec.length() == 0) ? "0" : playTimeSec);
-            hashMap.put("version", "android_3.9.101");
+            hashMap.put("version", "android_" + APP_VERSION);
             String authToken = authToken();
             if (authToken != null) hashMap.put("auth_token", authToken);
             Resp r = http("POST", "https://api.meetscom.com/api/chat/messages", (Map<String, String>) null, hashMap);
@@ -7783,7 +7829,7 @@ public class KoeSession {
                     hashMap.put(next, String.valueOf(opt));
                 }
             }
-            hashMap.put("version", "android_3.9.101");
+            hashMap.put("version", "android_" + APP_VERSION);
             String authToken = authToken();
             if (authToken != null) {
                 hashMap.put("auth_token", authToken);
@@ -7797,7 +7843,12 @@ public class KoeSession {
                 try {
                     android.content.SharedPreferences.Editor ed = appContext.getSharedPreferences("koe_usersettings", 0).edit();
                     Iterator<String> ks = jSONObject.keys();
-                    while (ks.hasNext()) { String k = ks.next(); ed.putBoolean(k, truthy(jSONObject.opt(k))); }
+                    while (ks.hasNext()) {
+                        String k = ks.next();
+                        Object v = jSONObject.opt(k);
+                        if (isIntSetting(k)) ed.putInt(k, toInt(v, 0));
+                        else ed.putBoolean(k, truthy(v));
+                    }
                     ed.apply();
                 } catch (Exception ig) {
                 }
@@ -7832,7 +7883,7 @@ public class KoeSession {
         }
         hashMap.put("birthday", str5);
         hashMap.put("device_uid", deviceUid());
-        hashMap.put("version", APP_VERSION);
+        hashMap.put("version", "android_" + APP_VERSION);
         hashMap.put("etat2", "");
         hashMap.put("vt2", "");
         hashMap.put("gt2", "");
@@ -9195,6 +9246,17 @@ public class KoeSession {
         }
     }
 
+    /**
+     * 公式の room_data へ書く。
+     * ここは「JSON をそのまま置く」場所ではない。実際の枠を見ると値は
+     *   "{\n  \"args\" : {\n    \"user_id\" : 5105309,\n    \"volume\" : 1\n  },\n  \"command\" : 2\n}"
+     * のように、JSON を文字列にしたものが 1 本入っている。
+     * オブジェクトのまま置くと公式アプリ側の JSON.parse が通らず、合図が届かない。
+     */
+    private String rtdbPutRoomData(String roomId, JSONObject body) {
+        return rtdbPut("api/rooms/" + roomId + "/room_data.json", JSONObject.quote(body.toString()));
+    }
+
     // 公式の RoomData: {"command":<1..6>,"args":{...}}
     //   3=発言を依頼 / 4=承諾 / 5=辞退  args={"requestee_id":<uid>}
     private String roomDataSend(String roomId, String command, String requesteeId) {
@@ -9204,7 +9266,7 @@ public class KoeSession {
             long uid = Long.parseLong(requesteeId);
             JSONObject body = new JSONObject().put("command", cmd)
                     .put("args", new JSONObject().put("requestee_id", uid));
-            return rtdbPut("api/rooms/" + roomId + "/room_data.json", body.toString());
+            return rtdbPutRoomData(roomId, body);
         } catch (Exception e) {
             return errJson(e);
         }
@@ -9213,7 +9275,7 @@ public class KoeSession {
     /**
      * 自分のミュート状態を公式アプリと同じ場所に書く(公式 TalkRoomViewModel.setMute 相当)。
      *   api/rooms/{id}/mute_status/{自分} = 1/0 … 公式クライアントはこれでミュートアイコンを出す
-     *   ミュート時のみ room_data に Volume コマンド(2) {user_id, volume:0} … 公式のマイクレベル表示を消す
+     *   room_data に Volume コマンド(2) {user_id, volume:0|1} … 公式のマイクレベル表示を消す/戻す
      * 音声そのものの停止は SkyWay 側(publication.disable)で行い、ここは表示用の合図だけ。
      */
     private String roomMuteStatus(String roomId, boolean muted) {
@@ -9221,13 +9283,13 @@ public class KoeSession {
         long me = userId();
         if (me <= 0) return jsonErr("user_id不明");
         String r = rtdbPut("api/rooms/" + roomId + "/mute_status/" + me + ".json", muted ? "1" : "0");
-        if (muted) {
-            try {
-                JSONObject body = new JSONObject().put("command", 2)
-                        .put("args", new JSONObject().put("user_id", me).put("volume", 0));
-                rtdbPut("api/rooms/" + roomId + "/room_data.json", body.toString());
-            } catch (Exception ignore) {
-            }
+        try {
+            // ミュートで 0、解除で 1。解除の合図を出さないと、公式アプリ側では
+            // マイクレベルが 0 のまま残る(実際の枠でも解除中は volume 1 が入っている)。
+            JSONObject body = new JSONObject().put("command", 2)
+                    .put("args", new JSONObject().put("user_id", me).put("volume", muted ? 0 : 1));
+            rtdbPutRoomData(roomId, body);
+        } catch (Exception ignore) {
         }
         return r;
     }
@@ -9918,11 +9980,13 @@ public class KoeSession {
         } catch (Exception e) { return errJson(e); }
     }
 
-    private String sendSkywayLog(String logJson) {
+    /** 公式 BenchmarkApi.sendSkywayLogs: POST /api/skyway/logs (FORM message, connection_id, system_version, app_version)。 */
+    private String sendSkywayLog(String message, String connectionId) {
         HashMap<String, String> fields = new HashMap<String, String>();
-        if (logJson != null && logJson.length() > 0) {
-            fields.put("log", logJson);
-        }
+        fields.put("message", message == null ? "" : message);
+        fields.put("connection_id", connectionId == null ? "" : connectionId);
+        fields.put("system_version", String.valueOf(android.os.Build.VERSION.SDK_INT));
+        fields.put("app_version", APP_VERSION);
         return okResult(request("POST", "/api/skyway/logs", (Map<String, String>) null, fields));
     }
 
@@ -9950,11 +10014,10 @@ public class KoeSession {
         }
     }
 
-    private String sendTiktokEventEntry(String eventType) {
+    /** 公式 TikTokCampaignApi.requestEntry: POST /api/tiktok_event/entry (FORM tiktok_user_name)。 */
+    private String sendTiktokEventEntry(String tiktokUserName) {
         HashMap<String, String> fields = new HashMap<String, String>();
-        if (eventType != null && eventType.length() > 0) {
-            fields.put("event", eventType);
-        }
+        fields.put("tiktok_user_name", tiktokUserName == null ? "" : tiktokUserName);
         return okResult(request("POST", "/api/tiktok_event/entry", (Map<String, String>) null, fields));
     }
 
@@ -10344,7 +10407,7 @@ public class KoeSession {
 
     private String toggleRecordLike(String str, boolean z) {
         HashMap hashMap = new HashMap();
-        hashMap.put("version", "android_3.9.101");
+        hashMap.put("version", "android_" + APP_VERSION);
         String authToken = authToken();
         if (authToken != null) {
             hashMap.put("auth_token", authToken);
@@ -10845,6 +10908,9 @@ public class KoeSession {
     private static final String N_NEARZERO = dx("j+6PhNr1zLOL0bfXZA==");
     private static final String N_NAMECLUSTER = dx("jsSnh/H/zLOe16bmsaLvR5GiqtiYqEBnzcPuXcyzvHtyg+u6hOHRzLOX2pLssr7S");
     private static final String N_CORE3 = dx("gtOkhfvXyqy70bfFs6Lbisqb0bG+BYjVj4bU0cuKug==");
+    private static final String N_ZWSP = dx("jciHhPnzzLOb2pDgt6rqjPWF0bG20P3Tzs/4l62g1ZaRgtOkge7fyYWH0bf3t6rEjPWr0bK5HojXvoHt18yxm9G01Leo3orvsduxjR8=");
+    private static final String N_ZWSP1 = dx("jciHhPnzzLOb2pDgt6rqjPWF0bG20P3Tzs/4l66+1oWBiNW9ge7XzLOW0bfvt6np");
+    private static final String N_NAMEPAIR = dx("jsSnh/H/zLOe16bmsaLvR5GiqtiYqEBnzcPuXcyzvHtyg+u6hOHR");
 
     private static final double BOT_AUTO_SCORE = 6.0;
     private static final double BOT_MARK_SCORE = 3.0;
@@ -10924,22 +10990,68 @@ public class KoeSession {
         return false;
     }
 
-    // 直近 windowMs 以内の投稿件数。1回の取得(先頭ページ)だけで数える。
-    private int botRecentPosts(long uid, long windowMs) {
+    /* ---- 本文に混ぜられた「目に見えない文字」 ----
+       ゼロ幅スペース(U+200B)や方向制御(U+202A〜202E)などは画面に何も表示されない。
+       これを一文字ずつの間に挟むと、見た目は普通の文のまま NG ワードや通報の文字列照合だけを
+       すり抜けられるので、業者アカウントがよく使う。
+       絵文字の異体字セレクタ(U+FE0E / U+FE0F)は正当な使い方なので数に入れない。 */
+    private static boolean isInvisibleChar(char c) {
+        return c == '\u00AD' || c == '\u061C' || c == '\u180E' || c == '\uFEFF'
+                || (c >= '\u200B' && c <= '\u200F')
+                || (c >= '\u202A' && c <= '\u202E')
+                || (c >= '\u2060' && c <= '\u2064')
+                || (c >= '\u2066' && c <= '\u206F');
+    }
+
+    /** 目に見えない文字を取り除く。NG ワードや勧誘語句の照合はこの後の文字列で行う。 */
+    static String stripInvisible(String s) {
+        if (s == null || s.length() == 0) return "";
+        StringBuilder sb = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (!isInvisibleChar(c)) sb.append(c);
+        }
+        return sb.toString();
+    }
+
+    /** 目に見えない文字が何個混ざっているか。 */
+    static int countInvisible(String s) {
+        if (s == null) return 0;
+        int n = 0;
+        for (int i = 0; i < s.length(); i++) if (isInvisibleChar(s.charAt(i))) n++;
+        return n;
+    }
+
+    /**
+     * 直近の投稿をAPIから取り直して、件数と「目に見えない文字」の混入を数える。
+     * 画面(WebView)から渡された値は一切使わないので、表示を書き換えても偽装できない。
+     * 返す形: {"recent":直近windowMs以内の件数, "invis_hits":混入していた投稿数,
+     *          "invis_max":1投稿での最多混入数, "invis_ids":[根拠にした投稿ID…]}
+     */
+    private JSONObject botPostStats(long uid, long windowMs) {
+        JSONObject out = new JSONObject();
         try {
+            out.put("recent", -1).put("invis_hits", -1).put("invis_max", 0).put("invis_ids", new JSONArray());
             JSONObject r = new JSONObject(getUserPosts(String.valueOf(uid), ""));
             JSONArray ps = r.optJSONArray("posts");
-            if (ps == null) return -1;
+            if (ps == null) return out;
             long now = System.currentTimeMillis();
-            int n = 0;
+            int recent = 0, hits = 0, max = 0;
+            JSONArray ids = new JSONArray();
             for (int i = 0; i < ps.length(); i++) {
-                JSONObject p = ps.optJSONObject(i);
-                if (p == null) continue;
-                long t = botParseTime(p.optString("created_at", ""));
-                if (t > 0 && now - t <= windowMs) n++;
+                JSONObject post = ps.optJSONObject(i);
+                if (post == null) continue;
+                long t = botParseTime(post.optString("created_at", ""));
+                if (t > 0 && now - t <= windowMs) recent++;
+                int n = countInvisible(firstStr(post, "description", "decodedDescription", "text", "comment", "body"));
+                if (n <= 0) continue;
+                hits++;
+                if (n > max) max = n;
+                if (ids.length() < 10) ids.put(post.opt("id"));
             }
-            return n;
-        } catch (Exception e) { return -1; }
+            out.put("recent", recent).put("invis_hits", hits).put("invis_max", max).put("invis_ids", ids);
+        } catch (Exception e) {}
+        return out;
     }
 
     private static long botParseTime(String s) {
@@ -10999,7 +11111,9 @@ public class KoeSession {
             // 「ほぼ 0」も同じ扱い(1〜2 件だけ交流を作って検知を抜ける量産アカウントがいるため)
             boolean a2near = !a2 && fol >= 0 && fee >= 0 && fr >= 0 && liked >= 0 && fol <= 2 && fee <= 2 && fr == 0 && liked <= 2;
 
-            String cm = u.isNull("comment") ? "" : u.optString("comment", "");
+            /* 見えない文字を先に取り除いてから中身を見る。
+               「ラ　イ　ン」の間にゼロ幅スペースを挟むだけで語句の照合をすり抜けられるため。 */
+            String cm = stripInvisible(u.isNull("comment") ? "" : u.optString("comment", ""));
             boolean a3 = (cm.trim().length() == 0);
             // 自己紹介があっても、勧誘・外部誘導の語句なら「怪しい自己紹介」として同等に扱う
             boolean a3bio = !a3 && cm.toLowerCase(Locale.ROOT).replaceAll("\\s+", "").matches("(?s).*" + R_BIO + ".*");
@@ -11007,7 +11121,7 @@ public class KoeSession {
             int av = (u.has("age_verification_status") && !u.isNull("age_verification_status")) ? u.optInt("age_verification_status", -1) : -1;
             boolean a4 = (av == 0);
 
-            String nm = u.optString("name", "");
+            String nm = stripInvisible(u.optString("name", ""));
             boolean nameHit = nm.matches(R_NAME) && !nm.matches(R_DIGIT);
             String feat = u.isNull("feature") ? "" : u.optString("feature", "");
             boolean near = botKnownNear(uid);
@@ -11019,10 +11133,28 @@ public class KoeSession {
             int core = (a1 ? 1 : 0) + ((a2 || a2near) ? 1 : 0) + ((a3 || a3bio) ? 1 : 0) + (a4 ? 1 : 0);
             if (nameHit) botRememberNameHit(uid);
             int nameCluster = nameHit ? botNameHitNeighbors(uid) : 0;
+
+            /* 申請の判定をするときだけ、投稿を API から取り直して数える。
+               画面から渡された値は使わないので、WebView を書き換えても偽装できない。 */
+            int recent = -1, invisHits = -1, invisMax = 0;
+            JSONArray invisIds = new JSONArray();
+            if (allowPostFetch) {
+                JSONObject ps = botPostStats(uid, 3600000L);
+                recent = ps.optInt("recent", -1);
+                invisHits = ps.optInt("invis_hits", -1);
+                invisMax = ps.optInt("invis_max", 0);
+                if (ps.optJSONArray("invis_ids") != null) invisIds = ps.optJSONArray("invis_ids");
+            }
+            /* 見えない文字を「複数の投稿に」「1投稿あたり3個以上」混ぜている状態。
+               実際のタイムライン 593 件で数えたところ、普通の利用者は多くても 1 投稿に 1〜2 個
+               (絵文字の付随文字など)で、業者は 1 投稿に 39〜41 個・全投稿に混入していた。 */
+            boolean zwEvade = (invisHits >= 2 && invisMax >= 3);
+
             boolean hard = core >= 4
                     || (core >= 3 && (nameHit || near || knownFeat || a3bio))
                     || (core >= 2 && nameHit) // 「単語+3桁」の名前 + 量産型の特徴 2 つ
-                    || (nameHit && nameCluster >= 2); // 同型の名前が ID 近接で複数
+                    || (nameHit && nameCluster >= 2) // 同型の名前が ID 近接で複数
+                    || zwEvade; // 文字を隠して照合をすり抜けている
             if (hard) {
                 rs.put(genIcon ? N_ICON : (noIcon ? N_NOICON : N_CORE3));
                 if (a2 && a3 && a4) rs.put(N_ZERO);
@@ -11044,7 +11176,13 @@ public class KoeSession {
             ev.put("feature", feat.length() > 120 ? feat.substring(0, 120) : feat);
             if (hard && knownFeat) { sc += 3; rs.put(N_FEAT); }
             if (hard && nameCluster >= 2) { sc += 3; rs.put(N_NAMECLUSTER); }
+            /* 2 つでも「同型の名前が ID 近接」は十分に不自然なので加点する。
+               (以前は 3 つ以上そろわないと加点されず、先に見つけた 1 人目が取りこぼされていた) */
+            else if (hard && nameCluster == 1) { sc += 2; rs.put(N_NAMEPAIR); }
             ev.put("name_cluster", nameCluster);
+            if (zwEvade) { sc += 4; rs.put(N_ZWSP); }
+            else if (invisMax >= 3) { sc += 2; rs.put(N_ZWSP1); }
+            ev.put("invis_hits", invisHits).put("invis_max", invisMax).put("invis_post_ids", invisIds);
             boolean rm = truthy(u.opt("random_match_enabled"));
             JSONObject st = u.optJSONObject("settings");
             if (!rm && st != null) rm = truthy(st.opt("random_match_enabled"));
@@ -11053,13 +11191,8 @@ public class KoeSession {
             String ls = u.optString("login_status_with_unit", "");
             ev.put("login_status", ls);
             if (ls.indexOf(L_ON1) >= 0 || ls.indexOf(L_ON2) >= 0 || ls.indexOf(L_ON3) >= 0) { sc += 0.5; rs.put(N_LOGIN); }
-            // B5 は通信が増えるので、結果を左右するとき(3.0〜6.0)だけ数えに行く
-            int recent = -1;
-            if (hard && allowPostFetch && sc >= BOT_MARK_SCORE && sc < BOT_AUTO_SCORE) {
-                recent = botRecentPosts(uid, 3600000L);
-                ev.put("posts_last_hour", recent);
-                if (recent >= 5) { sc += 2; rs.put(N_POST + recent + N_POST2); }
-            }
+            ev.put("posts_last_hour", recent);
+            if (hard && recent >= 5) { sc += 2; rs.put(N_POST + recent + N_POST2); }
 
             String level = hard ? (sc >= BOT_AUTO_SCORE ? "high" : (sc >= BOT_MARK_SCORE ? "mid" : "")) : "";
             ev.put("score", sc).put("level", level).put("checked_at", nowStr()).put("checked_by", "KoeTomo+ auto");
@@ -11074,6 +11207,22 @@ public class KoeSession {
     // 自動申請の暴走防止(端末内・ネイティブ側で管理)。
     //  ・同一 user_id は生涯1回まで  ・8秒間隔  ・1時間30件 / 1日150件  ・起動から10秒は動かさない
     //  (作者指示「業者は発見次第自動で申請」。サーバー側にも流量制限と再検証があるので端末側は暴走防止だけ)
+    /* 判定の規則を変えたら「確認済み」を一度だけ捨てる。
+       そうしないと、前の規則で見送った相手を最長 7 日間もう一度見に行かず、
+       規則を厳しくしても手元では何も変わらない。 */
+    private static final int BOT_RULES_VERSION = 2;
+
+    private void botRulesMigrate() {
+        try {
+            if (this.prefs.getInt("bot_rules_version", 0) == BOT_RULES_VERSION) return;
+            this.prefs.edit()
+                    .putInt("bot_rules_version", BOT_RULES_VERSION)
+                    .remove("bot_auto_seen")
+                    .apply();
+            dbgLog(nowStr() + "  [BOTAUTO] 判定規則を更新したので確認済みの記録を消しました v=" + BOT_RULES_VERSION);
+        } catch (Exception e) {}
+    }
+
     private String botAutoGate(long uid) {
         try {
             if (System.currentTimeMillis() - BOT_APP_START_MS < 10000) return "起動直後は判定しません";
@@ -11114,6 +11263,7 @@ public class KoeSession {
         try { uid = Long.parseLong(String.valueOf(target).trim()); } catch (Exception e) { return jsonErr("対象不明"); }
         try {
             if (uid == userId()) return new JSONObject().put("ok", true).put("applied", false).put("skip", "self").toString();
+            botRulesMigrate();
             String gate = botAutoGate(uid);
             if (gate.length() > 0) return new JSONObject().put("ok", true).put("applied", false).put("skip", gate).toString();
             // 直近7日に見た相手は取り直さない(通信とキャッシュの節約)
@@ -11179,13 +11329,16 @@ public class KoeSession {
         JSONArray rs = ev.optJSONArray("reasons");
         JSONObject e = ev.optJSONObject("ev") != null ? ev.optJSONObject("ev") : new JSONObject();
         boolean cluster = e.optInt("name_cluster", 0) >= 2;
+        /* 見えない文字での照合すり抜けは、サーバーが同じ投稿を取り直せば必ず同じ個数を数えられる。
+           人違いのしようがない材料なので、これも「確定」の根拠として扱う。 */
+        boolean zwEvade = e.optInt("invis_hits", 0) >= 2 && e.optInt("invis_max", 0) >= 3;
         boolean nearKnown = false, sameFeat = false;
         for (int i = 0; rs != null && i < rs.length(); i++) {
             String r = rs.optString(i);
             if (r.equals(N_NEAR)) nearKnown = true;
             if (r.equals(N_FEAT)) sameFeat = true;
         }
-        String confidence = (cluster || nearKnown || sameFeat) && sc >= BOT_AUTO_SCORE ? "confirmed" : "high";
+        String confidence = (cluster || nearKnown || sameFeat || zwEvade) && sc >= BOT_AUTO_SCORE ? "confirmed" : "high";
         JSONArray neighbors = new JSONArray();
         try {
             JSONArray a = botPrefArr("bot_namehits");
@@ -11193,8 +11346,12 @@ public class KoeSession {
             a = botPrefArr("bot_cands");
             for (int i = 0; i < a.length(); i++) { JSONObject o = a.optJSONObject(i); long v = o == null ? 0 : o.optLong("u", 0); if (v != 0 && v != uid && Math.abs(v - uid) <= 20) neighbors.put(v); }
         } catch (Exception ig) {}
-        e.put("verify", new JSONObject().put("target_uid", uid).put("neighbor_uids", neighbors).put("checked_at_ms", System.currentTimeMillis())
-                .put("rules", "core>=4 | core>=3+aux | core>=2+namepattern | namepattern+cluster>=2"));
+        /* サーバーが自分で取り直して同じ結論に辿り着けるように、材料と規則を添える。
+           invis_post_ids はその投稿を取り直して「見えない文字」を数え直せば検証できる。 */
+        e.put("verify", new JSONObject().put("target_uid", uid).put("neighbor_uids", neighbors)
+                .put("checked_at_ms", System.currentTimeMillis())
+                .put("invis_post_ids", e.optJSONArray("invis_post_ids") == null ? new JSONArray() : e.optJSONArray("invis_post_ids"))
+                .put("rules", "core>=4 | core>=3+aux | core>=2+namepattern | namepattern+cluster>=2 | invisible>=2posts&>=3chars"));
         StringBuilder detail = new StringBuilder("[KoeTomo+ 業者自動判定(自動申請) score=" + sc + (confidence.equals("confirmed") ? " 確定" : "") + "] ");
         for (int i = 0; rs != null && i < rs.length(); i++) { if (i > 0) detail.append("・"); detail.append(rs.optString(i)); }
         JSONObject body = new JSONObject();
@@ -11415,7 +11572,7 @@ public class KoeSession {
             }
             hashMap.put("reason", str);
             hashMap.put("uid", String.valueOf(userId));
-            hashMap.put("version", "android_3.9.101");
+            hashMap.put("version", "android_" + APP_VERSION);
             String authToken = authToken();
             if (authToken != null) {
                 hashMap.put("auth_token", authToken);
@@ -12308,7 +12465,7 @@ public class KoeSession {
                     return getOfficialLinks();
                 }
                 if (str.equals("send_skyway_log")) {
-                    return sendSkywayLog(jSONArray.optString(0, ""));
+                    return sendSkywayLog(jSONArray.optString(0, ""), jSONArray.optString(1, ""));
                 }
                 if (str.equals("get_tiktok_event_info")) {
                     return getTiktokEventInfo();
