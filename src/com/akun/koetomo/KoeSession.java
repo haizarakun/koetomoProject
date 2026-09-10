@@ -10912,6 +10912,8 @@ public class KoeSession {
     private static final String N_ZWSP1 = dx("jciHhPnzzLOb2pDgt6rqjPWF0bG20P3Tzs/4l66+1oWBiNW9ge7XzLOW0bfvt6np");
     private static final String N_NAMEPAIR = dx("jsSnh/H/zLOe16bmsaLvR5GiqtiYqEBnzcPuXcyzvHtyg+u6hOHR");
 
+    private static final int ZW_MIN_POSTS = 2, ZW_MIN_PER_POST = 3;
+
     private static final double BOT_AUTO_SCORE = 6.0;
     private static final double BOT_MARK_SCORE = 3.0;
 
@@ -10990,10 +10992,8 @@ public class KoeSession {
         return false;
     }
 
-    /* ---- 本文に混ぜられた「目に見えない文字」 ----
-       ゼロ幅スペース(U+200B)や方向制御(U+202A〜202E)などは画面に何も表示されない。
-       これを一文字ずつの間に挟むと、見た目は普通の文のまま NG ワードや通報の文字列照合だけを
-       すり抜けられるので、業者アカウントがよく使う。
+    /* ---- 画面に表示されない文字 ----
+       幅が 0 で見えない文字。文字列を突き合わせる前に取り除く。
        絵文字の異体字セレクタ(U+FE0E / U+FE0F)は正当な使い方なので数に入れない。 */
     private static boolean isInvisibleChar(char c) {
         return c == '\u00AD' || c == '\u061C' || c == '\u180E' || c == '\uFEFF'
@@ -11111,8 +11111,7 @@ public class KoeSession {
             // 「ほぼ 0」も同じ扱い(1〜2 件だけ交流を作って検知を抜ける量産アカウントがいるため)
             boolean a2near = !a2 && fol >= 0 && fee >= 0 && fr >= 0 && liked >= 0 && fol <= 2 && fee <= 2 && fr == 0 && liked <= 2;
 
-            /* 見えない文字を先に取り除いてから中身を見る。
-               「ラ　イ　ン」の間にゼロ幅スペースを挟むだけで語句の照合をすり抜けられるため。 */
+            // 見えない文字を取り除いてから中身を見る
             String cm = stripInvisible(u.isNull("comment") ? "" : u.optString("comment", ""));
             boolean a3 = (cm.trim().length() == 0);
             // 自己紹介があっても、勧誘・外部誘導の語句なら「怪しい自己紹介」として同等に扱う
@@ -11145,16 +11144,13 @@ public class KoeSession {
                 invisMax = ps.optInt("invis_max", 0);
                 if (ps.optJSONArray("invis_ids") != null) invisIds = ps.optJSONArray("invis_ids");
             }
-            /* 見えない文字を「複数の投稿に」「1投稿あたり3個以上」混ぜている状態。
-               実際のタイムライン 593 件で数えたところ、普通の利用者は多くても 1 投稿に 1〜2 個
-               (絵文字の付随文字など)で、業者は 1 投稿に 39〜41 個・全投稿に混入していた。 */
-            boolean zwEvade = (invisHits >= 2 && invisMax >= 3);
+            boolean zwEvade = (invisHits >= ZW_MIN_POSTS && invisMax >= ZW_MIN_PER_POST);
 
             boolean hard = core >= 4
                     || (core >= 3 && (nameHit || near || knownFeat || a3bio))
                     || (core >= 2 && nameHit) // 「単語+3桁」の名前 + 量産型の特徴 2 つ
                     || (nameHit && nameCluster >= 2) // 同型の名前が ID 近接で複数
-                    || zwEvade; // 文字を隠して照合をすり抜けている
+                    || zwEvade;
             if (hard) {
                 rs.put(genIcon ? N_ICON : (noIcon ? N_NOICON : N_CORE3));
                 if (a2 && a3 && a4) rs.put(N_ZERO);
@@ -11329,9 +11325,7 @@ public class KoeSession {
         JSONArray rs = ev.optJSONArray("reasons");
         JSONObject e = ev.optJSONObject("ev") != null ? ev.optJSONObject("ev") : new JSONObject();
         boolean cluster = e.optInt("name_cluster", 0) >= 2;
-        /* 見えない文字での照合すり抜けは、サーバーが同じ投稿を取り直せば必ず同じ個数を数えられる。
-           人違いのしようがない材料なので、これも「確定」の根拠として扱う。 */
-        boolean zwEvade = e.optInt("invis_hits", 0) >= 2 && e.optInt("invis_max", 0) >= 3;
+        boolean zwEvade = e.optInt("invis_hits", 0) >= ZW_MIN_POSTS && e.optInt("invis_max", 0) >= ZW_MIN_PER_POST;
         boolean nearKnown = false, sameFeat = false;
         for (int i = 0; rs != null && i < rs.length(); i++) {
             String r = rs.optString(i);
