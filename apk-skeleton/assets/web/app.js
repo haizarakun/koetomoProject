@@ -1335,6 +1335,12 @@ function __koeAfterRelogin() {
 }
 async function handleSessionExpired() {
   if (window.__reloggingIn) return;
+  // 立て続けの自動再ログインを止める。1 分に 1 回まで。
+  // （サーバーの片方だけが 403 を返しているときに、何度もログインし直して
+  //   かえって全部使えなくなることがあったため）
+  var __now = Date.now();
+  if (__now - (window.__koeLastRelogin || 0) < 60000) return;
+  window.__koeLastRelogin = __now;
   if (document.getElementById("sessionExpiredModal")) return;
   var __ls = document.getElementById("loginScreen");
   if (__ls && getComputedStyle(__ls).display !== "none") return;
@@ -4727,6 +4733,9 @@ function showPage(name) {
                     })());
 }
 function openComposeModal() {
+  // 画像や音声を上げるための下ごしらえを、書いている間に済ませておく。
+  // 送信ボタンを押してからだと、そのぶんそのまま待ち時間になる。
+  try { callApi("warm_upload"); } catch (e) {}
   ((document.getElementById("composeText").value = (function () {
     try {
       return localStorage.getItem("koe_draft") || "";
@@ -4765,8 +4774,10 @@ function loadComposeImage(file) {
     ((img.onload = () => {
       let w = img.width,
         h = img.height;
-      if (w > 1280 || h > 1280) {
-        const r = Math.min(1280 / w, 1280 / h);
+      // 端末側はこれ以上の大きさでは上げないので、ここで同じ大きさまで縮めておく。
+      // 大きいまま渡すとアプリと画面の間のやり取りだけで時間がかかる。
+      if (w > 900 || h > 900) {
+        const r = Math.min(900 / w, 900 / h);
         ((w = Math.round(w * r)), (h = Math.round(h * r)));
       }
       const canvas = document.createElement("canvas");
@@ -4774,9 +4785,9 @@ function loadComposeImage(file) {
         (canvas.height = h),
         canvas.getContext("2d").drawImage(img, 0, 0, w, h),
         /* ここは JPEG のままでよい（端末とアプリの間で渡すだけ）。
-           S3 へは端末側が必ず PNG に直してから上げる。サーバーが .webp を作るのが
-           PNG のときだけなので、.jpg で置くと本人以外に画像が出ない。 */
-        (composeImageDataUrl = canvas.toDataURL("image/jpeg", 0.88)));
+           置く時の名前は端末側が必ず .png にする。サーバーが表示用の画像を作るのが
+           .png のときだけなので、.jpg で置くと本人以外に画像が出ない。 */
+        (composeImageDataUrl = canvas.toDataURL("image/jpeg", 0.85)));
       const prev = document.getElementById("composeImagePreview");
       ((prev.src = composeImageDataUrl),
         (prev.style.display = "block"),
@@ -4909,159 +4920,280 @@ function clearComposeVoice() {
   if (pt) pt.style.display = "none";
   if (pb) pb.style.width = "0%";
 }
+// 投稿の入り口。
+// 途中で例外が出たり、通信が返って来なかったときでも、必ず投稿ボタンを押せる状態に戻す。
+// ここを戻し忘れると、以後どれだけ押しても「投稿中」のままで何も送られなくなる。
 async function submitComposePost() {
-  if (window.__koePostBusy) return;
+  var busySince = Number(window.__koePostBusyAt || 0);
+  if (window.__koePostBusy) {
+    // 前の投稿が 90 秒以上「投稿中」のままなら、詰まったものとみなして解除する
+    if (busySince && Date.now() - busySince > 90000) unlockCompose();
+    else {
+      toast("投稿を送信中です", "error");
+      return;
+    }
+  }
+  window.__koePostBusyAt = Date.now();
+  try {
+    await submitComposePostInner();
+  } catch (e) {
+    toast("投稿できませんでした: " + (e && e.message ? e.message : e), "error");
+  } finally {
+    unlockCompose();
+  }
+}
+
+// 直近に自分が出した投稿を覚えておく。
+// サーバーの索引が追いつくまで、プロフィールを開き直しても出てくるようにするため。
+// 画面を移っても残るよう、この画面の記憶(sessionStorage)にも書いておく。
+var KOE_JUST_POSTED_MS = 900000;   // 15 分
+
+function justPostedList() {
+  var arr = window.__koeJustPosted;
+  if (!arr) {
+    try {
+      arr = JSON.parse(sessionStorage.getItem("koe_just_posted") || "[]");
+    } catch (e) {
+      arr = [];
+    }
+    if (!Array.isArray(arr)) arr = [];
+    window.__koeJustPosted = arr;
+  }
+  var now = Date.now();
+  arr = arr.filter(function (x) { return x && now - x.t < KOE_JUST_POSTED_MS; });
+  window.__koeJustPosted = arr;
+  return arr;
+}
+
+function saveJustPosted(arr) {
+  window.__koeJustPosted = arr;
+  try { sessionStorage.setItem("koe_just_posted", JSON.stringify(arr)); } catch (e) {}
+}
+
+function rememberJustPosted(p) {
+  var arr = justPostedList();
+  arr.push({
+    t: Date.now(),
+    user_id: p.user_id,
+    text: p.text || "",
+    image_url: p.image_url || "",
+    id: "pending" + Date.now(),
+    created_at: new Date().toISOString(),
+    likes: 0,
+    comments: 0,
+    name: p.name || "あなた",
+    icon_url: "",
+  });
+  saveJustPosted(arr);
+}
+
+// サーバーが返してくるようになったら、覚えていた分は捨てる
+function forgetJustPosted(texts) {
+  var arr = justPostedList().filter(function (x) { return texts.indexOf(x.text || "") < 0; });
+  saveJustPosted(arr);
+}
+
+// 投稿できたかを確かめてから「投稿しました」と出す。
+// サーバーが返した投稿の番号があれば、それが何よりの証拠。
+// 番号が無いときだけ、自分の投稿一覧を1回だけ見に行って確かめる。
+async function confirmPosted(result, cards, sig) {
+  var body = (result && result.body) || {};
+  var post = body.feed_post || body.timeline_post || body.post || body;
+  var id = post && (post.id || post.feed_post_id || post.timeline_post_id);
+
+  if (body.duplicate) {
+    // 同じ内容を続けて送ったので、こちらでは送っていない
+    cards.forEach(function (c) { if (c && c.parentNode) c.parentNode.removeChild(c); });
+    toast("同じ内容をたった今送っています", "error");
+    return false;
+  }
+
+  if (id) {
+    markPosted(cards, id);
+    toast("投稿しました！");
+    return true;
+  }
+
+  // 番号が返らなかったとき: 自分の投稿を見に行って確かめる
+  toast("投稿を確認しています…");
+  try {
+    var me = typeof myUserId !== "undefined" && myUserId ? myUserId : currentAccountId();
+    var r = await callApi("get_user_posts", String(me), "");
+    var newest = r && r.ok && r.posts && r.posts.length ? r.posts[0] : null;
+    if (newest && newest.id) {
+      markPosted(cards, newest.id);
+      toast("投稿しました！");
+      return true;
+    }
+  } catch (e) {}
+  toast("投稿できたか確認できませんでした。タイムラインを更新してください", "error");
+  return false;
+}
+
+// 仮のカードを本物として確定させる（薄い表示をやめ、番号を入れる）
+function markPosted(cards, id) {
+  (cards || []).forEach(function (c) {
+    if (!c) return;
+    c.style.opacity = "";
+    try { if (id) c.dataset.pid = String(id); } catch (e) {}
+  });
+}
+
+// 自分の投稿カードを、いま開いている一覧すべての先頭に足す。
+// タイムラインだけに足していたので、マイページから投稿すると出てこなかった。
+function insertOwnPostCard(post) {
+  var html = "";
+  try {
+    html = postCardHtml(post);
+  } catch (e) {
+    return [];
+  }
+  var me = String(typeof myUserId !== "undefined" && myUserId ? myUserId : currentAccountId());
+  var boxes = [
+    { id: "timelineList", mineOnly: false },
+    { id: "profileTabPosts", mineOnly: true },
+    { id: "myPostsList", mineOnly: true },
+    { id: "profileViewPosts", mineOnly: true },
+  ];
+  var added = [];
+  boxes.forEach(function (b) {
+    var el = document.getElementById(b.id);
+    if (!el || !el.offsetParent) return;                      // 画面に出ていない一覧は触らない
+    if (b.mineOnly && String(el.dataset.koeUid || me) !== me) return;   // 他人のページには足さない
+    try {
+      el.insertAdjacentHTML("afterbegin", html);
+      if (el.firstElementChild) added.push(el.firstElementChild);
+    } catch (e) {}
+  });
+  return added;
+}
+
+// 投稿ボタンとロックを元に戻す
+function unlockCompose() {
+  window.__koePostBusy = !1;
+  window.__koePostBusyAt = 0;
+  var b = document.getElementById("composeSubmit");
+  if (b) {
+    b.disabled = !1;
+    b.classList.remove("loading");
+    if (b.textContent !== "投稿する") b.textContent = "投稿する";
+  }
+}
+
+async function submitComposePostInner() {
   const text = document.getElementById("composeText").value.trim(),
     topic = document.getElementById("composeTopic").value,
     isFeed = String(topic) === "5";
   if (!text && !composeImageDataUrl && !composeVoiceDataUrl)
     return void toast("投稿内容・画像・音声のいずれかを入力してください", "error");
-  const __sig = [topic, text, (composeImageDataUrl || "").length, (composeVoiceDataUrl || "").length].join(
-    "|",
-  );
+
+  const __sig = [topic, text, (composeImageDataUrl || "").length, (composeVoiceDataUrl || "").length].join("|");
   if (window.__koeLastPostSig === __sig && Date.now() - (window.__koeLastPostAt || 0) < 15000) {
     toast("同じ内容をたった今投稿しています", "error");
     return;
   }
+
   window.__koePostBusy = !0;
   const btn = document.getElementById("composeSubmit");
-  ((btn.disabled = !0), btn.classList.add("loading"));
-  const oldLabel = btn.textContent;
+  btn.disabled = !0;
+  btn.classList.add("loading");
+
+  // 送信の合図をしたら、画面はすぐ閉じる。
+  // 画像や音声は上げ終わるまで時間がかかるので、開いたまま待たせない。
+  const savedText = text;
+  const savedImage = composeImageDataUrl || "";
+  const savedVoice = composeVoiceDataUrl || "";
+  const me = typeof myUserId !== "undefined" && myUserId ? myUserId : currentAccountId();
+  const hu = document.getElementById("headerUser");
+  const optPost = {
+    id: "temp" + Date.now(),
+    user_id: me,
+    name: (hu && hu.textContent) || "あなた",
+    icon_url: "",
+    text: savedText,
+    image_url: savedImage,
+    created_at: new Date().toISOString(),
+    likes: 0,
+    comments: 0,
+    bookmarked: false,
+  };
+  let optCards = [];
+  try {
+    optCards = insertOwnPostCard(optPost);
+    optCards.forEach(function (c) { c.style.opacity = "0.55"; });   // 確認できるまでは薄く
+  } catch (e) {}
+  closeComposeModal();
+  sfx("post");
+  toast("投稿確認中……");
+
+  // 返事が来ないまま止まらないよう、時間切れを付ける
+  const withLimit = (p, ms) =>
+    Promise.race([
+      p,
+      new Promise((res) =>
+        setTimeout(
+          () => res({ ok: false, timeout: true, friendly: "時間内に返事がありませんでした。タイムラインを更新して、投稿できているか確認してください" }),
+          ms,
+        ),
+      ),
+    ]);
+
   let result;
-  let __optimistic = !composeImageDataUrl && !composeVoiceDataUrl;
-  let __optCard = null,
-    __optSaved = null;
-  if (__optimistic) {
-    try {
-      __optSaved = text;
-      var __hu0 = document.getElementById("headerUser");
-      var __op0 = {
-        id: "temp" + Date.now(),
-        user_id: typeof myUserId !== "undefined" && myUserId ? myUserId : currentAccountId(),
-        name: (__hu0 && __hu0.textContent) || "あなた",
-        icon_url: "",
-        text: text,
-        image_url: "",
-        created_at: new Date().toISOString(),
-        likes: 0,
-        comments: 0,
-        bookmarked: false,
-      };
-      var __lst0 = document.getElementById("timelineList");
-      if (__lst0) {
-        __lst0.insertAdjacentHTML("afterbegin", postCardHtml(__op0));
-        __optCard = __lst0.firstElementChild;
-        if (__optCard) __optCard.style.opacity = "0.55";
-      }
-      closeComposeModal();
-      sfx("post");
-    } catch (e) {
-      __optimistic = false;
-    }
-  }
-  if (
-    (composeVoiceDataUrl
-      ? ((btn.textContent = "音声アップロード中..."),
-        (result = await callApi(
+  try {
+    if (savedVoice) {
+      result = await withLimit(
+        callApi(
           isFeed ? "create_feed_post_with_voice" : "create_timeline_post_with_voice",
-          composeVoiceDataUrl,
+          savedVoice,
           composeVoiceExt,
           composeVoiceType,
-          text,
+          savedText,
           String(composeVoiceSec || 0),
-        )))
-      : composeImageDataUrl
-        ? ((btn.textContent = "画像アップロード中..."),
-          (result = await callApi(
-            isFeed ? "create_feed_post_with_image" : "create_timeline_post_with_image",
-            text,
-            0,
-            composeImageDataUrl,
-          )))
-        : (result = await callApi(isFeed ? "create_feed_post" : "create_timeline_post", text, 0)),
-    (btn.disabled = !1),
-    btn.classList.remove("loading"),
-    (btn.textContent = oldLabel),
-    (window.__koePostBusy = !1),
-    result.ok)
-  ) {
+        ),
+        180000,
+      );
+    } else if (savedImage) {
+      result = await withLimit(
+        callApi(isFeed ? "create_feed_post_with_image" : "create_timeline_post_with_image", savedText, 0, savedImage),
+        180000,
+      );
+    } else {
+      result = await withLimit(callApi(isFeed ? "create_feed_post" : "create_timeline_post", savedText, 0), 100000);
+    }
+  } catch (e) {
+    result = { ok: false, friendly: String((e && e.message) || e) };
+  }
+
+  if (result && result.ok) {
     window.__koeLastPostSig = __sig;
     window.__koeLastPostAt = Date.now();
-    try {
-      var __me = typeof myUserId !== "undefined" && myUserId ? myUserId : currentAccountId();
-      window.__koeJustPosted = (window.__koeJustPosted || []).filter(function (x) {
-        return Date.now() - x.t < 120000;
-      });
-      window.__koeJustPosted.push({
-        t: Date.now(),
-        user_id: __me,
-        text: text,
-        image_url: composeImageDataUrl || "",
-        id: "pending" + Date.now(),
-        created_at: new Date().toISOString(),
-        likes: 0,
-        comments: 0,
-        name: (document.getElementById("headerUser") || {}).textContent || "あなた",
-        icon_url: "",
-      });
-    } catch (e) {}
-    if (__optimistic) {
-      try {
-        if (__optCard) __optCard.style.opacity = "";
-        (clearComposeImage(), clearComposeVoice());
-        try {
-          localStorage.removeItem("koe_draft");
-        } catch (e) {}
-        toast("投稿しました");
-      } catch (e) {}
-      return;
-    }
-    var __img = composeImageDataUrl || "";
-    var __text = text;
-    (clearComposeImage(), clearComposeVoice());
-    try {
-      localStorage.removeItem("koe_draft");
-    } catch (e) {}
-    var __hu = document.getElementById("headerUser");
-    var __optP = {
-      id: "temp" + Date.now(),
-      user_id: typeof myUserId !== "undefined" && myUserId ? myUserId : currentAccountId(),
-      name: (__hu && __hu.textContent) || "あなた",
-      icon_url: "",
-      text: __text,
-      image_url: __img,
-      created_at: new Date().toISOString(),
-      likes: 0,
-      comments: 0,
-      bookmarked: false,
-    };
-    (closeComposeModal(), sfx("post"), toast("投稿しました"));
-    var __list = document.getElementById("timelineList");
-    if (__list) {
-      try {
-        __list.insertAdjacentHTML("afterbegin", postCardHtml(__optP));
-      } catch (e) {}
-    }
-  } else {
-    if (__optimistic) {
-      try {
-        if (__optCard && __optCard.parentNode) __optCard.parentNode.removeChild(__optCard);
-        openComposeModal();
-        var __ct = document.getElementById("composeText");
-        if (__ct && __optSaved != null) __ct.value = __optSaved;
-      } catch (e) {}
-    }
-    toast(
-      "投稿失敗 (status:" +
-        (result.status || "?") +
-        " vsns:" +
-        (result.vsns !== undefined ? result.vsns : "?") +
-        ") " +
-        koeErrMsg(result),
-      "error",
-    );
+    rememberJustPosted({
+      user_id: me,
+      text: savedText,
+      image_url: savedImage,
+      name: optPost.name,
+    });
+    clearComposeImage();
+    clearComposeVoice();
+    try { localStorage.removeItem("koe_draft"); } catch (e) {}
+    await confirmPosted(result, optCards, __sig);
+    return;
   }
+
+  // 失敗: 仮のカードを取り消して、書いた内容ごと投稿画面へ戻す
+  optCards.forEach(function (c) { if (c && c.parentNode) c.parentNode.removeChild(c); });
+  try {
+    openComposeModal();
+    var ct = document.getElementById("composeText");
+    if (ct) ct.value = savedText;
+  } catch (e) {}
+  toast(
+    (result && result.friendly) ||
+      "投稿失敗 (status:" + ((result && result.status) || "?") + ") " + koeErrMsg(result || {}),
+    "error",
+  );
 }
+
 async function doLogin() {
   const email = document.getElementById("loginEmail").value.trim(),
     password = document.getElementById("loginPassword").value,
@@ -6848,13 +6980,10 @@ async function loadPostsInto(boxId, uid) {
   try {
     const mine = typeof myUserId !== "undefined" && myUserId ? myUserId : currentAccountId();
     if (String(uid) === String(mine)) {
-      window.__koeJustPosted = (window.__koeJustPosted || []).filter(function (x) {
-        return Date.now() - x.t < 120000;
-      });
-      __pending = window.__koeJustPosted.filter(function (x) {
-        return !__posts.some(function (p) {
-          return (p.text || "") === (x.text || "");
-        });
+      var __known = __posts.map(function (p) { return p.text || ""; });
+      forgetJustPosted(__known);                       // サーバーに載ったものは覚えておかない
+      __pending = justPostedList().filter(function (x) {
+        return String(x.user_id) === String(mine) && __known.indexOf(x.text || "") < 0;
       });
     }
   } catch (e) {}
@@ -19772,6 +19901,7 @@ function koeBootShell(acc) {
     window.__koeNativeLogErr = "";
     // 差分だけ追加(全置換だとJSログと混ざるので、ネイティブ分は別枠でマージ)
     window.__koeNativeLog = r.log;
+    window.__koePostTiming = r.post_timing || [];
     if (isOpen()) renderLog();
   }
 
@@ -19877,10 +20007,14 @@ function koeBootShell(acc) {
         return "";
       }
     })();
+    // 投稿の内訳は通信ログが流れても消えないので、頭に置いて切れないようにする
+    const pt = window.__koePostTiming || [];
     return (
       "=== KoeTomo 診断ログ ===\nbuild: " +
       (__bv ? "v" + String(__bv).replace(/^v/, "") : "(不明)") +
-      "\n[JS/API]\n" +
+      "\n\n[投稿の内訳]\n" +
+      (pt.length ? pt.join("\n") : "(まだ投稿していません)") +
+      "\n\n[JS/API]\n" +
       js.join("\n") +
       "\n\n[ネイティブHTTP]\n" +
       (nat.length ? nat.join("\n") : window.__koeNativeLogErr || "(0件)")
@@ -21695,7 +21829,8 @@ function koeBootShell(acc) {
         rd.onload = function () {
           var img = new Image();
           img.onload = function () {
-            var mx = 1280,
+            // 端末側が上げる大きさに合わせる(投稿の画像と同じ)
+            var mx = 900,
               w = img.width,
               h = img.height;
             if (w > mx || h > mx) {
@@ -22587,15 +22722,33 @@ function koeBootShell(acc) {
     }
   }
 
+  // ログインが済んで本体の画面に入ってから動かす。
+  // ログイン画面に確認の窓が出てしまうと、先に進めなくなるため。
+  function whenLoggedIn(fn) {
+    var tries = 0;
+    var t = setInterval(function () {
+      tries++;
+      var ls = document.getElementById("loginScreen");
+      var onLogin = ls && getComputedStyle(ls).display !== "none";
+      var uid = (typeof myUserId !== "undefined" && myUserId) || (typeof currentAccountId === "function" && currentAccountId());
+      if (!onLogin && uid) {
+        clearInterval(t);
+        fn();
+      } else if (tries > 600) {
+        clearInterval(t);   // 10 分たっても入らないならあきらめる
+      }
+    }, 1000);
+  }
+
   function boot() {
     bind();
-    var c = getC();
-    if (c === "yes") {
-      start();
-    } else if (c === "") {
-      setTimeout(showConsent, 1600);
-    }
     render();
+    whenLoggedIn(function () {
+      var c = getC();
+      if (c === "yes") start();
+      else if (c === "") setTimeout(showConsent, 1600);
+      render();
+    });
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else setTimeout(boot, 900);
