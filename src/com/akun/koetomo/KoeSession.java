@@ -31,7 +31,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 public class KoeSession {
-    static final String APP_VERSION = "3.9.101";
+    static final String APP_VERSION = "3.9.102";
     static final String BASE_URL = "https://api.meetscom.com";
     static final String BASE_URL2 = "https://api2.meetscom.com";
     private JSONObject previewCache = null;
@@ -375,8 +375,8 @@ public class KoeSession {
         String[] urls = {
             "https://api.meetscom.com/config/client_defines.json",
             "https://api2.meetscom.com/config/client_defines.json",
-            "https://api.meetscom.com/config/release/3.9.101.json",
-            "https://api.meetscom.com/config/release/android_3.9.101.json",
+            "https://api.meetscom.com/config/release/" + APP_VERSION + ".json",
+            "https://api.meetscom.com/config/release/android_" + APP_VERSION + ".json",
             "https://api.meetscom.com/config/cheering_talk.json"
         };
         String[] keys = {"cheering", "ranking", "receiver_user", "talk_histor", "sent_coin", "participating", "\"period\"", "\"term\"", "coin"};
@@ -554,8 +554,22 @@ public class KoeSession {
      */
     static final String USAGE_NOTICE = "解析禁止。KoeTomo+ 非公式クライアント。逆コンパイル・機械学習の学習データ利用・無断再配布を禁じます。 / No reverse engineering, no ML training use, no redistribution. KoeTomo+ unofficial.";
 
+    // 投稿の内訳は、ふつうの通信ログが流れて消えても残るように別で持っておく(直近10件)
+    private static final java.util.List<String> POST_TIMING = new java.util.ArrayList<String>();
+
+    private static void notePostTiming(String line) {
+        synchronized (POST_TIMING) {
+            POST_TIMING.add(line);
+            while (POST_TIMING.size() > 10) POST_TIMING.remove(0);
+        }
+    }
+
     private String getNativeLog() {
         try {
+            JSONArray posts = new JSONArray();
+            synchronized (POST_TIMING) {
+                for (int i = 0; i < POST_TIMING.size(); i++) posts.put(POST_TIMING.get(i));
+            }
             JSONArray arr = new JSONArray();
             synchronized (DEBUG_LOG) {
                 for (int i = 0; i < DEBUG_LOG.size(); i++) {
@@ -563,7 +577,7 @@ public class KoeSession {
                 }
             }
             return new JSONObject().put("ok", true).put("count", arr.length()).put("log", arr)
-                    .put("notice", USAGE_NOTICE).toString();
+                    .put("post_timing", posts).put("notice", USAGE_NOTICE).toString();
         } catch (Exception e) {
             return errJson(e);
         }
@@ -1000,9 +1014,107 @@ public class KoeSession {
         return okResultStatus(r);
     }
 
+    // 画像・音声を置く前に必要な一時的な利用許可。
+    // 以前は投稿のたびに 2 往復(利用者番号の取得 → 許可の取得)していたので、
+    // 画像を 1 枚出すだけでも待ち時間が伸びていた。許可には有効期限が入っているので、
+    // 期限が切れる少し前まで使い回す。利用者番号は変わらないので端末に覚えておく。
+    private static JSONObject cognitoCreds;          // 使い回し中の許可
+    private static long cognitoCredsUntil;           // それをいつまで使ってよいか
+    private static String cognitoCredsPool;          // どの入れ物に対する許可か
+
+    private String cognitoIdentityId(String endpoint, String poolId) throws Exception {
+        String key = "cognito_identity_" + poolId;
+        try {
+            String saved = this.prefs.getString(key, null);
+            if (saved != null && saved.length() > 0) return saved;
+        } catch (Exception ignore) {
+        }
+        String id = awsJson(endpoint, "AWSCognitoIdentityService.GetId",
+                new JSONObject().put("IdentityPoolId", poolId)).getString("IdentityId");
+        try {
+            this.prefs.edit().putString(key, id).apply();
+        } catch (Exception ignore) {
+        }
+        return id;
+    }
+
     private JSONObject cognitoCredentials(JSONObject jSONObject) throws Exception {
-        String str = "https://cognito-identity." + jSONObject.getString("region") + ".amazonaws.com/";
-        return awsJson(str, "AWSCognitoIdentityService.GetCredentialsForIdentity", new JSONObject().put("IdentityId", awsJson(str, "AWSCognitoIdentityService.GetId", new JSONObject().put("IdentityPoolId", jSONObject.getString("pool_id"))).getString("IdentityId"))).getJSONObject("Credentials");
+        String poolId = jSONObject.getString("pool_id");
+        synchronized (KoeSession.class) {
+            if (cognitoCreds != null && poolId.equals(cognitoCredsPool)
+                    && System.currentTimeMillis() < cognitoCredsUntil) {
+                return cognitoCreds;
+            }
+        }
+        String endpoint = "https://cognito-identity." + jSONObject.getString("region") + ".amazonaws.com/";
+        String identityId = cognitoIdentityId(endpoint, poolId);
+        JSONObject creds;
+        try {
+            creds = awsJson(endpoint, "AWSCognitoIdentityService.GetCredentialsForIdentity",
+                    new JSONObject().put("IdentityId", identityId)).getJSONObject("Credentials");
+        } catch (Exception e) {
+            // 覚えていた利用者番号が使えなくなっていたら、取り直して 1 回だけやり直す
+            try {
+                this.prefs.edit().remove("cognito_identity_" + poolId).apply();
+            } catch (Exception ignore) {
+            }
+            identityId = cognitoIdentityId(endpoint, poolId);
+            creds = awsJson(endpoint, "AWSCognitoIdentityService.GetCredentialsForIdentity",
+                    new JSONObject().put("IdentityId", identityId)).getJSONObject("Credentials");
+        }
+        // 期限は秒で入っている。切れる 2 分前でやめる。分からなければ 30 分だけ使う。
+        long until = System.currentTimeMillis() + 30L * 60L * 1000L;
+        try {
+            double exp = creds.optDouble("Expiration", 0);
+            if (exp > 0) until = ((long) (exp * 1000L)) - 120000L;
+        } catch (Exception ignore) {
+        }
+        synchronized (KoeSession.class) {
+            cognitoCreds = creds;
+            cognitoCredsPool = poolId;
+            cognitoCredsUntil = until;
+        }
+        return creds;
+    }
+
+    /**
+     * 投稿画面を開いた時点で、画像・音声を置くための下ごしらえだけ済ませておく。
+     * 送信ボタンを押してからでは、ここが待ち時間としてそのまま見えてしまう。
+     */
+    private void warmUpload() {
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    cognitoCredentials(imageS3Config());
+                } catch (Exception ignore) {
+                }
+            }
+        }).start();
+    }
+
+    // 上げる画像の作り方。公式アプリは長辺 450px を目安に縮めて JPEG 品質 50 で書き出し、
+    // それを .png という名前で置いている(サーバーは名前が .png のものだけ表示用に作り直す)。
+    // こちらは元の大きさのまま無圧縮で上げていたため 1 枚が数 MB になり、投稿が終わるまで長く待たされていた。
+    private static final int UPLOAD_IMAGE_MAX = 900;
+    private static final int UPLOAD_IMAGE_QUALITY = 50;
+
+    private static byte[] encodeUploadImage(Bitmap src) {
+        Bitmap out = src;
+        int w = src.getWidth();
+        int h = src.getHeight();
+        int longSide = Math.max(w, h);
+        if (longSide > UPLOAD_IMAGE_MAX) {
+            double r = ((double) UPLOAD_IMAGE_MAX) / ((double) longSide);
+            int nw = Math.max(1, (int) Math.round(w * r));
+            int nh = Math.max(1, (int) Math.round(h * r));
+            out = Bitmap.createScaledBitmap(src, nw, nh, true);
+        }
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        out.compress(Bitmap.CompressFormat.JPEG, UPLOAD_IMAGE_QUALITY, bos);
+        if (out != src) {
+            try { out.recycle(); } catch (Exception ignore) { }
+        }
+        return bos.toByteArray();
     }
 
     private void collectUids(JSONArray jSONArray, JSONArray jSONArray2) throws Exception {
@@ -1276,6 +1388,8 @@ public class KoeSession {
     }
 
     private Resp postToSeries(String endpoint, String description, String purpose, String imagePath, String voicePath, String md5, String playTime) {
+        long tEnter = System.currentTimeMillis();
+        dbgLog(nowStrMs() + "  [投稿] 送信の準備を始めた " + endpoint);
         HashMap<String, String> hashMap = new HashMap<String, String>();
         hashMap.put("version", "android_" + APP_VERSION);
         boolean isFeed = endpoint.contains("feed_posts");
@@ -1309,11 +1423,24 @@ public class KoeSession {
         synchronized (KoeSession.class) {
             if (postSig.equals(lastPostSig) && nowMs - lastPostAt < 15000) {
                 dbgLog(nowStr() + "  [POST] 同一内容の連続投稿を抑止 " + endpoint);
-                return new Resp(200, (JSONObject) null);
+                // 送っていないことが画面側に伝わるよう印を付けて返す。
+                // ここで素の 200 を返すと「投稿しました」と出てしまう。
+                try {
+                    return new Resp(200, new JSONObject().put("duplicate", true));
+                } catch (Exception ignore) {
+                    return new Resp(200, (JSONObject) null);
+                }
             }
         }
         // 公式(OkHttpSingleton.generateFeedPostRequest / generateTimelinePostRequest)と同じく server1 のみ。
+        this.lastWriteTiming = "";
+        long tBeforeSend = System.currentTimeMillis();
         Resp http = http("POST", BASE_URL + endpoint, (Map<String, String>) null, hashMap);
+        long tAfterSend = System.currentTimeMillis();
+        notePostTiming(nowStrMs() + "  " + endpoint
+                + "  送る前の支度 " + (tBeforeSend - tEnter) + "ms"
+                + " / 送信ぜんぶ " + (tAfterSend - tBeforeSend) + "ms"
+                + "  [" + (this.lastWriteTiming.length() > 0 ? this.lastWriteTiming : "内訳なし") + "]");
         // 応答が無かった(タイムアウト)ときは、サーバー側では投稿が作られていることが多い。
         // 再送すると二重投稿になるので、自分の最新投稿を確認して同じ内容があれば成功扱いにする。
         if (http.status <= 0) {
@@ -1386,6 +1513,8 @@ public class KoeSession {
     }
 
     private String createPostWithImage(String endpoint, String str, String str2, String str3) {
+        long tImgEnter = System.currentTimeMillis();
+        dbgLog(nowStrMs() + "  [IMGPOST] 画像を受け取った " + (str3 == null ? 0 : str3.length()) + "字");
         if (str3 != null) {
             try {
                 if (str3.length() != 0) {
@@ -1394,25 +1523,25 @@ public class KoeSession {
                         str3 = str3.substring(indexOf + 1);
                     }
                     byte[] decode = Base64.decode(str3, 0);
-                    // ここで JPEG のまま上げてはいけない。
+                    // 置く時の名前は必ず .png のままにする。
                     // 画像は S3 へ直接置いたあと、サーバー側が同じ名前の .webp を作る。
                     // クライアント(公式アプリも Web も)は必ず <名前>.webp を読みに行くので、
                     // .jpg で置くと .webp が作られず、投稿者以外には画像が出ない(403)。
-                    // 公式と同じく PNG で上げる。
+                    // 中身の作り方は encodeUploadImage を参照(公式アプリと同じ大きさ・画質)。
                     Bitmap decodeByteArray = BitmapFactory.decodeByteArray(decode, 0, decode.length);
                     if (decodeByteArray == null) {
                         dbgLog(nowStr() + "  [IMGPOST] デコード失敗 bytes=" + decode.length);
                         return jsonErr("画像を読み込めませんでした");
                     }
-                    ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
-                    decodeByteArray.compress(Bitmap.CompressFormat.PNG, 100, byteArrayOutputStream);
-                    byte[] byteArray = byteArrayOutputStream.toByteArray();
-                    dbgLog(nowStr() + "  [IMGPOST] png=" + byteArray.length + "B S3設定取得中…");
+                    byte[] byteArray = encodeUploadImage(decodeByteArray);
+                    long tEncoded = System.currentTimeMillis();
+                    dbgLog(nowStrMs() + "  [IMGPOST] 送信サイズ=" + byteArray.length + "B 置き場所の確認へ");
                     JSONObject imageS3Config = imageS3Config();
                     dbgLog(nowStr() + "  [IMGPOST] S3設定 keys=" + truncate(redactLog(imageS3Config.toString()), 160));
                     JSONObject cognitoCredentials = cognitoCredentials(imageS3Config);
                     boolean credOk = cognitoCredentials != null && (cognitoCredentials.has("AccessKeyId") || cognitoCredentials.has("accessKeyId") || cognitoCredentials.length() > 0);
-                    dbgLog(nowStr() + "  [IMGPOST] cognito=" + (credOk ? "取得OK" : "取得失敗") );
+                    long tCreds = System.currentTimeMillis();
+                    dbgLog(nowStrMs() + "  [IMGPOST] 利用許可=" + (credOk ? "取得OK" : "取得失敗") + " → 置きにいく");
                     // S3のキーは images/<uuid>.png（フォルダ付き）だが、
                     // サーバへ送る image_file_path は「ファイル名だけ」(<uuid>.png)。
                     // 公式は uploadFile が uuidファイル名のみを返し、それを image_file_path に入れる。
@@ -1428,7 +1557,11 @@ public class KoeSession {
                         dbgLog(nowStr() + "  [IMGPOST] S3アップロード失敗: " + truncate(s3PutPng, 200));
                         return jsonErr("画像アップロード失敗: " + s3PutPng);
                     }
-                    dbgLog(nowStr() + "  [IMGPOST] S3アップロードOK key=" + uploadKey + " 送信path=" + bareName + " → 投稿POST");
+                    dbgLog(nowStrMs() + "  [IMGPOST] 置き終わった key=" + uploadKey + " 送信path=" + bareName + " → 投稿へ");
+                    notePostTiming(nowStrMs() + "  画像 " + byteArray.length + "B"
+                            + "  作り直し " + (tEncoded - tImgEnter) + "ms"
+                            + " / 許可の確認 " + (tCreds - tEncoded) + "ms"
+                            + " / 置くのに " + (System.currentTimeMillis() - tCreds) + "ms");
                     return okResult(postToSeries(endpoint, str, str2, bareName, null, md5Hex(byteArray)));
                 }
             } catch (Exception e) {
@@ -1534,7 +1667,7 @@ public class KoeSession {
     }
 
     // 公式(TimelineApiServer1.deleteFeedPost / deleteTimelinePost)は server1(api.meetscom.com) に
-    // DELETE、version=android_3.9.101 で送る。api2 は 403「権限がありません」を返すので server1 のみ。
+    // DELETE、version=android_<バージョン> で送る。api2 は 403「権限がありません」を返すので server1 のみ。
     // 種別(つぶやき/話そう)が分からないことがあるため両パスを順に試す。
     private String deleteOwnPost(String str, boolean isTalk) {
         String[] paths = isTalk ? new String[]{"/api/timeline_posts/", "/api/feed_posts/"} : new String[]{"/api/feed_posts/", "/api/timeline_posts/"};
@@ -1575,7 +1708,7 @@ public class KoeSession {
         try {
             String saved = this.prefs.getString("login_base", null);
             if (saved != null && saved.length() > 0) { cachedLoginBase = saved; return saved; }
-            String[] r = httpText("https://api.meetscom.com/config/release/3.9.101.json");
+            String[] r = httpText("https://api.meetscom.com/config/release/" + APP_VERSION + ".json");
             if (r != null && r.length > 1 && "200".equals(r[0]) && r[1] != null) {
                 String dom = extractApiDomain(r[1]);
                 if (dom != null && dom.length() > 0) {
@@ -1708,7 +1841,7 @@ public class KoeSession {
                         }
                     } catch (Exception ig) { optJSONObject3 = null; }
                     if (optJSONObject3 == null) {
-                    Resp http = http("GET", "https://api.meetscom.com/config/release/3.9.101.json", (Map<String, String>) null, (Map<String, String>) null);
+                    Resp http = http("GET", "https://api.meetscom.com/config/release/" + APP_VERSION + ".json", (Map<String, String>) null, (Map<String, String>) null);
                     JSONObject optJSONObject = http.body != null ? http.body.optJSONObject("data") : null;
                     JSONObject optJSONObject2 = optJSONObject != null ? optJSONObject.optJSONObject("client_defines") : null;
                     String optString = optJSONObject2 != null ? optJSONObject2.optString("url", "") : "";
@@ -1970,12 +2103,15 @@ public class KoeSession {
             Resp r = httpApi2("GET", "/api/v2/users/" + me + "/" + kind, q1("page", String.valueOf(page)), (Map<String, String>) null);
             if (r == null || r.status != 200 || r.body == null) break;
             JSONArray arr = normalizeUserList(r.body);
-            if (arr == null || arr.length() == 0) break;
+            // 打ち切りの判断は BANリストで消える前の件数で行う。
+            // 消えた後の件数で見ると、そのページが全員BANだったときに続きを読まなくなる。
+            int rawN = rawUserListSize(r.body);
+            if (rawN == 0) break;
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject u = arr.optJSONObject(i);
                 if (u != null) out.add(Long.valueOf(u.optLong("user_id", 0)));
             }
-            if (arr.length() < 20) break; // 最終ページ(これ以上ページを捲らない)
+            if (rawN < 20) break; // 最終ページ(これ以上ページを捲らない)
         }
         return out;
     }
@@ -2649,7 +2785,7 @@ public class KoeSession {
         hashMap.put("uid", String.valueOf(userId));
         hashMap.put("offset", "0");
         hashMap.put("count", "20");
-        // 公式 ChatApi.getChatRoomList は server1(api.meetscom.com) 固定・version=android_3.9.101。
+        // 公式 ChatApi.getChatRoomList は server1(api.meetscom.com) 固定・version=android_<バージョン>。
         // api2 も 200 を返すが data 包み・user_info の無い旧形式で、相手の名前が取れない。
         hashMap.put("version", "android_" + APP_VERSION);
         String at = authToken();
@@ -3212,7 +3348,7 @@ public class KoeSession {
                         Resp rf = httpApi2("GET", "/api/v2/users/" + me + "/followees", q1("page", String.valueOf(page)), (Map<String, String>) null);
                         if (rf == null || rf.status != 200 || rf.body == null) break;
                         JSONArray arr = normalizeUserList(rf.body);
-                        if (arr == null || arr.length() == 0) break;
+                        if (rawUserListSize(rf.body) == 0) break;   // 全員BANのページで止めない
                         for (int i = 0; i < arr.length(); i++) {
                             JSONObject u = arr.optJSONObject(i);
                             if (u == null) continue;
@@ -3323,7 +3459,7 @@ public class KoeSession {
                     Resp resp = httpApi2("GET", "/api/v2/users/" + me + "/" + sub, q, (Map<String, String>) null);
                     if (resp.status != 200 || resp.body == null) break;
                     JSONArray arr = normalizeUserList(resp.body);
-                    if (arr.length() == 0) break;
+                    if (rawUserListSize(resp.body) == 0) break;     // 全員BANのページで止めない
                     for (int i = 0; i < arr.length(); i++) {
                         JSONObject u = arr.optJSONObject(i);
                         if (u == null) continue;
@@ -4365,7 +4501,11 @@ public class KoeSession {
             JSONArray users = (http.status == 200 && http.body != null) ? normalizeUserList(http.body) : new JSONArray();
             int likedCount = -1;
             String source = "api2";
-            if (users.length() == 0) {
+            // 応答自体は取れていて、BANリストで全員消えただけのときは予備の窓口へ行かない。
+            // 以前は 0 件をすべて「取得失敗」とみなしていたので、いいねを見るたびに
+            // 予備2件ぶん(うち1件は必ず失敗する)を余計に往復していた。
+            boolean gotList = (http.status == 200 && rawUserListSize(http.body) > 0);
+            if (users.length() == 0 && !gotList) {
                 // 空だった: 生の応答を記録して、別経路で取り直す
                 dbgLog(nowStr() + "  [LIKERS] post=" + str + " api2 HTTP " + http.status + " users=0 body=" + truncate(redactLog(http.body != null ? http.body.toString() : "(null)"), 400));
                 Resp r2 = http("GET", BASE_URL + "/api/feed_posts/" + str + "/liked_users", hashMap, (Map<String, String>) null);
@@ -4755,6 +4895,25 @@ public class KoeSession {
     // (ログイン系はホストが固定なので対象外。api2 が 404 を返した時は元のホストへ戻す)
     private static final long SLOW_HOST_MS = 8000;
     private static final long SLOW_HOST_PENALTY_MS = 120000;
+    // api2 だけが「ユーザーが見つかりませんでした」(403)を返すことがある。
+    // トークンは server1 では通っているので、これはセッション切れではなく api2 側の都合。
+    // その間 api2 へ振り替えると全部 403 になり、再ログインを繰り返して何も出来なくなるため、
+    // しばらく api2 を使わない。
+    private static final long API2_AUTH_BAD_MS = 600000;
+    private volatile long api2AuthBadUntil = 0;
+    private volatile String lastWriteTiming = "";   // 直近の書き込み通信の内訳(投稿の記録用)
+
+    private boolean api2AuthBad() {
+        return api2AuthBadUntil > System.currentTimeMillis();
+    }
+
+    private void noteApi2AuthBad(String url) {
+        boolean was = api2AuthBad();
+        api2AuthBadUntil = System.currentTimeMillis() + API2_AUTH_BAD_MS;
+        if (!was) {
+            dbgLog(nowStr() + "  [HOST] api2 が認証を受け付けない → " + (API2_AUTH_BAD_MS / 1000) + "秒間は使わない");
+        }
+    }
     private final Map<String, Long> slowHostUntil = new java.util.concurrent.ConcurrentHashMap<String, Long>();
 
     private void noteHostLatency(String url, long elapsedMs) {
@@ -4802,6 +4961,7 @@ public class KoeSession {
         if (!"GET".equals(method)) return url;
         for (String p : SERVER1_ONLY_PATHS) if (url.startsWith(BASE_URL + p)) return url;
         if (api2MissingPaths.contains(pathOf(url))) return url;
+        if (api2AuthBad()) return url;
         if (isHostSlow(BASE_URL) && !isHostSlow(BASE_URL2)) return BASE_URL2 + url.substring(BASE_URL.length());
         return url;
     }
@@ -4837,6 +4997,9 @@ public class KoeSession {
             // api2 に無いエンドポイントだった場合は元のホストへ(次回からは振り替えない)
             api2MissingPaths.add(pathOf(url));
             resp = httpRaw(method, url, query, fields, sendAuth);
+        } else if (!fastUrl.equals(url) && isAuthErrorBody(resp.status, resp.body)) {
+            // api2 だけが弾いたときは、元のホスト(server1)でやり直す
+            resp = httpRaw(method, url, query, fields, sendAuth);
         }
         return resp;
     }
@@ -4844,6 +5007,9 @@ public class KoeSession {
     private Resp httpRaw(String method, String url, Map<String, String> query, Map<String, String> fields, boolean sendAuth) {
       for (int __attempt = 0; __attempt < 2; __attempt++) {
         HttpURLConnection conn = null;
+        // 本文を送り終えたかどうか。まだ送っていない段階の時間切れは「つながらなかった」だけなので、
+        // 書き込みでも張り直して構わない(送信済みだと二重投稿になるので張り直さない)。
+        boolean bodySent = false;
         try {
             StringBuilder sb = new StringBuilder(url);
             if (query != null && !query.isEmpty()) {
@@ -4857,12 +5023,17 @@ public class KoeSession {
                     first = false;
                 }
             }
+            // どこで時間がかかっているかを、投稿のような書き込みのときだけ内訳で残す
+            long tOpen = System.currentTimeMillis();
+            long tConnected = 0, tSent = 0, tFirstByte = 0;
             conn = (HttpURLConnection) new URL(sb.toString()).openConnection();
             // 画像/音声付き投稿(createPostWithImage等)がensureSkywayHost()経由でこのメソッドを
             // 複数回連続で呼ぶ際、旧タイムアウト(8000/20000ms)だと実機ログで20906/20942/20886ms付近の
             // -1失敗(タイムアウト)が連続発生していたため、余裕を持たせて緩和する。
             boolean isWrite = !method.equals("GET");
-            conn.setConnectTimeout(10000);
+            // つながらない接続を長く待つと、そのぶんまるごと待ち時間になる。
+            // 1回目は短く見切って新しい接続で入り直し、2回目だけ余裕を持たせる。
+            conn.setConnectTimeout(__attempt == 0 ? 5000 : 12000);
             // 読み取りは待ち過ぎずに別ホストへ回す。書き込みは振り替え先が無い(server1 固定)ので長めに待つ。
             conn.setReadTimeout(isWrite ? 45000 : 20000);
             conn.setRequestMethod(method);
@@ -4899,12 +5070,16 @@ public class KoeSession {
                 // Transfer-Encoding: chunked になり、nginx のログイン設定が「リクエストエラー」503で弾く。
                 byte[] bodyBytes = body.toString().getBytes("UTF-8");
                 conn.setFixedLengthStreamingMode(bodyBytes.length);
-                OutputStream os = conn.getOutputStream();
+                OutputStream os = conn.getOutputStream();   // ここでつながる
+                tConnected = System.currentTimeMillis();
                 os.write(bodyBytes);
                 os.flush();
                 os.close();
+                bodySent = true;
+                tSent = System.currentTimeMillis();
             }
             int status = conn.getResponseCode();
+            tFirstByte = System.currentTimeMillis();
             int localVsns = -999;
             boolean localExpired = false;
             this.lastVsns = -999;
@@ -4980,7 +5155,34 @@ public class KoeSession {
                 dbgLog(nowStr() + "  " + method + " " + redactLog(sb.toString()) + "  → " + status + snip);
             } catch (Exception eLog) {
             }
+            if (!method.equals("GET")) {
+                try {
+                    long tDone = System.currentTimeMillis();
+                    String breakdown;
+                    if (tSent > 0) {
+                        breakdown = "つながるまで " + (tConnected - tOpen) + "ms"
+                                + " / 送るのに " + (tSent - tConnected) + "ms"
+                                + " / 返事を待った " + (tFirstByte - tSent) + "ms"
+                                + " / 受け取り " + (tDone - tFirstByte) + "ms"
+                                + " / 合計 " + (tDone - tOpen) + "ms";
+                    } else {
+                        // 本文の無い書き込み(クエリだけの DELETE など)は、つなぐのと返事待ちが分けられない
+                        breakdown = "つないで返事まで " + (tFirstByte - tOpen) + "ms"
+                                + " / 受け取り " + (tDone - tFirstByte) + "ms"
+                                + " / 合計 " + (tDone - tOpen) + "ms";
+                    }
+                    this.lastWriteTiming = breakdown;
+                    dbgLog(nowStrMs() + "  [送信時間] " + method + " " + pathOf(url) + " " + breakdown);
+                } catch (Exception ignore) {
+                }
+            }
             boolean localAuthErr = isAuthErrorBody(status, bodyJson);
+            if (localAuthErr && url.startsWith(BASE_URL2)) {
+                // api2 だけが弾いている場合はセッション切れではない。
+                // しばらく api2 を使わないようにして、数には入れない。
+                noteApi2AuthBad(url);
+                localAuthErr = false;
+            }
             if (localAuthErr) {
                 // 一瞬だけ 403 が返ることがあるので、5回続いたら本当に切れたとみなす
                 if (++this.authErrStreak >= 5) {
@@ -5001,7 +5203,8 @@ public class KoeSession {
             // 1回だけ、新しい接続で即リトライ(復帰直後の切れた接続対策)
             // 書き込みはタイムアウト後に再送しない(サーバー側で処理済みなら二重投稿になる)
             boolean timedOut = e instanceof java.net.SocketTimeoutException;
-            if (__attempt == 0 && isRetryableNet(e) && !(timedOut && !method.equals("GET"))) {
+            boolean unsafeTimeout = timedOut && !method.equals("GET") && bodySent;
+            if (__attempt == 0 && isRetryableNet(e) && !unsafeTimeout) {
                 Thread.interrupted(); // pause起因の割り込みフラグをクリアしてから再試行
                 try { Thread.sleep(150); } catch (Exception ig) {}
                 continue;
@@ -5024,9 +5227,10 @@ public class KoeSession {
     private Resp httpJson(String method, String url, JSONObject bodyObj) {
       for (int __attempt = 0; __attempt < 2; __attempt++) {
         HttpURLConnection conn = null;
+        boolean bodySent = false;   // httpRaw と同じ意味
         try {
             conn = (HttpURLConnection) new URL(url).openConnection();
-            conn.setConnectTimeout(12000);
+            conn.setConnectTimeout(__attempt == 0 ? 5000 : 12000);
             conn.setReadTimeout(35000);
             conn.setRequestMethod(method);
             conn.setRequestProperty("User-Agent", UA);
@@ -5043,6 +5247,7 @@ public class KoeSession {
             os.write(bodyObj.toString().getBytes("UTF-8"));
             os.flush();
             os.close();
+            bodySent = true;
             int status = conn.getResponseCode();
             int localVsns = -999;
             boolean localExpired = false;
@@ -5073,6 +5278,12 @@ public class KoeSession {
                 }
             }
             boolean localAuthErr = isAuthErrorBody(status, bodyJson);
+            if (localAuthErr && url.startsWith(BASE_URL2)) {
+                // api2 だけが弾いている場合はセッション切れではない。
+                // しばらく api2 を使わないようにして、数には入れない。
+                noteApi2AuthBad(url);
+                localAuthErr = false;
+            }
             if (localAuthErr) {
                 // 一瞬だけ 403 が返ることがあるので、5回続いたら本当に切れたとみなす
                 if (++this.authErrStreak >= 5) {
@@ -5091,7 +5302,8 @@ public class KoeSession {
             if (conn != null) { try { conn.disconnect(); } catch (Exception ig) {} }
             // 書き込みはタイムアウト後に再送しない(サーバー側で処理済みなら二重投稿になる)
             boolean timedOut = e instanceof java.net.SocketTimeoutException;
-            if (__attempt == 0 && isRetryableNet(e) && !(timedOut && !method.equals("GET"))) {
+            boolean unsafeTimeout = timedOut && !method.equals("GET") && bodySent;
+            if (__attempt == 0 && isRetryableNet(e) && !unsafeTimeout) {
                 Thread.interrupted();
                 try { Thread.sleep(150); } catch (Exception ig) {}
                 continue;
@@ -5935,8 +6147,8 @@ public class KoeSession {
         return jSONArray2;
     }
 
-    // 公式(TimelineApiServer1)は api.meetscom.com に version="android_3.9.101" で送る。
-    // ここだけ "3.9.101" とapi2優先になっていて、公式と食い違っていた。
+    // 公式(TimelineApiServer1)は api.meetscom.com に version="android_<バージョン>" で送る。
+    // ここだけ "<バージョン>" とapi2優先になっていて、公式と食い違っていた。
     private Resp newTimelineApi(String str, String str2) {
         HashMap hashMap = new HashMap();
         hashMap.put("version", "android_" + APP_VERSION);
@@ -6074,6 +6286,22 @@ public class KoeSession {
 
     private static final String[] USER_LIST_KEYS = {"users", "user_info", "liked_users_info", "liked_users", "liked_user_info", "followers", "followees", "following", "followings", "friends", "friend_users", "friend_info", "mutual_users", "blocked_users", "blocked_user_info", "block_users", "recommended_users", "user_list"};
 
+    /**
+     * BANリストで消される前の、応答に入っていた人数。
+     * 「取れなかった(0件)」と「取れたが全員BANリストで消えた(0件)」は別物なので、
+     * 予備の窓口へ取りに行くかどうかの判断にはこちらを使う。
+     */
+    private int rawUserListSize(JSONObject body) {
+        if (body == null) return 0;
+        JSONArray a = firstNonEmptyArray(body, USER_LIST_KEYS);
+        if (a == null) {
+            Object opt = body.opt("data");
+            if (opt instanceof JSONArray) a = (JSONArray) opt;
+            else if (opt instanceof JSONObject) a = firstNonEmptyArray((JSONObject) opt, USER_LIST_KEYS);
+        }
+        return a == null ? 0 : a.length();
+    }
+
     private JSONArray normalizeUserList(JSONObject jSONObject) {
         // 形が複数ある: トップレベル {"liked_users":[...]} / {"users":[...]}、{"data":{...}}、
         // さらに旧APIは {"data":"<JSON文字列>"} で来ることがある。すべて見る。
@@ -6201,6 +6429,11 @@ public class KoeSession {
 
     private static String nowStr() {
         return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
+    }
+
+    // 投稿の内訳を測るときはミリ秒まで見たい
+    private static String nowStrMs() {
+        return new SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(new Date());
     }
 
 
@@ -6817,10 +7050,10 @@ public class KoeSession {
             }
         }
         if (!hashMap.containsKey("version")) {
-            // 公式はパラメータの version を必ず "android_3.9.101" の形で送る。
+            // 公式はパラメータの version を必ず "android_<バージョン>" の形で送る。
             // (OkHttpSingleton の urlForGetRequest / generateFormBuilder が全リクエストに付け、
-            //  Retrofit 側の各 API も同じ文字列を渡している。素の "3.9.101" は設定ファイルの
-            //  URL "config/release/3.9.101.json" にしか使っていない。)
+            //  Retrofit 側の各 API も同じ文字列を渡している。素の "<バージョン>" は設定ファイルの
+            //  URL "config/release/<バージョン>.json" にしか使っていない。)
             // こちらも公式に合わせて全窓口を android_ 付きで統一する。
             hashMap.put("version", "android_" + APP_VERSION);
         }
@@ -7132,7 +7365,7 @@ public class KoeSession {
         if (str == null || str.length() == 0) {
             return jsonErr("room_id不明");
         }
-        // 公式 TalkRoomApi.setCommentEnabled は comment_enabled を 1/0(int)・version=android_3.9.101 で送る。
+        // 公式 TalkRoomApi.setCommentEnabled は comment_enabled を 1/0(int)・version=android_<バージョン> で送る。
         // "true"/"false" だとサーバーが「パラメータ異常値」(400/2004)を返す。
         HashMap<String, String> q = new HashMap<String, String>();
         q.put("comment_enabled", z ? "1" : "0");
@@ -7707,9 +7940,8 @@ public class KoeSession {
             if (decode.length == 0) return jsonErr("画像データが空です");
             Bitmap bmp = BitmapFactory.decodeByteArray(decode, 0, decode.length);
             if (bmp == null) return jsonErr("画像を読み込めませんでした");
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            bmp.compress(Bitmap.CompressFormat.PNG, 100, bos);
-            byte[] bytes = bos.toByteArray();
+            // 投稿の画像と同じ作り方(名前は .png のまま、中身は公式アプリと同じ大きさ・画質)
+            byte[] bytes = encodeUploadImage(bmp);
             JSONObject cfg = imageS3Config();
             JSONObject creds = cognitoCredentials(cfg);
             String bareName = UUID.randomUUID().toString().replace("-", "") + ".png";
@@ -8191,7 +8423,7 @@ public class KoeSession {
     // 公式アプリの実装(ChatType1Api / BulkDeleteRequest の注釈から確定):
     //   POST /api/chat/chats_bulk_delete   ※api.meetscom.com(TYPE_1)
     //   Content-Type: application/json
-    //   {"chat_ids":[…], "uid":<自分>, "auth_token":"…", "version":"android_3.9.101"}
+    //   {"chat_ids":[…], "uid":<自分>, "auth_token":"…", "version":"android_<バージョン>"}
     // フォーム送信では 200 が返るのに1件も消えなかったのは、本文がJSONでないと
     // サーバーが chat_ids を読めていなかったため。
     private String bulkDeleteChats(String chatIdsCsv) {
@@ -9350,7 +9582,7 @@ public class KoeSession {
      * 公式アプリ(OkHttpSingleton)とまったく同じ形で書き込みリクエストを送る。
      *   POST / PUT … URL にクエリを付けず、auth_token と version=android_x.y.z を「本文」に入れる
      *   DELETE     … 本文なし、auth_token と version=android_x.y.z を「クエリ」に入れる
-     * 共通の request() は version を "3.9.101"(android_ 無し)でクエリに載せるため、
+     * 共通の request() は version を "<バージョン>"(android_ 無し)でクエリに載せるため、
      * 旧サーバー(api.meetscom.com)の /api/matching 系・/api/dive/ 系では
      * HTTP 200 が返るのに待ち行列へ入らない(＝いつまでもマッチしない)ことがある。
      * ランダム通話まわりは必ずこちらを使う。
@@ -10325,7 +10557,7 @@ public class KoeSession {
     }
 
     // 公式(BookmarkApi, TYPE_2=api2) は POST /api/bookmark_timeline_post?timeline_post_id= /
-    // DELETE /api/delete_timeline_post_bookmark、つぶやくは feed_post_id 版。version=android_3.9.101、
+    // DELETE /api/delete_timeline_post_bookmark、つぶやくは feed_post_id 版。version=android_<バージョン>、
     // 成功時も vsns!=0 が返るため HTTP ステータスで判定する。種別が不明な場合は両方試す。
     private String toggleBookmark(String str, boolean removing, boolean isTalk) {
         String[][] kinds = isTalk
@@ -12307,6 +12539,11 @@ public class KoeSession {
                 }
                 if (str.equals("get_cheering_voice_call")) {
                     return getCheeringVoiceCall(jSONArray.optString(0), jSONArray.optString(1, ""));
+                }
+                if (str.equals("warm_upload")) {
+                    // 投稿画面を開いた時の下ごしらえ。待たずにすぐ返す。
+                    warmUpload();
+                    return "{\"ok\":true}";
                 }
                 if (str.equals("get_native_log")) {
                     return getNativeLog();
