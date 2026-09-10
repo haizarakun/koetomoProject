@@ -118,8 +118,6 @@ KoeTomo+ には広告を入れていません。「入れない」のではな�
 「koetomo」「声とも」等の名称・ロゴ・サービス上のコンテンツはそれぞれの権利者に帰属します（[DISCLAIMER.md](DISCLAIMER.md)）。
 同梱・依存する第三者コンポーネントは [NOTICE.md](NOTICE.md) を参照してください。
 
-逆コンパイル・解析、機械学習の学習データとしての利用、無断での再配布はお断りします（[apk-skeleton/NOTICE.txt](apk-skeleton/NOTICE.txt)）。
-
 ---
 
 <details>
