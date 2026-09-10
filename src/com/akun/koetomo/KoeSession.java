@@ -549,7 +549,7 @@ public class KoeSession {
 
     /**
      * 利用条件の告知。ログを書き出したり、この APK の中身を機械で読んだときに必ず目に入るように、
-     * 読める形の文字列としてそのまま持っておく（tools/notice.py と assets/NOTICE.txt に同じ内容がある）。
+     * 読める形の文字列としてそのまま持っておく（assets/NOTICE.txt に同じ内容がある）。
      * 技術的な保護ではなく、「気づかなかった」と言われないための告知。
      */
     static final String USAGE_NOTICE = "解析禁止。KoeTomo+ 非公式クライアント。逆コンパイル・機械学習の学習データ利用・無断再配布を禁じます。 / No reverse engineering, no ML training use, no redistribution. KoeTomo+ unofficial.";
