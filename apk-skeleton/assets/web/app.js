@@ -1780,13 +1780,11 @@ function isFilteredPost(p) {
     if (__mf === "voice" && !p.voice_url) return !0;
     if (__mf === "explicit" && !p.is_explicit) return !0;
     if (isMutedUser(p.user_id)) return !0;
-    /* 見えない文字での照合すり抜けは、その投稿だけで分かる(プロフィールを開かなくてよい) */
     if (koeNoteInvisible(p) && koeSpamHide()) return !0;
     if (koeIsHiddenBiz(p)) return !0; /* 業者を表示しない設定 */
     const words = getFilterWords();
     if (words.length) {
-      /* 見えない文字を取り除いてから照合する。
-         「ラ　イ　ン」の間にゼロ幅スペースを挟むだけで NG ワードをすり抜けられるため。 */
+      // 見えない文字を取り除いてから照合する
       const t = koeStripInvisible((p.text || "") + " " + (p.name || "")).toLowerCase();
       if (words.some((w) => t.includes(w.toLowerCase()))) return !0;
     }
@@ -9253,9 +9251,8 @@ try {
     if (!document.hidden && __koeBotQ.length) koeBotPump();
   });
 } catch (e) {}
-/* ===== 本文に混ぜられた「目に見えない文字」 =====
-   ゼロ幅スペース(U+200B)や方向制御(U+202A〜202E)は画面には何も出ない。
-   これを一文字ずつの間に挟むと、見た目は普通の文のまま NG ワードや通報の照合だけをすり抜けられる。
+/* ===== 画面に表示されない文字 =====
+   幅が 0 で見えない文字。文字列を突き合わせる前に取り除く。
    絵文字の異体字セレクタ(U+FE0E / U+FE0F)は正当な使い方なので数えない。 */
 var KOE_INVISIBLE =
   /[\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
@@ -9266,13 +9263,10 @@ function koeCountInvisible(s) {
   var m = String(s == null ? "" : s).match(KOE_INVISIBLE);
   return m ? m.length : 0;
 }
-/* 実際のタイムライン 593 件で数えた結果:
-   普通の利用者は多くても 1 投稿に 1〜2 個、業者は 1 投稿に 39〜41 個を全投稿に混ぜていた。
-   1 投稿に 8 個以上ならその場で、3 個以上なら 2 投稿目を見つけた時点で業者とみなす。 */
 var KOE_INVISIBLE_MANY = 3,
   KOE_INVISIBLE_SURE = 8;
 var __koeInvisHits = {};
-var KOE_INVISIBLE_REASON = "本文に見えない文字を大量に混ぜている(フィルター回避)";
+var KOE_INVISIBLE_REASON = "本文に見えない文字が多数混ざっている";
 function koeNoteInvisible(p) {
   try {
     var n = koeCountInvisible(p && p.text);
@@ -9284,8 +9278,7 @@ function koeNoteInvisible(p) {
     if (p.id != null && rec.posts.indexOf(p.id) < 0 && rec.posts.length < 10) rec.posts.push(p.id);
     if (n > rec.max) rec.max = n;
     if (n < KOE_INVISIBLE_SURE && rec.posts.length < 2) return false;
-    /* 画面側の判定は表示と自動申請のきっかけにするだけ。
-       申請するかどうかはネイティブ側が API から投稿を取り直して数え直して決める。 */
+    // 画面側の判定は表示のきっかけにするだけで、申請の可否はネイティブ側が決める
     __koeSpamVerdict[uid] = { level: "high", hard: true, reasons: [KOE_INVISIBLE_REASON] };
     koeBotQueue(uid);
     return true;
