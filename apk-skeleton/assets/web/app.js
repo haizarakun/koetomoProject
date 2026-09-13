@@ -248,14 +248,22 @@ function koeErrMsg(r, ctx) {
 }
 
 // 大画面(Meta Quest など)で本文列を画面中央に置くため、左側UI(レール+サイドバー)の実幅をCSSへ渡す
+var koeChromeLeft = null,
+  koeChromeEl = null;
 function koeSyncChromeWidth() {
   try {
-    var c = document.querySelector(".main-screen > .content");
+    var c = koeChromeEl && koeChromeEl.isConnected ? koeChromeEl : document.querySelector(".main-screen > .content");
+    koeChromeEl = c;
     if (!c) {
       document.documentElement.style.removeProperty("--koe-chrome");
+      koeChromeLeft = null;
       return;
     }
     var left = Math.round(c.getBoundingClientRect().left);
+    /* 値が変わっていないのに書き戻すと、そのたびにレイアウトを計算し直すことになる。
+       一覧を描くたびに呼ばれる(ResizeObserver)ので、変わった時だけ反映する。 */
+    if (left === koeChromeLeft) return;
+    koeChromeLeft = left;
     document.documentElement.style.setProperty("--koe-chrome", left + "px");
   } catch (e) {}
 }
@@ -268,6 +276,8 @@ try {
   setTimeout(koeSyncChromeWidth, 300);
   setTimeout(koeSyncChromeWidth, 1500);
   if (window.ResizeObserver) {
+    /* ResizeObserver のコールバックはレイアウト確定後に呼ばれるので、
+       ここで位置を読んでもレイアウトのやり直しは起きない(値が変わった時だけ書き込む)。 */
     var __ro = new ResizeObserver(function () {
       koeSyncChromeWidth();
     });
@@ -1428,8 +1438,32 @@ function showSessionExpiredChooser(accounts) {
       (m.remove(), showScreen("loginScreen"));
     }));
 }
-function escapeHtml(s) {
+/* 画面を壊すための文字を取り除く。
+   目に見えない文字(ゼロ幅)、文字の向きを変える文字、制御文字、
+   それに改行の大量投下は、名前やコメントに混ぜて表示を崩すのに使われる。 */
+function koeStripTricks(s) {
   return String(s == null ? "" : s)
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, "")
+    .replace(/\n{4,}/g, "\n\n");
+}
+
+/* 長すぎる本文は切って出す(元の文は残す。画面が流れてしまうのを防ぐだけ) */
+function koeCutLong(s, maxLen) {
+  var t = String(s == null ? "" : s);
+  var cap = maxLen || 1000;
+  return t.length > cap ? t.slice(0, cap) + "…（長すぎるので省略）" : t;
+}
+
+/* 名前は一行におさめ、長すぎるものは切る(枠の一覧を崩されないため) */
+function koeCleanName(s, maxLen) {
+  var t = koeStripTricks(s).replace(/[\r\n\t]+/g, " ").trim();
+  var cap = maxLen || 24;
+  return t.length > cap ? t.slice(0, cap) + "…" : t;
+}
+
+function escapeHtml(s) {
+  return koeStripTricks(s)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -1437,7 +1471,7 @@ function escapeHtml(s) {
     .replace(/'/g, "&#39;");
 }
 function escAttr(s) {
-  return String(s == null ? "" : s)
+  return koeStripTricks(s)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -2405,12 +2439,26 @@ async function saveCurrentAccount() {
       name = (li && li.user_name) || "";
     } catch (e) {}
     let a = getAccounts();
-    const i = a.findIndex((x) => x.user_id === id),
-      acc = {
+    const i = a.findIndex((x) => x.user_id === id);
+    /* アイコンはマイページを開いたときにしか覚えていなかったため、
+       ログインしただけのアカウントは一覧の丸が頭文字のままだった。
+       手元に無いときはここで 1 度だけプロフィールから取っておく。 */
+    let icon = i >= 0 ? a[i].icon || "" : "";
+    if (!icon) {
+      try {
+        const mp = await callApi("get_my_profile");
+        const prof = (mp && mp.ok && mp.profile) || null;
+        if (prof) {
+          if (prof.icon_url) icon = prof.icon_url;
+          if (!name && prof.name) name = prof.name;
+        }
+      } catch (e) {}
+    }
+    const acc = {
         user_id: id,
         token: r.token,
         name: name || (i >= 0 ? a[i].name : "") || "user " + id,
-        icon: i >= 0 ? a[i].icon : "",
+        icon: icon,
         method: window.__koeLoginMethod || (i >= 0 ? a[i].method : "") || "",
       };
     (i >= 0 ? (a[i] = acc) : a.push(acc), saveAccounts(a));
@@ -2442,6 +2490,49 @@ function renderAccounts() {
         }),
       ))
     : (box.innerHTML = '<span class="pd-empty">保存されたアカウントはありません</span>');
+  koeFillAccountIcons();
+}
+/* 以前の版で保存したアカウントはアイコンを持っていないことがある。
+   一覧を出したあとに足りない分だけ取りに行き、取れたら覚えて描き直す。 */
+let koeAccountIconsAsked = false;
+async function koeFillAccountIcons() {
+  if (koeAccountIconsAsked) return;
+  const list = getAccounts();
+  if (!Array.isArray(list)) return; // 保存内容が壊れているときは何もしない
+  const need = list.filter((x) => x && !x.icon && x.user_id).map((x) => x.user_id);
+  if (!need.length) return;
+  koeAccountIconsAsked = true;
+  try {
+    const r = await callApi("resolve_users", need.slice(0, 20).join(","));
+    const users = (r && r.ok && r.users) || null;
+    if (!users) return;
+    const byId = {};
+    users.forEach((u) => {
+      if (u && u.user_id) byId[u.user_id] = u;
+    });
+    const a = getAccounts();
+    if (!Array.isArray(a)) return;
+    let changed = false;
+    a.forEach((x) => {
+      if (!x) return;
+      const u = byId[x.user_id];
+      if (!u) return;
+      if (!x.icon && u.icon_url) {
+        x.icon = u.icon_url;
+        changed = true;
+      }
+      if ((!x.name || /^user /.test(x.name)) && u.name) {
+        x.name = u.name;
+        changed = true;
+      }
+    });
+    if (changed) {
+      saveAccounts(a);
+      koeAccountIconsAsked = false; // 取れた分を反映して描き直す
+      renderAccounts();
+      koeAccountIconsAsked = true;
+    }
+  } catch (e) {}
 }
 async function switchAccount(id) {
   const acc = getAccounts().find((x) => x.user_id === id);
@@ -2894,14 +2985,34 @@ function koeApplyBioClamp(id) {
 }
 /* 一覧・通話画面のアイコンは、ネイティブ(ImageThumbCache)で表示サイズに縮小した WebP を使う。
    原寸(数百px)をそのままデコードすると CPU/GPU とメモリを食い、発熱の原因になる。 */
+/* 画像などの URL は http / https だけ通す。
+   名前や装飾と同じくサーバーから来る文字なので、javascript: のような
+   別の仕掛けが混ざっていても画面に貼らないようにする。 */
+function koeSafeUrl(url) {
+  var u = String(url == null ? "" : url).trim();
+  if (!u) return "";
+  // 引用符・丸括弧・空白が入った URL は使わない。
+  // style="background-image:url('…')" のような場所に入れても外へ抜け出せないようにするため。
+  return /^https?:\/\/[^'"()\\\s]+$/i.test(u) ? u : "";
+}
+
+/* 通話グリッドのアイコン画像が読めなかったら、その画像だけ消す。
+   下に頭文字＋色の丸が敷いてあるので、真っ黒にならずに頭文字が見える。 */
+function koeCallImgErr(img) {
+  try {
+    img.remove();
+  } catch (e) {}
+}
 function koeThumb(url, cssPx) {
-  if (!url || !/^https?:\/\//i.test(String(url))) return url;
+  url = koeSafeUrl(url);
+  if (!url) return "";
   var dpr = Math.min(3, window.devicePixelRatio || 1),
     w = Math.round((cssPx || 48) * dpr);
   return url + (url.indexOf("?") < 0 ? "?" : "&") + "koe_w=" + w;
 }
 function avatarHtml(name, iconUrl) {
-  const initial = escapeHtml((name || "?").charAt(0).toUpperCase());
+  const initial = escapeHtml(String(name || "?").charAt(0).toUpperCase());
+  iconUrl = koeSafeUrl(iconUrl);
   return iconUrl
     ? `<img class="avatar" loading="lazy" decoding="async" src="${escAttr(koeThumb(iconUrl, 46))}" data-retry="0" data-ini="${initial}" onerror="koeImgRetry(this)">`
     : `<div class="avatar">${initial}</div>`;
@@ -2923,7 +3034,9 @@ function toast(message, type) {
         __ov &&
         __ov.style.display !== "none" &&
         type !== "error" &&
-        /参加|退出|手を挙げ|発言|枠名|閉じられ|許可|拒否|ミュート|招待|退室|入室/.test(String(message))
+        /* 参加・退出・発言者・ミュートなどは、名前と番号つきで別に記録している。
+           ここで写すと同じ行が2つ並ぶので、写すのはそれ以外だけにする。 */
+        /枠名|閉じられ|招待|許可|拒否/.test(String(message))
       )
         koeChatSystem(message);
     }
@@ -3116,11 +3229,58 @@ function notifTs(x) {
   var d = Date.parse(s);
   return isNaN(d) ? 0 : d;
 }
+/* 画面を閉じている間に届いた通知を、端末のローカル通知で知らせる(疑似プッシュ)。
+   ※公式のFCM送信元は使えないため、これはアプリの処理が生きている間だけ動く近似。
+     アプリが完全に終了させられていると鳴らせない(本物のプッシュは技術的に不可)。 */
+function koeBgNotify(notifs) {
+  try {
+    if (!(window.KoeApp && KoeApp.showNotification)) return;
+    var last = 0,
+      seen = 0;
+    try {
+      last = Number(localStorage.getItem("koe_notif_notified")) || 0;
+    } catch (e) {}
+    try {
+      seen = Number(localStorage.getItem("koe_notif_seen")) || 0;
+    } catch (e) {}
+    var mark = Math.max(last, seen);
+    var news = [],
+      newest = mark;
+    (notifs || []).forEach(function (n) {
+      if (typeof isNotifTypeMuted === "function" && isNotifTypeMuted(n.type)) return;
+      var t = notifTs(n.created_at);
+      if (t > newest) newest = t;
+      if (t > mark) news.push(n);
+    });
+    if (mark === 0) {
+      /* 初回は既存の通知を「新着」として大量に鳴らさない。基準だけ更新する。 */
+      try {
+        localStorage.setItem("koe_notif_notified", String(newest));
+      } catch (e) {}
+      return;
+    }
+    if (!news.length) return;
+    var one = news[0] || {};
+    var body =
+      news.length === 1
+        ? one.message || one.description || one.text || one.body || "新しい通知があります"
+        : "新しい通知が " + news.length + " 件あります";
+    try {
+      KoeApp.showNotification("KoeTomo+", String(body).slice(0, 120));
+    } catch (e) {}
+    try {
+      localStorage.setItem("koe_notif_notified", String(newest));
+    } catch (e) {}
+  } catch (e) {}
+}
 async function checkNotifications() {
-  if (document.hidden) return;
   try {
     var r = await callApi("get_notifications", "normal");
     if (!r || !r.ok || !r.notifications) return;
+    if (document.hidden) {
+      koeBgNotify(r.notifications); // 画面を閉じている間は通知だけ出し、画面は触らない
+      return;
+    }
     var seen = 0;
     try {
       seen = Number(localStorage.getItem("koe_notif_seen")) || 0;
@@ -3818,13 +3978,6 @@ function __initUiExtras() {
       });
   }
   {
-    const ub = document.getElementById("userSearchBtn");
-    if (ub) ub.addEventListener("click", doUserSearch);
-    const ui = document.getElementById("userSearchInput");
-    if (ui)
-      ui.addEventListener("keydown", function (e) {
-        if (e.key === "Enter") doUserSearch();
-      });
     const ws = document.getElementById("walletSection");
     if (ws)
       ws.addEventListener("toggle", function () {
@@ -4003,6 +4156,7 @@ function __initUiExtras() {
         ["callChatPanel", "callChatToggle"],
         ["callSettingsPanel", "callSettingsToggle"],
         ["callGuardPanel", "callGuardToggle"],
+        ["callNsPanel", "callNsToggle"],
       ].forEach(([pid, tid]) => {
         const panel = document.getElementById(pid);
         if (
@@ -4046,7 +4200,7 @@ function __initUiExtras() {
       (t.addEventListener("input", upd), upd());
     })(),
     KoeSched.start("relTimes", refreshRelTimes, { ms: 6e4, hiddenMs: 0 }),
-    KoeSched.start("notifCheck", checkNotifications, { ms: 6e4, hiddenMs: 0 }),
+    KoeSched.start("notifCheck", checkNotifications, { ms: 6e4, hiddenMs: 120000 }),
     setTimeout(checkNotifications, 3e3),
     setTimeout(function () {
       try {
@@ -4655,18 +4809,7 @@ function __initUiExtras() {
         } else toast("数字のIDを入力してください", "error");
       });
   }
-  (!(function () {
-    const c = document.querySelector(".callv2");
-    if (c && !document.getElementById("callMicMeter")) {
-      const m = document.createElement("div");
-      ((m.id = "callMicMeter"),
-        (m.innerHTML =
-          '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><div class="mic-meter-track"><div id="callMicMeterFill"></div></div>'));
-      const bottom = c.querySelector(".callv2-bottom");
-      bottom && c.insertBefore(m, bottom);
-    }
-  })(),
-    renderNavOrderEditor());
+  (koeEnsureMicMeter(), renderNavOrderEditor());
 }
 function showPage(name) {
   document.getElementById("page-" + name) || (name = "timeline");
@@ -4735,7 +4878,9 @@ function showPage(name) {
 function openComposeModal() {
   // 画像や音声を上げるための下ごしらえを、書いている間に済ませておく。
   // 送信ボタンを押してからだと、そのぶんそのまま待ち時間になる。
-  try { callApi("warm_upload"); } catch (e) {}
+  try {
+    callApi("warm_upload");
+  } catch (e) {}
   ((document.getElementById("composeText").value = (function () {
     try {
       return localStorage.getItem("koe_draft") || "";
@@ -4946,7 +5091,7 @@ async function submitComposePost() {
 // 直近に自分が出した投稿を覚えておく。
 // サーバーの索引が追いつくまで、プロフィールを開き直しても出てくるようにするため。
 // 画面を移っても残るよう、この画面の記憶(sessionStorage)にも書いておく。
-var KOE_JUST_POSTED_MS = 900000;   // 15 分
+var KOE_JUST_POSTED_MS = 900000; // 15 分
 
 function justPostedList() {
   var arr = window.__koeJustPosted;
@@ -4960,14 +5105,18 @@ function justPostedList() {
     window.__koeJustPosted = arr;
   }
   var now = Date.now();
-  arr = arr.filter(function (x) { return x && now - x.t < KOE_JUST_POSTED_MS; });
+  arr = arr.filter(function (x) {
+    return x && now - x.t < KOE_JUST_POSTED_MS;
+  });
   window.__koeJustPosted = arr;
   return arr;
 }
 
 function saveJustPosted(arr) {
   window.__koeJustPosted = arr;
-  try { sessionStorage.setItem("koe_just_posted", JSON.stringify(arr)); } catch (e) {}
+  try {
+    sessionStorage.setItem("koe_just_posted", JSON.stringify(arr));
+  } catch (e) {}
 }
 
 function rememberJustPosted(p) {
@@ -4989,7 +5138,9 @@ function rememberJustPosted(p) {
 
 // サーバーが返してくるようになったら、覚えていた分は捨てる
 function forgetJustPosted(texts) {
-  var arr = justPostedList().filter(function (x) { return texts.indexOf(x.text || "") < 0; });
+  var arr = justPostedList().filter(function (x) {
+    return texts.indexOf(x.text || "") < 0;
+  });
   saveJustPosted(arr);
 }
 
@@ -5003,7 +5154,9 @@ async function confirmPosted(result, cards, sig) {
 
   if (body.duplicate) {
     // 同じ内容を続けて送ったので、こちらでは送っていない
-    cards.forEach(function (c) { if (c && c.parentNode) c.parentNode.removeChild(c); });
+    cards.forEach(function (c) {
+      if (c && c.parentNode) c.parentNode.removeChild(c);
+    });
     toast("同じ内容をたった今送っています", "error");
     return false;
   }
@@ -5035,7 +5188,9 @@ function markPosted(cards, id) {
   (cards || []).forEach(function (c) {
     if (!c) return;
     c.style.opacity = "";
-    try { if (id) c.dataset.pid = String(id); } catch (e) {}
+    try {
+      if (id) c.dataset.pid = String(id);
+    } catch (e) {}
   });
 }
 
@@ -5058,8 +5213,8 @@ function insertOwnPostCard(post) {
   var added = [];
   boxes.forEach(function (b) {
     var el = document.getElementById(b.id);
-    if (!el || !el.offsetParent) return;                      // 画面に出ていない一覧は触らない
-    if (b.mineOnly && String(el.dataset.koeUid || me) !== me) return;   // 他人のページには足さない
+    if (!el || !el.offsetParent) return; // 画面に出ていない一覧は触らない
+    if (b.mineOnly && String(el.dataset.koeUid || me) !== me) return; // 他人のページには足さない
     try {
       el.insertAdjacentHTML("afterbegin", html);
       if (el.firstElementChild) added.push(el.firstElementChild);
@@ -5087,7 +5242,9 @@ async function submitComposePostInner() {
   if (!text && !composeImageDataUrl && !composeVoiceDataUrl)
     return void toast("投稿内容・画像・音声のいずれかを入力してください", "error");
 
-  const __sig = [topic, text, (composeImageDataUrl || "").length, (composeVoiceDataUrl || "").length].join("|");
+  const __sig = [topic, text, (composeImageDataUrl || "").length, (composeVoiceDataUrl || "").length].join(
+    "|",
+  );
   if (window.__koeLastPostSig === __sig && Date.now() - (window.__koeLastPostAt || 0) < 15000) {
     toast("同じ内容をたった今投稿しています", "error");
     return;
@@ -5120,7 +5277,9 @@ async function submitComposePostInner() {
   let optCards = [];
   try {
     optCards = insertOwnPostCard(optPost);
-    optCards.forEach(function (c) { c.style.opacity = "0.55"; });   // 確認できるまでは薄く
+    optCards.forEach(function (c) {
+      c.style.opacity = "0.55";
+    }); // 確認できるまでは薄く
   } catch (e) {}
   closeComposeModal();
   sfx("post");
@@ -5132,7 +5291,13 @@ async function submitComposePostInner() {
       p,
       new Promise((res) =>
         setTimeout(
-          () => res({ ok: false, timeout: true, friendly: "時間内に返事がありませんでした。タイムラインを更新して、投稿できているか確認してください" }),
+          () =>
+            res({
+              ok: false,
+              timeout: true,
+              friendly:
+                "時間内に返事がありませんでした。タイムラインを更新して、投稿できているか確認してください",
+            }),
           ms,
         ),
       ),
@@ -5154,11 +5319,19 @@ async function submitComposePostInner() {
       );
     } else if (savedImage) {
       result = await withLimit(
-        callApi(isFeed ? "create_feed_post_with_image" : "create_timeline_post_with_image", savedText, 0, savedImage),
+        callApi(
+          isFeed ? "create_feed_post_with_image" : "create_timeline_post_with_image",
+          savedText,
+          0,
+          savedImage,
+        ),
         180000,
       );
     } else {
-      result = await withLimit(callApi(isFeed ? "create_feed_post" : "create_timeline_post", savedText, 0), 100000);
+      result = await withLimit(
+        callApi(isFeed ? "create_feed_post" : "create_timeline_post", savedText, 0),
+        100000,
+      );
     }
   } catch (e) {
     result = { ok: false, friendly: String((e && e.message) || e) };
@@ -5175,13 +5348,17 @@ async function submitComposePostInner() {
     });
     clearComposeImage();
     clearComposeVoice();
-    try { localStorage.removeItem("koe_draft"); } catch (e) {}
+    try {
+      localStorage.removeItem("koe_draft");
+    } catch (e) {}
     await confirmPosted(result, optCards, __sig);
     return;
   }
 
   // 失敗: 仮のカードを取り消して、書いた内容ごと投稿画面へ戻す
-  optCards.forEach(function (c) { if (c && c.parentNode) c.parentNode.removeChild(c); });
+  optCards.forEach(function (c) {
+    if (c && c.parentNode) c.parentNode.removeChild(c);
+  });
   try {
     openComposeModal();
     var ct = document.getElementById("composeText");
@@ -5317,9 +5494,14 @@ async function doSignup() {
   }
 }
 function enterMain(userName) {
-  try {
-    sfx("success");
-  } catch (e) {}
+  /* 起動音は画面表示を待たせない。
+     sfx() は初回に AudioContext を作るため、ここで同期実行すると
+     実測で約36ms ぶん画面が出るのが遅れていた(音は後追いで鳴らす)。 */
+  setTimeout(function () {
+    try {
+      sfx("success");
+    } catch (e) {}
+  }, 0);
   try {
     setTimeout(function () {
       callApi("system_arrival").catch(function () {});
@@ -5808,7 +5990,7 @@ async function loadCallRecords(source) {
       (box.innerHTML = recs
         .map(
           (p, i) =>
-            `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}${p.deco_url ? " has-deco" : ""}" data-pid="${p.id}" data-likes="${p.likes || 0}"${p.deco_url ? ` style="--koe-deco:url(${escAttr(JSON.stringify(String(p.deco_url)))})"` : ""}>\n      <div class="tl-head">\n        <span class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})'>${koeAdornAvatar(p.name, p.icon_url, p.deco_item, p.badge_url)}</span>\n        <div class="tl-meta" onclick='viewProfile(${Number(p.user_id) || 0})'>\n          <div class="tl-name">${escapeHtml(p.name || "user " + p.user_id)}${p.other_name ? ` <span style="opacity:.55;font-weight:400;">↔ ${escapeHtml(p.other_name)}</span>` : ""} <span class="uid-tag">ID:${Number(p.user_id) || 0}</span></div>\n          <div class="tl-time" data-ts="${escapeHtml(p.created_at)}">${koeTimeLabel(p.created_at)}<span class="koe-tl-extra">${p.play_time ? " ・ 通話" + __fmtT(p.play_time) : ""}${p.play_count ? " ・ ▶" + p.play_count : ""}</span></div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : ""}\n      ${p.voice_url ? voicePlayerHtml(p.voice_url) : '<div class="empty-msg" style="font-size:12px;padding:4px 0;">(音声を取得できませんでした)</div>'}\n      <div class="tl-actions">\n        <span class="like-btn ${p.liked ? "liked" : ""}" data-rec-like="${i}">\n          ${p.liked ? '<svg class="ico" viewBox="0 0 24 24" fill="currentColor" style="color:#ff5a6a"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>' : '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>'} <span class="rec-like-n">${p.likes}</span>\n        </span>\n        <span class="comment-btn" data-rec-comment="${i}" style="cursor:pointer;"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8A2.5 2.5 0 0 1 17.5 16H9l-4 3.6a.8.8 0 0 1-1.3-.6V5.5Z"/></svg> ${p.comments}</span>\n      </div>\n    </div>`,
+            `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}${p.deco_url ? " has-deco" : ""}" data-pid="${p.id}" data-likes="${p.likes || 0}"${p.deco_url ? ` style="--koe-deco:url('${koeSafeUrl(p.deco_url)}')"` : ""}>\n      <div class="tl-head">\n        <span class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})'>${koeAdornAvatar(p.name, p.icon_url, p.deco_item, p.badge_url)}</span>\n        <div class="tl-meta" onclick='viewProfile(${Number(p.user_id) || 0})'>\n          <div class="tl-name">${escapeHtml(p.name || "user " + p.user_id)}${p.other_name ? ` <span style="opacity:.55;font-weight:400;">↔ ${escapeHtml(p.other_name)}</span>` : ""} <span class="uid-tag">ID:${Number(p.user_id) || 0}</span></div>\n          <div class="tl-time" data-ts="${escapeHtml(p.created_at)}">${koeTimeLabel(p.created_at)}<span class="koe-tl-extra">${p.play_time ? " ・ 通話" + __fmtT(p.play_time) : ""}${p.play_count ? " ・ ▶" + p.play_count : ""}</span></div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : ""}\n      ${p.voice_url ? voicePlayerHtml(p.voice_url) : '<div class="empty-msg" style="font-size:12px;padding:4px 0;">(音声を取得できませんでした)</div>'}\n      <div class="tl-actions">\n        <span class="like-btn ${p.liked ? "liked" : ""}" data-rec-like="${i}">\n          ${p.liked ? '<i class="ico kiHeartOn" style="color:#ff5a6a"></i>' : '<i class="ico kiHeartOff"></i>'} <span class="rec-like-n">${p.likes}</span>\n        </span>\n        <span class="comment-btn" data-rec-comment="${i}" style="cursor:pointer;"><i class="ico kiCmt"></i> ${p.comments}</span>\n      </div>\n    </div>`,
         )
         .join("")),
       box.querySelectorAll("[data-rec-comment]").forEach((el) => {
@@ -5916,7 +6098,8 @@ function toggleAudioPlayer(pl) {
     }));
 }
 function postCardHtml(p) {
-  return `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}${p.deco_url ? " has-deco" : ""}" data-pid="${p.id}" data-likes="${p.likes || 0}"${p.deco_url ? ` style="--koe-deco:url(${escAttr(JSON.stringify(String(p.deco_url)))})"` : ""}>\n      <div class="tl-head">\n        <span class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})'>${koeAdornAvatar(p.name, p.icon_url, p.deco_item, p.badge_url)}</span>\n        <div class="tl-meta" onclick='viewProfile(${Number(p.user_id) || 0})'>\n          <div class="tl-name">${escapeHtml(p.name)} <span class="uid-tag">ID:${Number(p.user_id) || 0}</span>${koeSpamTag(p)}${p.is_talk ? ' <span class="uid-tag koe-feedbadge">通話募集</span>' : ""}${p.is_explicit ? ' <span class="uid-tag koe-regbadge">⚠ 規制対象</span>' : ""}</div>\n          <div class="tl-time" data-ts="${escapeHtml(p.created_at)}" title="${escapeHtml(p.created_at)}">${koeTimeLabel(p.created_at)}</div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : !p.image_url && !p.voice_url ? `<div class="tl-text tl-empty">${p.has_voice || p.play_time ? "\ud83c\udfa7 音声投稿" + (p.play_time ? "（" + Math.round(Number(p.play_time)) + "秒）" : "") : p.is_talk ? "\ud83c\udf99 通話募集の投稿です（本文なし）" : "（本文なし）"}</div>` : ""}\n      ${p.image_url ? `<img class="post-image" loading="lazy" decoding="async" src="${escAttr(p.image_url)}" onclick='event.stopPropagation(); openLightbox(${escAttr(JSON.stringify(p.image_url || ""))})' onerror="this.style.display='none'">` : ""}\n      ${p.voice_url ? VOICE_BADGE + voicePlayerHtml(p.voice_url) : ""}\n      <div class="tl-actions">\n        <span class="comment-btn" onclick='openPostDetail(event, ${Number(p.id) || 0})'><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8A2.5 2.5 0 0 1 17.5 16H9l-4 3.6a.8.8 0 0 1-1.3-.6V5.5Z"/></svg> ${p.comments}</span>\n        <span class="like-btn ${postLiked(p) ? "liked" : ""}" onclick='toggleTimelineLike(event, ${Number(p.id) || 0}, ${!!postLiked(p)})'>\n          ${postLiked(p) ? '<svg class="ico" viewBox="0 0 24 24" fill="currentColor" style="color:#ff5a6a"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>' : '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>'} ${Math.max(p.likes || 0, postLiked(p) ? 1 : 0)}\n        </span>\n        <span class="bookmark-btn ${p.bookmarked || koeBmHas(p.id) ? "marked" : ""}" onclick='toggleBookmark(event, ${Number(p.id) || 0}, ${!!(p.bookmarked || koeBmHas(p.id))}, ${p.is_talk ? 1 : 0})' title="ブックマーク"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M6 3.5h12a1 1 0 0 1 1 1V21l-7-4-7 4V4.5a1 1 0 0 1 1-1Z"/></svg></span>\n        ${p.user_id === myUserId ? `<span class="report-btn" onclick='deleteOwnPost(event, ${Number(p.id) || 0}, ${p.is_talk ? 1 : 0})'><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg> 削除</span>` : `<span class="report-btn" onclick='promptTimelineReport(event, ${Number(p.user_id) || 0})'><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="3" width="1.8" height="18" rx=".9"/><path d="M6 4h11l-2 3 2 3H6V4Z"/></svg> 通報</span>`}\n      </div>\n    </div>`;
+  if (!p || typeof p !== "object") return ""; // 壊れた1件で一覧全体が消えないようにする
+  return `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}${p.deco_url ? " has-deco" : ""}" data-pid="${p.id}" data-likes="${p.likes || 0}"${p.deco_url ? ` style="--koe-deco:url('${koeSafeUrl(p.deco_url)}')"` : ""}>\n      <div class="tl-head">\n        <span class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})'>${koeAdornAvatar(p.name, p.icon_url, p.deco_item, p.badge_url)}</span>\n        <div class="tl-meta" onclick='viewProfile(${Number(p.user_id) || 0})'>\n          <div class="tl-name">${escapeHtml(p.name)} <span class="uid-tag">ID:${Number(p.user_id) || 0}</span>${koeSpamTag(p)}${p.is_talk ? ' <span class="uid-tag koe-feedbadge">通話募集</span>' : ""}${p.is_explicit ? ' <span class="uid-tag koe-regbadge">⚠ 規制対象</span>' : ""}</div>\n          <div class="tl-time" data-ts="${escapeHtml(p.created_at)}" title="${escapeHtml(p.created_at)}">${koeTimeLabel(p.created_at)}</div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : !p.image_url && !p.voice_url ? `<div class="tl-text tl-empty">${p.has_voice || p.play_time ? "\ud83c\udfa7 音声投稿" + (p.play_time ? "（" + Math.round(Number(p.play_time)) + "秒）" : "") : p.is_talk ? "\ud83c\udf99 通話募集の投稿です（本文なし）" : "（本文なし）"}</div>` : ""}\n      ${p.image_url ? `<img class="post-image" loading="lazy" decoding="async" src="${escAttr(p.image_url)}" onclick='event.stopPropagation(); openLightbox(${escAttr(JSON.stringify(p.image_url || ""))})' onerror="this.style.display='none'">` : ""}\n      ${p.voice_url ? VOICE_BADGE + voicePlayerHtml(p.voice_url) : ""}\n      <div class="tl-actions">\n        <span class="comment-btn" onclick='openPostDetail(event, ${Number(p.id) || 0})'><i class="ico kiCmt"></i> ${p.comments}</span>\n        <span class="like-btn ${postLiked(p) ? "liked" : ""}" onclick='toggleTimelineLike(event, ${Number(p.id) || 0}, ${!!postLiked(p)})'>\n          ${postLiked(p) ? '<i class="ico kiHeartOn" style="color:#ff5a6a"></i>' : '<i class="ico kiHeartOff"></i>'} ${Math.max(p.likes || 0, postLiked(p) ? 1 : 0)}\n        </span>\n        <span class="bookmark-btn ${p.bookmarked || koeBmHas(p.id) ? "marked" : ""}" onclick='toggleBookmark(event, ${Number(p.id) || 0}, ${!!(p.bookmarked || koeBmHas(p.id))}, ${p.is_talk ? 1 : 0})' title="ブックマーク"><i class="ico kiBm"></i></span>\n        ${p.user_id === myUserId ? `<span class="report-btn" onclick='deleteOwnPost(event, ${Number(p.id) || 0}, ${p.is_talk ? 1 : 0})'><i class="ico kiTrash"></i> 削除</span>` : `<span class="report-btn" onclick='promptTimelineReport(event, ${Number(p.user_id) || 0})'><i class="ico kiFlag"></i> 通報</span>`}\n      </div>\n    </div>`;
 }
 async function loadBookmarks() {
   const box = document.getElementById("bookmarksList");
@@ -5945,80 +6128,6 @@ function refreshCurrentPage() {
     timelineMaxId = "";
     return loadTimeline(false);
   } catch (e) {}
-}
-function initPullToRefresh() {
-  var cb = document.getElementById("contentBody");
-  if (!cb || cb.__ptrBound) return;
-  if (cb.__ptr || document.querySelector(".content-body.__x") || true) {
-    cb.__ptrBound = true;
-    return;
-  }
-  /* setupPullToRefresh と二重に反応して2回更新されるため無効化 */ cb.__ptrBound = true;
-  var startY = 0,
-    pulling = false,
-    dist = 0,
-    ready = false;
-  cb.addEventListener(
-    "touchstart",
-    function (e) {
-      pulling = cb.scrollTop <= 0;
-      startY = pulling ? e.touches[0].clientY : 0;
-      dist = 0;
-      ready = false;
-    },
-    { passive: true },
-  );
-  cb.addEventListener(
-    "touchmove",
-    function (e) {
-      if (!pulling) return;
-      dist = e.touches[0].clientY - startY;
-      if (dist > 0 && cb.scrollTop <= 0) {
-        ready = dist > 80;
-        cb.style.transition = "none";
-        cb.style.transform = "translateY(" + Math.min(dist * 0.4, 52) + "px)";
-        if (dist > 12 && e.cancelable) e.preventDefault();
-      }
-    },
-    { passive: false },
-  );
-  cb.addEventListener("touchend", function () {
-    if (!pulling) return;
-    pulling = false;
-    cb.style.transition = "transform .25s";
-    cb.style.transform = "";
-    if (ready) {
-      try {
-        toast(" 更新中…");
-      } catch (e) {}
-      try {
-        sfx("refresh");
-      } catch (e) {}
-      try {
-        refreshCurrentPage();
-      } catch (e) {}
-    }
-    ready = false;
-    dist = 0;
-  });
-}
-function initTimelineFilters() {
-  document.querySelectorAll(".timeline-feed-chip[data-media]").forEach(function (chip) {
-    chip.addEventListener("click", function () {
-      var m = chip.dataset.media;
-      window.__tlMedia = window.__tlMedia === m ? "" : m;
-      document.querySelectorAll(".timeline-feed-chip[data-media]").forEach(function (c) {
-        c.classList.toggle("active", c.dataset.media === window.__tlMedia);
-      });
-      timelineMaxId = "";
-      var l = document.getElementById("timelineList");
-      if (l) l.innerHTML = "";
-      loadTimeline(false);
-      try {
-        sfx("tab");
-      } catch (e) {}
-    });
-  });
 }
 function initPullToRefresh() {
   var cb = document.getElementById("contentBody");
@@ -6194,7 +6303,7 @@ async function loadTimeline(append) {
     .filter((p) => !isFilteredPost(p) && (!window.__tlKeep || window.__tlKeep(p.id, append)))
     .map(
       (p) =>
-        `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}${p.deco_url ? " has-deco" : ""}" data-pid="${p.id}" data-likes="${p.likes || 0}"${p.deco_url ? ` style="--koe-deco:url(${escAttr(JSON.stringify(String(p.deco_url)))})"` : ""}>\n      <div class="tl-head">\n        <span class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})'>${koeAdornAvatar(p.name, p.icon_url, p.deco_item, p.badge_url)}</span>\n        <div class="tl-meta" onclick='viewProfile(${Number(p.user_id) || 0})'>\n          <div class="tl-name">${escapeHtml(p.name)} <span class="uid-tag">ID:${Number(p.user_id) || 0}</span>${koeSpamTag(p)}${p.is_talk ? ' <span class="uid-tag koe-feedbadge">通話募集</span>' : ""}${p.is_explicit ? ' <span class="uid-tag koe-regbadge">⚠ 規制対象</span>' : ""}</div>\n          <div class="tl-time" data-ts="${escapeHtml(p.created_at)}" title="${escapeHtml(p.created_at)}">${koeTimeLabel(p.created_at)}</div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : !p.image_url && !p.voice_url ? `<div class="tl-text tl-empty">${p.has_voice || p.play_time ? "\ud83c\udfa7 音声投稿" + (p.play_time ? "（" + Math.round(Number(p.play_time)) + "秒）" : "") : p.is_talk ? "\ud83c\udf99 通話募集の投稿です（本文なし）" : "（本文なし）"}</div>` : ""}\n      ${p.image_url ? `<img class="post-image" loading="lazy" decoding="async" src="${escAttr(p.image_url)}" onclick='event.stopPropagation(); openLightbox(${escAttr(JSON.stringify(p.image_url || ""))})' onerror="this.style.display='none'">` : ""}\n      ${p.voice_url ? VOICE_BADGE + voicePlayerHtml(p.voice_url) : ""}\n      <div class="tl-actions">\n        <span class="comment-btn" onclick='openPostDetail(event, ${Number(p.id) || 0})'><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8A2.5 2.5 0 0 1 17.5 16H9l-4 3.6a.8.8 0 0 1-1.3-.6V5.5Z"/></svg> ${p.comments}</span>\n        <span class="like-btn ${postLiked(p) ? "liked" : ""}" onclick='toggleTimelineLike(event, ${Number(p.id) || 0}, ${!!postLiked(p)})'>\n          ${postLiked(p) ? '<svg class="ico" viewBox="0 0 24 24" fill="currentColor" style="color:#ff5a6a"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>' : '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>'} ${Math.max(p.likes || 0, postLiked(p) ? 1 : 0)}\n        </span>\n        <span class="bookmark-btn ${p.bookmarked || koeBmHas(p.id) ? "marked" : ""}" onclick='toggleBookmark(event, ${Number(p.id) || 0}, ${!!(p.bookmarked || koeBmHas(p.id))}, ${p.is_talk ? 1 : 0})' title="ブックマーク"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M6 3.5h12a1 1 0 0 1 1 1V21l-7-4-7 4V4.5a1 1 0 0 1 1-1Z"/></svg></span>\n        ${p.user_id === myUserId ? `<span class="report-btn" onclick='deleteOwnPost(event, ${Number(p.id) || 0}, ${p.is_talk ? 1 : 0})'><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg> 削除</span>` : `<span class="report-btn" onclick='promptTimelineReport(event, ${Number(p.user_id) || 0})'><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="3" width="1.8" height="18" rx=".9"/><path d="M6 4h11l-2 3 2 3H6V4Z"/></svg> 通報</span>`}\n      </div>\n    </div>\n  `,
+        `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}${p.deco_url ? " has-deco" : ""}" data-pid="${p.id}" data-likes="${p.likes || 0}"${p.deco_url ? ` style="--koe-deco:url('${koeSafeUrl(p.deco_url)}')"` : ""}>\n      <div class="tl-head">\n        <span class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})'>${koeAdornAvatar(p.name, p.icon_url, p.deco_item, p.badge_url)}</span>\n        <div class="tl-meta" onclick='viewProfile(${Number(p.user_id) || 0})'>\n          <div class="tl-name">${escapeHtml(p.name)} <span class="uid-tag">ID:${Number(p.user_id) || 0}</span>${koeSpamTag(p)}${p.is_talk ? ' <span class="uid-tag koe-feedbadge">通話募集</span>' : ""}${p.is_explicit ? ' <span class="uid-tag koe-regbadge">⚠ 規制対象</span>' : ""}</div>\n          <div class="tl-time" data-ts="${escapeHtml(p.created_at)}" title="${escapeHtml(p.created_at)}">${koeTimeLabel(p.created_at)}</div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : !p.image_url && !p.voice_url ? `<div class="tl-text tl-empty">${p.has_voice || p.play_time ? "\ud83c\udfa7 音声投稿" + (p.play_time ? "（" + Math.round(Number(p.play_time)) + "秒）" : "") : p.is_talk ? "\ud83c\udf99 通話募集の投稿です（本文なし）" : "（本文なし）"}</div>` : ""}\n      ${p.image_url ? `<img class="post-image" loading="lazy" decoding="async" src="${escAttr(p.image_url)}" onclick='event.stopPropagation(); openLightbox(${escAttr(JSON.stringify(p.image_url || ""))})' onerror="this.style.display='none'">` : ""}\n      ${p.voice_url ? VOICE_BADGE + voicePlayerHtml(p.voice_url) : ""}\n      <div class="tl-actions">\n        <span class="comment-btn" onclick='openPostDetail(event, ${Number(p.id) || 0})'><i class="ico kiCmt"></i> ${p.comments}</span>\n        <span class="like-btn ${postLiked(p) ? "liked" : ""}" onclick='toggleTimelineLike(event, ${Number(p.id) || 0}, ${!!postLiked(p)})'>\n          ${postLiked(p) ? '<i class="ico kiHeartOn" style="color:#ff5a6a"></i>' : '<i class="ico kiHeartOff"></i>'} ${Math.max(p.likes || 0, postLiked(p) ? 1 : 0)}\n        </span>\n        <span class="bookmark-btn ${p.bookmarked || koeBmHas(p.id) ? "marked" : ""}" onclick='toggleBookmark(event, ${Number(p.id) || 0}, ${!!(p.bookmarked || koeBmHas(p.id))}, ${p.is_talk ? 1 : 0})' title="ブックマーク"><i class="ico kiBm"></i></span>\n        ${p.user_id === myUserId ? `<span class="report-btn" onclick='deleteOwnPost(event, ${Number(p.id) || 0}, ${p.is_talk ? 1 : 0})'><i class="ico kiTrash"></i> 削除</span>` : `<span class="report-btn" onclick='promptTimelineReport(event, ${Number(p.user_id) || 0})'><i class="ico kiFlag"></i> 通報</span>`}\n      </div>\n    </div>\n  `,
     )
     .join("");
   (append
@@ -6291,9 +6400,9 @@ async function toggleBookmark(evt, postId, currentlyBookmarked, isTalk) {
     : toast(`ブックマーク失敗: ${koeErrMsg(result)}`.slice(0, 120), "error");
 }
 const HEART_F_SVG =
-    '<svg class="ico" viewBox="0 0 24 24" fill="currentColor" style="color:#ff5a6a"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>',
+    '<i class="ico kiHeartOn" style="color:#ff5a6a"></i>',
   HEART_O_SVG =
-    '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>';
+    '<i class="ico kiHeartOff"></i>';
 async function toggleTimelineLike(evt, postId, currentlyLiked) {
   (evt.stopPropagation(), haptic(12));
   const span = evt.currentTarget,
@@ -6799,8 +6908,7 @@ async function loadReceivers(kind) {
   const list = document.getElementById("cheeringList");
   list.innerHTML = skeletonCards(4);
   const result = await callApi("get_receivers", kind);
-  result.ok
-    ? result.receivers.length
+  result.ok ? (result.receivers || []).length
       ? ((window._cheeringReceivers = result.receivers),
         (list.innerHTML = result.receivers
           .map(
@@ -6980,8 +7088,10 @@ async function loadPostsInto(boxId, uid) {
   try {
     const mine = typeof myUserId !== "undefined" && myUserId ? myUserId : currentAccountId();
     if (String(uid) === String(mine)) {
-      var __known = __posts.map(function (p) { return p.text || ""; });
-      forgetJustPosted(__known);                       // サーバーに載ったものは覚えておかない
+      var __known = __posts.map(function (p) {
+        return p.text || "";
+      });
+      forgetJustPosted(__known); // サーバーに載ったものは覚えておかない
       __pending = justPostedList().filter(function (x) {
         return String(x.user_id) === String(mine) && __known.indexOf(x.text || "") < 0;
       });
@@ -7020,46 +7130,78 @@ async function loadPostsInto(boxId, uid) {
     koeAutoDeleteRegulated(__posts);
   } catch (e) {}
   box.innerHTML = __posts.map(postCardHtml).join("");
+  /* 見えている投稿の id を控えておき、続きを読むときの重複を防ぐ。 */
+  box.__koeSeenPosts = {};
+  __posts.forEach(function (p) {
+    var id = Number(p && p.id) || 0;
+    if (id) box.__koeSeenPosts[id] = 1;
+  });
+  try {
+    koeSetupPostsMore(box, uid, r && r.next_max_id);
+  } catch (e) {}
 }
-async function doUserSearch() {
-  const inp = document.getElementById("userSearchInput");
-  if (!inp) return;
-  const name = inp.value.trim();
-  const box = document.getElementById("userSearchResults");
+/* 「もっと読む」ボタンを一覧の末尾に置く。cursor が空なら終端なので置かない。 */
+function koeSetupPostsMore(box, uid, cursor) {
   if (!box) return;
-  if (!name) {
-    box.innerHTML = '<div class="empty-msg">名前を入力してください</div>';
-    return;
+  var old = box.querySelector(".koe-posts-more");
+  if (old) old.remove();
+  if (!cursor) return;
+  var btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "koe-posts-more";
+  btn.textContent = "もっと読む";
+  btn.onclick = function () {
+    koeLoadMorePosts(btn, box, uid, cursor);
+  };
+  box.appendChild(btn);
+}
+/* 続きの投稿を取り足す。カードは「もっと読む」ボタンの前に差し込む。 */
+async function koeLoadMorePosts(btn, box, uid, cursor) {
+  if (!btn || btn.__busy) return;
+  btn.__busy = 1;
+  btn.disabled = true;
+  btn.textContent = "読み込み中...";
+  var r = null;
+  try {
+    r = await callApi("get_user_posts", String(uid), String(cursor || ""));
+  } catch (e) {
+    r = null;
   }
-  box.innerHTML = skeletonCards(3);
-  const r = await callApi("search_users", name, "1");
   if (!r || !r.ok) {
-    box.innerHTML = '<div class="empty-msg">検索に失敗しました</div>';
+    btn.disabled = false;
+    btn.__busy = 0;
+    btn.textContent = "もっと読む(もう一度試す)";
     return;
   }
-  if (!r.users || !r.users.length) {
-    box.innerHTML = '<div class="empty-msg">見つかりませんでした</div>';
-    return;
+  var seen = box.__koeSeenPosts || (box.__koeSeenPosts = {});
+  var fresh = (r.posts || []).filter(function (p) {
+    var id = Number(p && p.id) || 0;
+    if (!id || seen[id]) return false;
+    seen[id] = 1;
+    return true;
+  });
+  try {
+    koeAutoDeleteRegulated(fresh);
+  } catch (e) {}
+  if (fresh.length) {
+    btn.insertAdjacentHTML("beforebegin", fresh.map(postCardHtml).join(""));
   }
-  box.innerHTML = r.users
-    .map(function (u) {
-      return (
-        '<div class="card" onclick="viewProfile(' +
-        (Number(u.user_id) || 0) +
-        ')">' +
-        avatarHtml(u.name, u.icon_url) +
-        '<div class="card-body"><div class="card-name">' +
-        escapeHtml(u.name || "user " + u.user_id) +
-        ' <span class="uid-tag">ID:' +
-        u.user_id +
-        "</span></div>" +
-        (u.age ? '<div class="card-sub">' + escapeHtml(String(u.age)) + "歳</div>" : "") +
-        "</div></div>"
-      );
-    })
-    .join("");
+  btn.__busy = 0;
+  /* 次のページがまだあればボタンを作り直し、無ければ終端。 */
+  koeSetupPostsMore(box, uid, r.next_max_id);
+  /* 新しい投稿が1件も無く、次も無いなら終わり。次だけあるならボタンは復活済み。 */
+  if (!fresh.length && !r.next_max_id) {
+    var end = document.createElement("div");
+    end.className = "empty-msg";
+    end.style.padding = "6px 0";
+    end.textContent = "これ以上の投稿はありません";
+    box.appendChild(end);
+  }
 }
 function renderHistoryList(box, list) {
+  list = (list || []).filter(function (x) {
+    return x && typeof x === "object";
+  });
   if (!box) return;
   if (!list || !list.length) {
     box.innerHTML = '<div class="empty-msg" style="padding:6px 0;">履歴はありません</div>';
@@ -7232,7 +7374,8 @@ async function koeLoadMoreRooms() {
 function koeRoomKey(r) {
   if (!r) return "";
   var k = r.room_id || r.id || r.owner_user_id || r.user_id;
-  return k === 0 || k ? String(k) : "";
+  // この値は onclick の文字列の中に入る。数字以外は落として、書き換えの隙をなくす。
+  return k === 0 || k ? String(k).replace(/[^0-9]/g, "") : "";
 }
 function koeScrollEl() {
   var l = document.getElementById("callList");
@@ -7357,35 +7500,51 @@ async function koeSweepAllRooms(reason) {
       "のため、開いている枠を全部読み込んでいます。<br>枠が多いと10秒ほどかかります。読み込んだぶんから順に表示します。",
   );
   try {
-    for (let p = (window.__roomPage || 1) + 1; p <= 10; p++) {
+    // 3ページずつまとめて読む(1ページずつ順番だと、読み終わるまで何秒も待たせることになる)。
+    // 読めたぶんはこれまでどおりその都度画面に足していく。
+    const STEP = 3;
+    const start = (window.__roomPage || 1) + 1;
+    let stop = false;
+    for (let base = start; base <= 10 && !stop; base += STEP) {
       if (currentRoomId) break;
-      const r = await callApi("list_group_rooms", p);
-      const got = (r && r.ok && r.rooms) || [];
-      if (!got.length) {
-        window.__roomsAllLoaded = true;
-        break;
+      const pages = [];
+      for (let i = 0; i < STEP && base + i <= 10; i++) pages.push(base + i);
+      const results = await Promise.all(pages.map((n) => callApi("list_group_rooms", n)));
+      for (let idx = 0; idx < results.length; idx++) {
+        const p = pages[idx];
+        const r = results[idx];
+        const got = (r && r.ok && r.rooms) || [];
+        if (!got.length) {
+          window.__roomsAllLoaded = true;
+          stop = true;
+          break;
+        }
+        window.__roomPage = p;
+        const seen = {};
+        (window.__roomsCache || []).forEach((x) => {
+          const k = koeRoomKey(x);
+          if (k) seen[k] = 1;
+        });
+        const fresh = got.filter((x) => {
+          const k = koeRoomKey(x);
+          return !k || !seen[k];
+        });
+        window.__roomsCache = (window.__roomsCache || []).concat(fresh);
+        koeRoomNotice(
+          escapeHtml(reason) + "のため全部読み込み中… " + (window.__roomsCache || []).length + "枠",
+        );
+        applyRoomView(true);
+        if (got.length < 20) {
+          window.__roomsAllLoaded = true;
+          stop = true;
+          break;
+        }
+        if (p === 10) {
+          window.__roomsAllLoaded = true;
+          stop = true;
+        }
       }
-      window.__roomPage = p;
-      const seen = {};
-      (window.__roomsCache || []).forEach((x) => {
-        const k = koeRoomKey(x);
-        if (k) seen[k] = 1;
-      });
-      const fresh = got.filter((x) => {
-        const k = koeRoomKey(x);
-        return !k || !seen[k];
-      });
-      window.__roomsCache = (window.__roomsCache || []).concat(fresh);
-      koeRoomNotice(
-        escapeHtml(reason) + "のため全部読み込み中… " + (window.__roomsCache || []).length + "枠",
-      );
-      applyRoomView(true);
-      if (got.length < 20) {
-        window.__roomsAllLoaded = true;
-        break;
-      }
-      await new Promise((r2) => setTimeout(r2, 120));
-      if (p === 10) window.__roomsAllLoaded = true;
+      if (!stop) await new Promise((r2) => setTimeout(r2, 120));
     }
     window.__roomsCacheAt = Date.now();
     window.__roomsSweptAt = Date.now(); // 全件取得の完了時刻(しばらくは 1 ページ目の差分更新だけで済ませる)
@@ -7452,9 +7611,13 @@ async function loadGroupRooms(auto, force) {
   } finally {
     window.__koeRoomsLoading = false;
   }
-  /* 検索中・フォロー中タブで開いた場合は、続けて全件を読みに行く */
+  /* 更新ボタンを押したとき(force)は、タブに関係なく開いている枠を全部読み込む。
+     検索中・フォロー中タブで開いた場合も続けて全件を読みに行く。 */
   const q = koeRoomQuery();
-  if (q) koeSweepAllRooms("「" + q + "」の検索");
+  if (force) {
+    window.__roomsSweptAt = 0;
+    koeSweepAllRooms(q ? "「" + q + "」の検索" : roomFeed === "following" ? "「フォロー中」" : "「すべて」");
+  } else if (q) koeSweepAllRooms("「" + q + "」の検索");
   else if (roomFeed === "following") koeSweepAllRooms("「フォロー中」の絞り込み");
 }
 /* 下端近くまでスクロールしたら次の1ページを読む */
@@ -7791,11 +7954,23 @@ async function koeLoadAllRoomsQuiet() {
   window.__koeRoomsLoading = true;
   try {
     let all = [];
-    for (let p = 1; p <= 10; p++) {
-      const r = await callApi("list_group_rooms", p);
-      const got = (r && r.ok && r.rooms) || [];
-      all = all.concat(got);
-      if (got.length < 20) break;
+    // ページを1つずつ順番に読むと、10ページで10往復ぶん待つことになる(実測で3〜4秒)。
+    // 4ページずつまとめて同時に読み、20件に満たないページが出たらそこで終わり。
+    const STEP = 4;
+    for (let p = 1; p <= 10; p += STEP) {
+      const pages = [];
+      for (let i = 0; i < STEP && p + i <= 10; i++) pages.push(p + i);
+      const results = await Promise.all(pages.map((n) => callApi("list_group_rooms", n)));
+      let last = false;
+      for (const r of results) {
+        const got = (r && r.ok && r.rooms) || [];
+        all = all.concat(got);
+        if (got.length < 20) {
+          last = true;
+          break;
+        }
+      }
+      if (last) break;
     }
     window.__roomsCache = all;
     window.__roomPage = Math.max(1, Math.ceil(all.length / 20));
@@ -7949,7 +8124,8 @@ async function koeDecoFetch(force) {
 /* 公式 WebpGlideImage は png サーバーの画像を .png → .webp に置き換えて読む(装飾・バッジは webp で配信)。
    読めなければ onerror で元の拡張子に一度だけ戻す */
 function koeWebp(url) {
-  return url ? String(url).replace(/\.png(\?|$)/i, ".webp$1") : "";
+  url = koeSafeUrl(url);
+  return url ? url.replace(/\.png(\?|$)/i, ".webp$1") : "";
 }
 function koeDecoImgErr(img) {
   try {
@@ -8001,7 +8177,7 @@ function koeDecoUrl(itemId) {
     }
   }
   /* 装飾画像は公式アセット S3 に元の拡張子で置かれている(png サーバーの webp 置換はしない)。読めなければ onerror で拡張子を一度だけ入れ替える */
-  return url;
+  return koeSafeUrl(url);
 }
 /* 公式 ProfileAvatar と同じ構成: 装飾枠があれば枠画像を全面に、アイコンはその 50.7% を中央に。
    バッジは右下 35%。枠画像がまだ分からない(対応表の読み込み前)ときは data-deco に控えて後から付ける */
@@ -8049,50 +8225,8 @@ function koeApplyDecoToDom() {
 }
 let currentRoomId = null,
   currentRoomOwnerId = null,
-  isJoiningCall = !1,
-  whackTimer = null,
-  whackScore = 0,
-  miniGameWatch = null;
-function startWhack() {
-  ((whackScore = 0), (document.getElementById("whackScore").textContent = "0"));
-  const grid = document.getElementById("whackGrid");
-  grid.innerHTML = "";
-  for (let i = 0; i < 9; i++) {
-    const hole = document.createElement("div");
-    ((hole.className = "whack-hole"),
-      hole.addEventListener("click", () => {
-        hole.classList.contains("up") &&
-          (hole.classList.remove("up"),
-          whackScore++,
-          (document.getElementById("whackScore").textContent = whackScore));
-      }),
-      grid.appendChild(hole));
-  }
-  const holes = grid.querySelectorAll(".whack-hole");
-  whackTimer = setInterval(() => {
-    (holes.forEach((h) => h.classList.remove("up")),
-      holes[Math.floor(Math.random() * holes.length)].classList.add("up"));
-  }, 780);
-}
-function stopWhack() {
-  (clearInterval(whackTimer), (whackTimer = null));
-}
-function showMiniGame() {
-  ((document.getElementById("miniGameOverlay").style.display = "flex"),
-    startWhack(),
-    clearInterval(miniGameWatch));
-  let waited = 0;
-  miniGameWatch = setInterval(() => {
-    waited += 500;
-    const leaveBtn = document.getElementById("callLeaveBtn");
-    ((leaveBtn && !leaveBtn.disabled) || waited > 9e4) && hideMiniGame();
-  }, 500);
-}
-function hideMiniGame() {
-  (clearInterval(miniGameWatch), (miniGameWatch = null), stopWhack());
-  const ov = document.getElementById("miniGameOverlay");
-  ov && (ov.style.display = "none");
-} /* 通話画面上に流れるコメントバブル */
+  isJoiningCall = !1;
+ /* 通話画面上に流れるコメントバブル */
 function koeChatBubble(name, text, icon) {
   try {
     var ov = document.getElementById("callOverlay");
@@ -8188,7 +8322,7 @@ function koeRtdbStart(roomId) {
             : data === false || data === 0 || data === "false" || data === "0"
               ? false
               : null;
-        if (v !== null) koeApplyCommentEnabled(v);
+        if (v !== null) koeVerifyCommentEnabled(v);
       } catch (e) {}
     },
   };
@@ -8202,7 +8336,7 @@ function koeRtdbStart(roomId) {
         ).toLowerCase();
         callLog("RTDB status: " + st);
         if (/close|end|finish/.test(st)) {
-          onRoomClosed();
+          koeVerifyRoomClosed();
         }
       } catch (e) {}
     },
@@ -8345,6 +8479,30 @@ function koeRtdbApplyMuteStatus(type, path, data) {
     });
   }
   window.__rtdb.muteStatus = m && typeof m === "object" ? m : {};
+  // 誰がミュートしたか・解除したかを、その場でログに残す。
+  // 名簿の取り直しを待つより早く分かる(公式アプリのミュート表示と同じ合図を見ている)。
+  try {
+    var prevMute = window.__koePrevMuteRtdb || {};
+    var nowMute = {};
+    Object.keys(window.__rtdb.muteStatus).forEach(function (uid) {
+      nowMute[uid] = koeMuteStatusOf(uid);
+    });
+    var me = Number(window.__myUserId || 0);
+    Object.keys(nowMute).forEach(function (uid) {
+      if (Number(uid) === me) return;
+      if (prevMute[uid] === undefined || prevMute[uid] === nowMute[uid]) return;
+      // 切り替えの連打で記録を埋め尽くされないように、1人あたり10秒に3回までにする
+      var flood = (window.__koeMuteFlood = window.__koeMuteFlood || {});
+      var now = Date.now();
+      var hist = (flood[uid] = (flood[uid] || []).filter(function (t) {
+        return now - t < 10000;
+      }));
+      hist.push(now);
+      if (hist.length > 3) return;
+      csEvent(nowMute[uid] ? "mute" : "unmute", Number(uid), null);
+    });
+    window.__koePrevMuteRtdb = nowMute;
+  } catch (e) {}
   try {
     updateCallGrid();
   } catch (e) {}
@@ -8398,8 +8556,19 @@ async function koeRtdbApplyMembers(type, path, data) {
     var sp = [],
       ls = [],
       ap = [];
+    window.__koeMemberRoles = {};
     uids.forEach(function (uid) {
       var role = String((m[uid] && (m[uid].role || m[uid])) || "").toLowerCase();
+      window.__koeMemberRoles[uid] = role;
+      // 知らない役割が出てきたら一度だけ記録する(お試し聞きに専用の名前が付く可能性があるため)
+      try {
+        window.__koeSeenRoles = window.__koeSeenRoles || {};
+        if (role && !window.__koeSeenRoles[role]) {
+          window.__koeSeenRoles[role] = true;
+          if (["speaker", "speaker_applicant", "listener"].indexOf(role) < 0)
+            callLog("枠の名簿に見慣れない役割がありました: " + role);
+        }
+      } catch (e2) {}
       var u = known[uid] || { user_id: uid, name: "user " + uid, icon_url: "" };
       u = { user_id: uid, name: u.name || "user " + uid, icon_url: u.icon_url || "" };
       if (role === "speaker") sp.push(u);
@@ -8532,6 +8701,9 @@ function startRoomCommentPolling() {
   window.__chatSys = [];
   try {
     window.KoeGuard && KoeGuard.reset(); /* 枠ごとのスパム/爆音判定を捨てる */
+  } catch (e) {}
+  try {
+    window.KoeMod && KoeMod.reset(); /* 枠ごとのモデレーター状態を捨てる */
   } catch (e) {}
   window.__chatNotifiedInit = false;
   window.__chatUnread = 0;
@@ -8955,11 +9127,16 @@ async function koeActivityCollect() {
   }
   var all = [],
     onlineNow = [];
-  for (var p = 1; p <= 3; p++) {
-    var r = null;
-    try {
-      r = await callApi("get_followees", String(uid), String(p));
-    } catch (e) {}
+  // 3ページを同時に読む(順番に待つと3往復ぶんかかる)
+  var pageResults = await Promise.all(
+    [1, 2, 3].map(function (p) {
+      return callApi("get_followees", String(uid), String(p)).catch(function () {
+        return null;
+      });
+    }),
+  );
+  for (var pi = 0; pi < pageResults.length; pi++) {
+    var r = pageResults[pi];
     if (!r || !r.ok || !(r.users || []).length) break;
     all = all.concat(r.users);
     if (r.users.length < 20) break;
@@ -9383,8 +9560,7 @@ try {
 /* ===== 画面に表示されない文字 =====
    幅が 0 で見えない文字。文字列を突き合わせる前に取り除く。
    絵文字の異体字セレクタ(U+FE0E / U+FE0F)は正当な使い方なので数えない。 */
-var KOE_INVISIBLE =
-  /[\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
+var KOE_INVISIBLE = /[\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
 function koeStripInvisible(s) {
   return String(s == null ? "" : s).replace(KOE_INVISIBLE, "");
 }
@@ -9777,6 +9953,9 @@ function koeRenderDeletedPosts() {
 function koeApplyCommentEnabled(v) {
   try {
     if (v !== false && v !== true) return;
+    try {
+      window.KoeGuard && KoeGuard.noteCommentEnabled(v);
+    } catch (e) {}
     var i = document.getElementById("callChatInput"),
       b = document.getElementById("callChatSendBtn");
     if (!i) return;
@@ -9817,9 +9996,13 @@ function koeSysRender(list) {
       rows.push({ t: y.addedAt || 0, h: '<div class="koe-chat-sys">' + escapeHtml(y.text) + "</div>" });
     });
     extra.forEach(function (l) {
+      var tapUid = Number(l.uid) || 0;
+      var tap = tapUid
+        ? ' onclick="viewProfile(' + tapUid + ')" style="cursor:pointer;text-decoration:underline;"'
+        : "";
       rows.push({
         t: l.t || 0,
-        h: '<div class="koe-chat-sys koe-chat-sys-dim">' + escapeHtml(l.text) + "</div>",
+        h: '<div class="koe-chat-sys koe-chat-sys-dim"' + tap + ">" + escapeHtml(l.text) + "</div>",
       });
     });
     rows.sort(function (a, b) {
@@ -9918,6 +10101,7 @@ document.addEventListener("click", function (ev) {
       }
     });
   }
+  window.__koeSyncAutoChecks = sync;
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", sync);
   } else {
@@ -9927,10 +10111,102 @@ document.addEventListener("click", function (ev) {
   /* 通話パネルを開くたびに、保存済みの状態に合わせ直す */
   document.addEventListener("click", function (ev) {
     try {
-      if (ev.target && ev.target.closest && ev.target.closest("#callSettingsToggle")) setTimeout(sync, 60);
+      if (ev.target && ev.target.closest && ev.target.closest("#callSettingsToggle")) {
+        setTimeout(sync, 60);
+        setTimeout(koeRenderModPanel, 60);
+      }
     } catch (e) {}
   });
 })();
+
+/* 設定パネルの「モデレーター」欄を描く(枠主のときだけ表示)。
+   いま指名している人の一覧と、確認なし自動実行の切り替えを出す。 */
+function koeRenderModPanel() {
+  try {
+    // 参加者側: 「枠主にモデレーターをお願いする」ボタン(枠主でなく、まだモデレーターでないとき)
+    var askRow = document.getElementById("callAskModRow");
+    if (askRow) {
+      var canAsk =
+        !!currentRoomId &&
+        window.KoeMod &&
+        typeof window.koeIsOwner === "function" &&
+        !window.koeIsOwner() &&
+        !(KoeMod.amMod && KoeMod.amMod());
+      askRow.style.display = canAsk ? "" : "none";
+      var askBtn = document.getElementById("callAskModBtn");
+      if (askBtn && !askBtn.__koeBound) {
+        askBtn.__koeBound = 1;
+        askBtn.addEventListener("click", function () {
+          try {
+            KoeMod.askForMod();
+          } catch (e) {}
+        });
+      }
+    }
+    var row = document.getElementById("callModRow");
+    if (!row) return;
+    var owner = typeof window.koeIsOwner === "function" && window.koeIsOwner();
+    if (!owner || !window.KoeMod || !KoeMod.ownerModList) {
+      row.style.display = "none";
+      return;
+    }
+    row.style.display = "";
+    var auto = document.getElementById("callModAutoChk");
+    if (auto && !auto.__koeBound) {
+      auto.__koeBound = 1;
+      auto.addEventListener("change", function () {
+        KoeMod.setAuto(auto.checked);
+        toast(auto.checked ? "モデレーターのキックを自動実行にしました" : "確認してから実行にしました");
+      });
+    }
+    if (auto) auto.checked = KoeMod.auto();
+    var box = document.getElementById("callModList");
+    if (!box) return;
+    var ids = KoeMod.ownerModList();
+    if (!ids.length) {
+      box.innerHTML = '<p class="callv2-note" style="margin:0;">まだ誰も指名していません。</p>';
+      return;
+    }
+    box.innerHTML = ids
+      .map(function (uid) {
+        var nm = koeNameForSync(uid);
+        return (
+          '<div class="participant"><span class="cp-name">' +
+          escapeHtml(nm) +
+          ' <span class="uid-tag">ID:' +
+          uid +
+          '</span></span><button class="mini-btn reject" onclick="koeUnmod(' +
+          uid +
+          ')">解除</button></div>'
+        );
+      })
+      .join("");
+  } catch (e) {}
+}
+/* 名前を同期的に引く(名簿の控えから。分からなければ番号) */
+function koeNameForSync(uid) {
+  uid = Number(uid) || 0;
+  try {
+    var n = (window.__rosterSrc && window.__rosterSrc.names && window.__rosterSrc.names[uid]) || null;
+    if (n && n.name) return n.name;
+    /* 名簿の控えに無ければ、いまの参加者一覧から探す(番号のままにしない) */
+    var r = window.__roomRoster;
+    if (r) {
+      var all = [].concat(r.speakers || [], r.listeners || [], r.applicants || []);
+      for (var i = 0; i < all.length; i++) {
+        var u = all[i];
+        if (Number(u.user_id || u.userId) === uid && u.name && !/^user \d+$/.test(u.name)) return u.name;
+      }
+    }
+  } catch (e) {}
+  return "user " + uid;
+}
+window.koeUnmod = function (uid) {
+  try {
+    if (window.KoeMod) KoeMod.designate(Number(uid), false);
+    koeRenderModPanel();
+  } catch (e) {}
+};
 function koeChatRender() {
   var log = document.getElementById("callChatLog");
   if (!log) return;
@@ -9954,6 +10230,9 @@ function koeChatRender() {
   var rows = [];
   S.forEach(function (c) {
     if (window.KoeGuard && KoeGuard.isHidden(c.user_id)) return; /* スパム判定で非表示にした人 */
+    if (window.KoeGuard && KoeGuard.isFakeSelfText && KoeGuard.isFakeSelfText(c.text, c.user_id))
+      return; /* 自分の名前を騙って届いた文 */
+    if (window.KoeMod && KoeMod.isCommandText && KoeMod.isCommandText(c.text)) return; /* モデレーターの隠しコマンド */
     var tags =
       (c.explicit
         ? '<span class="koe-chat-tag koe-chat-tag-reg" title="運営により規制対象と判定されたコメント">規制対象</span>'
@@ -9962,7 +10241,7 @@ function koeChatRender() {
         ? '<span class="koe-chat-tag koe-chat-tag-pen" title="この人は現在ペナルティ期間中です">ペナルティ中</span>'
         : "");
     var mine = koeChatIsMine(c),
-      nm = mine ? "あなた" : c.name || "user " + c.user_id,
+      nm = mine ? "あなた" : koeCleanName(c.name) || "user " + c.user_id,
       ic = c.icon_url || (mine ? window.__myIcon || "" : "");
     var av = typeof avatarHtml === "function" ? avatarHtml(c.name || nm, ic) : "";
     rows.push({
@@ -9980,7 +10259,7 @@ function koeChatRender() {
         escapeHtml(nm) +
         tags +
         '</div><div class="koe-chat-tx">' +
-        escapeHtml(c.text) +
+        escapeHtml(koeCutLong(c.text, 1000)) +
         "</div></div></div>",
     });
   });
@@ -9996,11 +10275,29 @@ function koeChatRender() {
       })
       .join("") +
     P.map(function (p) {
+      var av = typeof avatarHtml === "function" ? avatarHtml("あなた", window.__myIcon || "") : "";
+      if (p.sendFailed) {
+        return (
+          '<div class="koe-chat-row koe-chat-mine koe-chat-failed" data-pid="' +
+          p.id +
+          '">' +
+          av +
+          '<div class="koe-chat-msg"><div class="koe-chat-nm">あなた <span class="koe-chat-failmark">送信できませんでした' +
+          (p.errMsg ? "：" + escapeHtml(p.errMsg) : "") +
+          '</span></div><div class="koe-chat-tx">' +
+          escapeHtml(p.text) +
+          '</div><div class="koe-chat-retry"><button type="button" onclick="koeRetryChat(\'' +
+          p.id +
+          '\')">再送</button><button type="button" class="koe-chat-dismiss" onclick="koeDismissChat(\'' +
+          p.id +
+          '\')">取り消し</button></div></div></div>'
+        );
+      }
       return (
         '<div class="koe-chat-row koe-chat-mine koe-chat-pending" data-pid="' +
         p.id +
         '">' +
-        (typeof avatarHtml === "function" ? avatarHtml("あなた", window.__myIcon || "") : "") +
+        av +
         '<div class="koe-chat-msg"><div class="koe-chat-nm">あなた <span style="opacity:.5;font-size:.8em;">' +
         (p.failed ? "(反映を確認できませんでした)" : "送信中…") +
         '</span></div><div class="koe-chat-tx">' +
@@ -10037,6 +10334,10 @@ async function reloadRoomComments(listOverride) {
   /* スパム判定(連投・同文の繰り返し)。該当者のコメントは以降この端末では表示しない */
   try {
     window.KoeGuard && KoeGuard.onComments(added);
+  } catch (e) {}
+  /* モデレーターの指名・依頼のやり取り(KoeTomo+ 同士の隠しコマンド) */
+  try {
+    window.KoeMod && KoeMod.onComments(added);
   } catch (e) {}
   /* 送信中(pending)の自分の発言が届いたら pending から外し、その項目を自分の発言として確定 */
   try {
@@ -10122,6 +10423,35 @@ async function sendRoomComment() {
   var input = document.getElementById("callChatInput"),
     text = (input.value || "").trim();
   if (!text || !currentRoomId) return;
+  /* 枠主のコマンド: チャットに打つと、コメントとしては送らず操作として扱う。
+     /mod <ID>     … その人をこの枠のモデレーターにする
+     /unmod <ID>   … 解除する
+     /modauto on|off … モデレーターのキックを確認なしで自動実行するか */
+  if (window.KoeMod) {
+    var cmd = /^\/(mod|unmod)\s+@?(\d{2,})\s*$/.exec(text);
+    if (cmd) {
+      input.value = "";
+      try {
+        input.style.height = "auto";
+      } catch (e) {}
+      KoeMod.designate(Number(cmd[2]), cmd[1] === "mod");
+      return;
+    }
+    var autoCmd = /^\/modauto\s+(on|off)\s*$/i.exec(text);
+    if (autoCmd) {
+      input.value = "";
+      try {
+        input.style.height = "auto";
+      } catch (e) {}
+      if (!window.koeIsOwner || window.koeIsOwner()) {
+        KoeMod.setAuto(autoCmd[1].toLowerCase() === "on");
+        toast("モデレーターのキックを" + (autoCmd[1].toLowerCase() === "on" ? "自動実行にしました" : "確認してから実行にしました"));
+      } else {
+        toast("この設定は枠を開いた人だけが変えられます", "error");
+      }
+      return;
+    }
+  }
   var room = currentRoomId;
   input.value = "";
   try {
@@ -10180,36 +10510,52 @@ async function sendRoomComment() {
     };
     tick();
   } else {
-    window.__chatPending = (window.__chatPending || []).filter(function (x) {
-      return x.id !== pend.id;
-    });
-    window.__chatMine = (window.__chatMine || []).filter(function (x) {
-      return !(x.text === text && x.ts === pend.ts);
-    });
-    koeChatRender();
+    /* 実際に送信に失敗した。吹き出しは消さず「送信できませんでした・再送」を出し、ワンタップで送り直せるようにする。 */
+    pend.failed = true;
+    pend.sendFailed = true;
     try {
-      var log = document.getElementById("callChatLog");
-      var err = document.createElement("div");
-      err.style.color = "var(--danger,#e66)";
-      var msg =
+      var m =
         res &&
         (res.message ||
           res.error ||
           (res.body && (res.body.message || res.body.error_message || res.body.error)) ||
           (res.status ? "HTTP " + res.status : ""));
-      if (res && res.session_expired) msg = "ログインの有効期限が切れています";
-      err.textContent = "送信失敗" + (msg ? "：" + String(msg).slice(0, 80) : "");
-      log.appendChild(err);
-      log.scrollTop = log.scrollHeight;
+      if (res && res.session_expired) m = "ログインの有効期限が切れています";
+      pend.errMsg = m ? String(m).slice(0, 80) : "";
     } catch (e) {}
-    try {
-      input.value = text;
-    } catch (e) {}
+    /* 送っていないので「自分の発言」の控えからは外す(なりすまし判定の誤爆防止) */
+    window.__chatMine = (window.__chatMine || []).filter(function (x) {
+      return !(x.text === text && x.ts === pend.ts);
+    });
+    koeChatRender();
     try {
       callLog("チャット送信失敗: " + JSON.stringify(res).slice(0, 200));
     } catch (e) {}
   }
 }
+/* 送信に失敗したチャットを送り直す。失敗吹き出しを消して、同じ本文で通常の送信経路に流す。 */
+window.koeRetryChat = function (id) {
+  var P = window.__chatPending || [];
+  var p = null;
+  for (var i = 0; i < P.length; i++) if (P[i].id === id && P[i].sendFailed) p = P[i];
+  if (!p) return;
+  window.__chatPending = P.filter(function (x) {
+    return x.id !== id;
+  });
+  koeChatRender();
+  var inp = document.getElementById("callChatInput");
+  if (inp) {
+    inp.value = p.text;
+    sendRoomComment();
+  }
+};
+/* 送信に失敗したチャットを取り消す(吹き出しを消す)。 */
+window.koeDismissChat = function (id) {
+  window.__chatPending = (window.__chatPending || []).filter(function (x) {
+    return x.id !== id;
+  });
+  koeChatRender();
+};
 async function joinViaCard(cardEl, joinFn) {
   if (isJoiningCall) return;
   isJoiningCall = !0;
@@ -10236,11 +10582,13 @@ function onJoinSuccess(result) {
     (window.__prevApplicantUids = null),
     (window.__prevSpeakerUids = null),
     (window.__prevAllUids = null),
+    (window.__prevOfficialUids = null),
+    (window.__koeSpeakerBaselineDone = false),
     (window.__prevMuteState = null),
     (window.__justRaisedUids = new Set()),
     (window.__justPromotedUids = new Set()),
     updateCallRoster(result),
-    renderApplicants((null === currentRoomOwnerId && result.speaker_applicants) || []),
+    renderApplicants((koeCanModerate() ? result.speaker_applicants : null) || []),
     currentRoomId && startApplicantPolling(),
     result.call && startInWindowCall(result.call),
     currentRoomId)
@@ -10305,7 +10653,7 @@ function startApplicantPolling() {
     window.__roomGoneCount = 0;
     if (res && res.ok) {
       updateCallRoster(res);
-      renderApplicants((null === currentRoomOwnerId && res.speaker_applicants) || []);
+      renderApplicants((koeCanModerate() ? res.speaker_applicants : null) || []);
       try {
         koeSyncPublish(false);
       } catch (e) {}
@@ -10317,6 +10665,9 @@ function startApplicantPolling() {
       } catch (e) {}
       try {
         if (res.title) {
+          try {
+            window.KoeGuard && KoeGuard.noteRoomTitle(res.title);
+          } catch (e) {}
           var rn = document.getElementById("callRoomName");
           if (rn && rn.textContent !== res.title) {
             var was = rn.textContent;
@@ -10363,7 +10714,121 @@ function onRoomClosed() {
     loadGroupRooms();
   } catch (e) {}
 }
+/* 声とも本体から名簿を受け取った時刻。合成後の名簿で上書きされないように別に持つ。 */
+function koeOfficialRosterAt() {
+  return window.__koeOfficialRosterAt || Date.now();
+}
+
+/* 枠の番号と主催者は let で宣言されているため、そのままでは window から見えない。
+   roomguard.js のような別ファイルは window 越しに参照するので、ここで橋を架ける。
+   (橋が無いと「枠に入っていない」と判断され、枠の防御の対処が一度も動かない) */
+(function () {
+  var bridge = function (name, get, set) {
+    try {
+      Object.defineProperty(window, name, { get: get, set: set, configurable: true });
+    } catch (e) {}
+  };
+  bridge(
+    "currentRoomId",
+    function () {
+      return currentRoomId;
+    },
+    function (v) {
+      currentRoomId = v;
+    },
+  );
+  bridge(
+    "currentRoomOwnerId",
+    function () {
+      return currentRoomOwnerId;
+    },
+    function (v) {
+      currentRoomOwnerId = v;
+    },
+  );
+  /* 通話サーバー(SkyWay)まわりも同じ理由で橋を架ける。
+     ★ここが無かったため window.skRoom はいつも undefined で、
+       「試し聞き」の判定が通話サーバーの参加者を一度も見られていなかった
+       (声とも側の名簿だけを頼りにしていたので、ほとんど出てこなかった)。 */
+  bridge(
+    "skRoom",
+    function () {
+      return skRoom;
+    },
+    function (v) {
+      skRoom = v;
+    },
+  );
+  bridge(
+    "skMe",
+    function () {
+      return skMe;
+    },
+    function (v) {
+      skMe = v;
+    },
+  );
+  bridge(
+    "skLocalStream",
+    function () {
+      return skLocalStream;
+    },
+    function (v) {
+      skLocalStream = v;
+    },
+  );
+  bridge(
+    "skMyPub",
+    function () {
+      return skMyPub;
+    },
+    function (v) {
+      skMyPub = v;
+    },
+  );
+  bridge(
+    "skMuted",
+    function () {
+      return skMuted;
+    },
+    function (v) {
+      skMuted = v;
+    },
+  );
+})();
+
 function updateCallRoster(res) {
+  /* 見張りの判断は、必ず「声とも本体の返事そのもの」を見る。
+     画面に出す名簿は通話サーバー側の情報と合成してあるので、
+     そちらを判断に使うと、書き換えられた情報の上で正しさを確かめることになってしまう。 */
+  var official = (window.__rosterSrc && window.__rosterSrc.rest) || null;
+  if (res && res.__src !== "rtdb" && !official) official = res;
+
+  try {
+    if (official) {
+      var res2 = official;
+      var formal = {};
+      [].concat(res2.speakers || [], res2.listeners || [], res2.speaker_applicants || []).forEach(function (u) {
+        var id = Number(u && (u.user_id || u.userId));
+        if (id) formal[id] = true;
+      });
+      if (res2.owner_user_id) formal[Number(res2.owner_user_id)] = true;
+      // 声を受け取ってよい人(発言者と主催者)だけの一覧。
+      // 通話サーバー側の名簿は誰でも書けるので、音を通す判断にはこちらだけを使う。
+      var speakerOnly = {};
+      (res2.speakers || []).forEach(function (u) {
+        var id = Number(u && (u.user_id || u.userId));
+        if (id) speakerOnly[id] = true;
+      });
+      if (res2.owner_user_id) speakerOnly[Number(res2.owner_user_id)] = true;
+      window.__koeApiRoster = { uids: formal, speakers: speakerOnly, at: koeOfficialRosterAt() };
+      // 枠が自動で閉じる予定の時刻(声とも本体が返す close_at)
+      if (res2.close_at) {
+        var closeMs = Date.parse(String(res2.close_at).replace(" ", "T"));
+        if (!isNaN(closeMs)) window.__koeRoomCloseAt = closeMs;
+      }
+    }
+  } catch (e) {}
   const applicants = (res && res.speaker_applicants) || [],
     speakers = (res && res.speakers) || [],
     listeners = (res && res.listeners) || [],
@@ -10380,6 +10845,11 @@ function updateCallRoster(res) {
       window.__prevApplicantUids.has(uid) ||
         uid === myUid ||
         (toast(" " + nameOf(applicants, uid) + " さんが手を挙げました"),
+        (function () {
+          try {
+            window.KoeGuard && KoeGuard.noteRaise(uid);
+          } catch (e) {}
+        })(),
         (window.__justRaisedUids || (window.__justRaisedUids = new Set())).add(uid),
         setTimeout(() => {
           try {
@@ -10412,6 +10882,68 @@ function updateCallRoster(res) {
       applicants: applicants,
       owner: ownerUid,
     }));
+  // 枠の名簿に載った人を、枠の防御にも覚えさせる(コメントの出どころの確認に使う)
+  try {
+    if (official && window.KoeGuard && KoeGuard.noteMembers) {
+      KoeGuard.noteMembers(
+        []
+          .concat(official.speakers || [], official.listeners || [], official.speaker_applicants || [])
+          .map(function (u) {
+            return Number(u.user_id || u.userId) || 0;
+          })
+          .concat([Number(official.owner_user_id) || 0]),
+      );
+    }
+  } catch (e) {}
+  /* 入り直しの繰り返しは、声とも本体の名簿だけで数える。
+     通話サーバー(RTDB)の一覧は途切れると人が消えて見えるので、
+     つなぎ直すたびに「入り直した」と数えてしまい、誤検知の元になっていた。 */
+  try {
+    if (official) {
+      var officialNow = new Set();
+      []
+        .concat(official.speakers || [], official.listeners || [], official.speaker_applicants || [])
+        .forEach(function (u) {
+          var id = Number(u && (u.user_id || u.userId));
+          if (id) officialNow.add(id);
+        });
+      if (window.__prevOfficialUids) {
+        officialNow.forEach(function (uid) {
+          if (!window.__prevOfficialUids.has(uid)) {
+            try {
+              window.KoeGuard && KoeGuard.noteJoin(uid);
+            } catch (e) {}
+          }
+        });
+      }
+      window.__prevOfficialUids = officialNow;
+    }
+  } catch (e) {}
+
+  // 挙手の自動処理(枠を開いた人のときだけ)
+  try {
+    koeAutoHandleApplicants(koeRealApplicants((official && official.speaker_applicants) || applicants));
+  } catch (e) {}
+  // 自分の役割や主催者が勝手に変わっていないか見張る
+  try {
+    if (official) koeWatchUnexpectedChanges(official);
+  } catch (e) {}
+  // 自分の枠で、承認していない昇格があれば元に戻す
+  try {
+    if (official) koeEnforceOwnRoom(official);
+  } catch (e) {}
+  // 名簿が変わったら、お試し聞きの人も数え直す
+  try {
+    koeUpdateTrialListeners();
+  } catch (e) {}
+  // 枠の防御に「自分がキックできる立場か」を伝える
+  try {
+    window.KoeGuard && KoeGuard.noteRoster(ownerUid, myUid);
+  } catch (e) {}
+  // 枠主なら、指名済みモデレーターを配り直す(入室したばかりの人にも盾が届くように。30秒に1回まで)
+  try {
+    window.KoeMod && KoeMod.ownerAnnounceAll && KoeMod.ownerAnnounceAll();
+  } catch (e) {}
   (function () {
     try {
       var allNow = new Set();
@@ -10435,13 +10967,18 @@ function updateCallRoster(res) {
         n = nameOf(applicants, uid);
         return n;
       };
-      if (window.__prevAllUids) {
+      /* speakers も listeners も入っていない返事(挙手だけの更新など)で差分を取ると、
+         その瞬間だけ全員が「退出」し、次の更新で全員が「参加」したことになってしまう。 */
+      var hasRoster = !!(res && (res.speakers || res.listeners));
+      if (window.__prevAllUids && hasRoster) {
         allNow.forEach(function (uid) {
           if (!window.__prevAllUids.has(uid) && uid !== myUid && uid !== ownerUid) {
-            toast("👋 " + nameAll(uid) + " さんが参加しました");
-            try {
-              sfx("join");
-            } catch (e) {}
+            if (Date.now() >= (window.__csQuietUntil || 0)) {
+              toast("👋 " + nameAll(uid) + " さんが参加しました");
+              try {
+                sfx("join");
+              } catch (e) {}
+            }
             try {
               csEvent("join", uid, nameAll(uid));
             } catch (e) {}
@@ -10455,14 +10992,14 @@ function updateCallRoster(res) {
                 window.__callSession.seen[uid] &&
                 window.__callSession.seen[uid].name) ||
               "user " + uid;
-            toast("🚪 " + lname + " さんが退出しました");
+            if (Date.now() >= (window.__csQuietUntil || 0)) toast("🚪 " + lname + " さんが退出しました");
             try {
               csEvent("leave", uid, lname);
             } catch (e) {}
           }
         });
       }
-      window.__prevAllUids = allNow;
+      if (hasRoster) window.__prevAllUids = allNow;
       try {
         if (allNow.size > 0) {
           var __mc = document.getElementById("callMemberCount");
@@ -10521,9 +11058,39 @@ function updateCallRoster(res) {
 function updateHandRaised(applicants) {
   updateCallRoster({ speaker_applicants: applicants });
 }
+/* 枠を開いた人は最初から発言できるので、挙手の一覧には出さない。
+   すでに発言者になっている人も同じ(許可の押し忘れに見えて紛らわしい)。
+   声とも側の名簿に古い挙手が残っていると、枠主の自分が「許可待ち」に並んでしまっていた。 */
+function koeRealApplicants(applicants) {
+  try {
+    var r = window.__roomRoster || {};
+    var ownerUid = window.__callOwnerUid || Number(r.owner) || 0;
+    var speakerUids = {};
+    (r.speakers || []).forEach(function (x) {
+      var u = Number(x.user_id || x.userId);
+      if (u) speakerUids[u] = 1;
+    });
+    return (applicants || []).filter(function (a) {
+      var uid = Number(a.userId || a.user_id) || 0;
+      if (!uid) return false;
+      if (ownerUid && uid === ownerUid) return false;
+      return !speakerUids[uid];
+    });
+  } catch (e) {
+    return applicants || [];
+  }
+}
+
 function renderApplicants(applicants) {
-  applicants = applicants || [];
   const box = document.getElementById("applicantsBox");
+  if (!box) return;
+  /* 挙手の許可・拒否は、その枠を開いた人と、権限をもらった人(host / moderator)だけが行える。
+     権限が無い枠では、この一覧(操作ボタン付き)は出さない。 */
+  if (typeof window.koeCanModerate === "function" && !window.koeCanModerate()) {
+    box.innerHTML = "";
+    return;
+  }
+  applicants = koeRealApplicants(applicants);
   applicants.length
     ? (box.innerHTML =
         '<div class="section-divider" style="margin-top:8px;"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11V6a1.5 1.5 0 0 1 3 0v4m0 0V4.5a1.5 1.5 0 0 1 3 0V10m0 0V6a1.5 1.5 0 0 1 3 0v6m0-2a1.5 1.5 0 0 1 3 0v4a6 6 0 0 1-6 6h-1a6 6 0 0 1-5.4-3.4L4.5 13a1.6 1.6 0 0 1 2.8-1.5"/></svg> 挙手中のユーザー</div>' +
@@ -10556,6 +11123,9 @@ async function refreshRoomStateNow() {
     } catch (e) {}
 }
 function updateRaiseHandButton() {
+  try {
+    koeRenderMuteButton(); // 発言者／聞き専が変わったらマイクボタンの表示も合わせる
+  } catch (e) {}
   const btn = document.getElementById("callRaiseHandBtn");
   if (!btn) return;
   const myUid = window.__myUserId || 0;
@@ -10580,19 +11150,21 @@ async function doLowerHand() {
     ((r.applicants = (r.applicants || []).filter((a) => Number(a.userId || a.user_id) !== myUid)),
     r.listeners.some((x) => Number(x.user_id) === myUid) ||
       (r.listeners = r.listeners.concat([
-        { user_id: myUid, name: "あなた", icon_url: window.__myIcon || "" },
+        { user_id: myUid, name: window.__myName || "user " + myUid, icon_url: window.__myIcon || "" },
       ])),
     window.__handRaisedUids && window.__handRaisedUids.delete(myUid),
     updateCallGrid());
   try {
     updateRaiseHandButton();
   } catch (e) {}
+  koeMarkMyRoleIntent();
   setCallStatus("挙手を取り下げました");
   ((await callApi("lower_hand", currentRoomId)).ok || setCallStatus("取り下げに失敗しました"),
     refreshRoomStateNow());
 }
 async function doRaiseHand() {
   if (!currentRoomId) return;
+  koeMarkMyRoleIntent();
   const myUid = window.__myUserId || 0,
     r = window.__roomRoster;
   if (r && r.applicants && r.applicants.some((a) => Number(a.userId || a.user_id) === myUid))
@@ -10603,7 +11175,7 @@ async function doRaiseHand() {
     ((r.speakers = r.speakers.filter((x) => Number(x.user_id) !== myUid)),
     (r.listeners = r.listeners.filter((x) => Number(x.user_id) !== myUid)),
     (r.applicants = r.applicants.concat([
-      { user_id: myUid, name: "あなた", icon_url: window.__myIcon || "" },
+      { user_id: myUid, name: window.__myName || "user " + myUid, icon_url: window.__myIcon || "" },
     ])),
     window.__handRaisedUids && window.__handRaisedUids.add(myUid),
     updateCallGrid()),
@@ -10611,8 +11183,47 @@ async function doRaiseHand() {
   ((await callApi("raise_hand", currentRoomId)).ok || setCallStatus("挙手に失敗しました"),
     refreshRoomStateNow());
 }
+/* 昇格・降格の結果をそのまま知らせる。
+   枠を開いた人でないときは声とも側に断られることがあるので、
+   黙って失敗させず、番号つきで残す。 */
+function koeReportRoleResult(r, okText, ngText) {
+  if (r && r.ok) {
+    toast(okText);
+    try {
+      callLog(okText);
+    } catch (e) {}
+    return true;
+  }
+  var why = (r && (r.message || r.error)) || "";
+  var st = r && r.status ? "（" + r.status + "）" : "";
+  toast(ngText + st + (why ? "：" + String(why).slice(0, 60) : ""), "error");
+  try {
+    callLog(ngText + st + (why ? " " + why : ""));
+  } catch (e) {}
+  return false;
+}
+
+/* 相手を声とも側でブロックする(自分のアカウントの操作。相手の枠は触らない)。
+   他人の枠の荒らしから自分を守るための最終手段として、参加者メニューから使う。 */
+async function koeBlockUserQuick(uid, nm) {
+  uid = Number(uid) || 0;
+  if (!uid) return;
+  if (!(await showConfirmModal((nm || "この人") + " をブロックしますか？（以後この人と関わらなくなります）")))
+    return;
+  var r = await callApi("block_user", String(uid));
+  if (r && r.ok) {
+    toast((nm || "この人") + " をブロックしました");
+    try {
+      window.__koeSyncSubs && window.__koeSyncSubs();
+    } catch (e) {}
+  } else {
+    toast("ブロックできませんでした" + (r && r.status ? "（" + r.status + "）" : ""), "error");
+  }
+}
+
 async function doApprove(userId) {
   if (!currentRoomId) return;
+  koeNoteApprovedSpeaker(userId);
   const uid = Number(userId),
     r = window.__roomRoster;
   if (r) {
@@ -10630,7 +11241,8 @@ async function doApprove(userId) {
   try {
     window.__koeSyncSubs && window.__koeSyncSubs();
   } catch (e) {}
-  await callApi("approve_speaker", currentRoomId, userId);
+  var ar = await callApi("approve_speaker", currentRoomId, userId);
+  koeReportRoleResult(ar, "発言者にしました", "発言者にできませんでした");
   await refreshRoomStateNow();
   try {
     window.__koeSyncSubs && window.__koeSyncSubs();
@@ -10654,7 +11266,8 @@ async function doReject(userId) {
   try {
     window.__koeSyncSubs && window.__koeSyncSubs();
   } catch (e) {}
-  await callApi("reject_speaker", currentRoomId, userId);
+  var rr = await callApi("reject_speaker", currentRoomId, userId);
+  koeReportRoleResult(rr, "聞き専に戻しました", "聞き専に戻せませんでした");
   await refreshRoomStateNow();
 }
 async function loadModerationSettings() {
@@ -10664,6 +11277,10 @@ async function loadModerationSettings() {
     ((document.getElementById("autoApproveChk").checked = !!result.settings.auto_approve),
     (document.getElementById("autoRejectChk").checked = !!result.settings.auto_reject),
     (document.getElementById("autoRaiseHandChk").checked = !!result.settings.auto_raise_hand));
+  /* 通話中パネルにも同じチェックがあるので、読み込んだ値をそちらにも映す */
+  try {
+    window.__koeSyncAutoChecks && window.__koeSyncAutoChecks();
+  } catch (e) {}
 }
 async function saveModerationSettings() {
   const status = document.getElementById("moderationStatus"),
@@ -10685,11 +11302,23 @@ async function joinGroupRoom(ownerUserId) {
   }
   ((currentRoomOwnerId = ownerUserId), setCallStatus("トークルームを確認しています..."));
   const result = await callApi("join_call", ownerUserId);
-  result.ok
-    ? (setCallStatus("接続完了"), onJoinSuccess(result))
-    : "room_not_found" === result.error || "no_target_room" === result.error
-      ? (setCallStatus(result.message || "この枠は終了したようです。一覧を更新しました。"), loadGroupRooms())
-      : setCallStatus(`参加失敗: ${koeErrMsg(result)}`);
+  if (result.ok) {
+    setCallStatus("接続完了");
+    onJoinSuccess(result);
+    return;
+  }
+  if (result.error === "room_not_found" || result.error === "no_target_room") {
+    setCallStatus(result.message || "この枠は終了したようです。一覧を更新しました。");
+    loadGroupRooms();
+    return;
+  }
+  if (result.error === "join_refused") {
+    // 何度押しても結果は変わらないので、理由をそのまま見せて終わりにする
+    setCallStatus(result.message);
+    toast(result.message, "error");
+    return;
+  }
+  setCallStatus(`参加失敗: ${koeErrMsg(result)}`);
 }
 async function joinRoomById(roomId, ownerUserId) {
   if (!(await ensureMicPermission())) {
@@ -10779,6 +11408,9 @@ async function doCreateRoom() {
         if (rid) {
           const sw = await callApi("room_switch_comment_enabled", String(rid), false);
           if (!sw || sw.ok === false) toast(koeErrMsg(sw), "error");
+          /* 自分で選んだ「コメント禁止」なので、枠の防御にも正しい状態として覚えさせる。
+             覚えさせないと「勝手に切り替えられた」とみなしてONに戻してしまう。 */
+          else if (window.KoeGuard && KoeGuard.rememberCommentEnabled) KoeGuard.rememberCommentEnabled(false);
         }
       } catch (e) {}
     }
@@ -10837,14 +11469,48 @@ let skRoom = null,
   skIsOwner = !1;
 const CALL_LS_MIC = "koetomo_call_mic_device_id",
   CALL_LS_SPK = "koetomo_call_speaker_device_id";
-function callLog(msg) {
+/**
+ * 通話中のログに 1 行足す。
+ * uid を渡すと、その行をタップしてプロフィールを開けるようになる。
+ */
+/* 通話ログの見やすさのための決めごと:
+   ・空のメッセージは出さない(以前は状態表示が消えるたびに空行が増えていた)
+   ・同じ行が続いたら新しい行を足さず「×N」と数える
+   ・画面に残す行数に上限を設ける(以前は際限なく伸び、長い通話ほど重くなった)
+   ・いちばん下を見ているときだけ自動で追いかける(読んでいる途中で飛ばされないように) */
+const KOE_CALL_LOG_MAX = 200;
+function callLog(msg, uid) {
+  msg = msg == null ? "" : String(msg).trim();
+  if (!msg) return;
   const el = document.getElementById("callLog");
   if (el) {
-    ((el.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`), (el.scrollTop = el.scrollHeight));
+    const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    if (el.__koeLastMsg === msg) {
+      el.__koeLastN = (el.__koeLastN || 1) + 1;
+      const lines = el.textContent.split("\n");
+      /* 末尾は空文字なので、その1つ手前が最後の行 */
+      lines[lines.length - 2] = el.__koeLastLine + " ×" + el.__koeLastN;
+      el.textContent = lines.join("\n");
+    } else {
+      el.__koeLastMsg = msg;
+      el.__koeLastN = 1;
+      el.__koeLastLine = line;
+      el.textContent += line + "\n";
+      const lines = el.textContent.split("\n");
+      if (lines.length > KOE_CALL_LOG_MAX + 1) {
+        el.textContent = lines.slice(lines.length - KOE_CALL_LOG_MAX - 1).join("\n");
+      }
+    }
+    if (atBottom) el.scrollTop = el.scrollHeight;
   }
   try {
     window.__callLogLines = window.__callLogLines || [];
-    window.__callLogLines.push({ t: Date.now(), text: `[${new Date().toLocaleTimeString()}] ${msg}` });
+    window.__callLogLines.push({
+      t: Date.now(),
+      uid: Number(uid) || 0,
+      text: `[${new Date().toLocaleTimeString()}] ${msg}`,
+    });
     while (window.__callLogLines.length > 200) window.__callLogLines.shift();
     if (typeof koeSysRender === "function") koeSysRender();
   } catch (e) {}
@@ -10863,7 +11529,7 @@ function callSetStatus(msg) {
     el.textContent = msg || "";
     el.style.display = msg ? "" : "none";
   } catch (e) {}
-  callLog(msg);
+  if (msg) callLog(msg); // 消したとき(空文字)までログに残さない
 }
 let __callSpeakerMuted = !1;
 /* 相手の音声は <audio> ではなく AudioContext のゲイン(人ごとの音量)を通して鳴らしている。
@@ -10907,9 +11573,11 @@ function toggleCallPanel(panelId, btnId) {
   const sp = document.getElementById("callSettingsPanel");
   const gp = document.getElementById("callGuardPanel");
   gp && (gp.style.display = "none");
+  const np = document.getElementById("callNsPanel");
+  np && (np.style.display = "none");
   if (
     (sp && (sp.style.display = "none"),
-    ["callChatToggle", "callSettingsToggle", "callGuardToggle"].forEach((id) => {
+    ["callChatToggle", "callSettingsToggle", "callGuardToggle", "callNsToggle"].forEach((id) => {
       const e = document.getElementById(id);
       e && e.classList.remove("active");
     }),
@@ -11320,6 +11988,142 @@ function initSpeakIndicator() {
           localStorage.setItem("koe_speak_pulse", pc.checked ? "1" : "0");
         } catch (e) {}
         applySpeakIndicator();
+      });
+    }
+  } catch (e) {}
+  koeNsBindPresets();
+  /* ノイズ抑制(自分のマイク)の設定 */
+  try {
+    var nsSel = document.getElementById("nsModeSel"),
+      nsLv = document.getElementById("nsLevelRange"),
+      nsLvLabel = document.getElementById("nsLevelLabel"),
+      nsGate = document.getElementById("nsGateChk"),
+      nsOpts = document.getElementById("nsStrongOpts");
+    var nsShowOpts = function () {
+      if (nsOpts && nsSel) nsOpts.style.display = nsSel.value === "strong" ? "" : "none";
+    };
+    /* 通話中に変えたときは、その場で効き具合を反映する */
+    var nsApplyNow = function () {
+      try {
+        if (window.__koeNoiseCut && window.__koeNoiseCut.update) window.__koeNoiseCut.update();
+      } catch (e) {}
+      try {
+        if (window.KoeMicTest && KoeMicTest.isOpen()) KoeMicTest.apply();
+      } catch (e) {}
+    };
+    if (nsSel) {
+      nsSel.value = localStorage.getItem("koe_ns_mode") || "strong";
+      nsShowOpts();
+      nsSel.addEventListener("change", function () {
+        try {
+          localStorage.setItem("koe_ns_mode", nsSel.value);
+        } catch (e) {}
+        nsShowOpts();
+        // 「強力」以外にしたときは効き具合を 0 にして素通しにするので、通話中でもすぐ切り替わる
+        nsApplyNow();
+        koeSyncCallNsPanel();
+      });
+    }
+    var nsAuto = document.getElementById("nsAutoChk");
+    if (nsAuto) {
+      nsAuto.checked = koeNsAutoOn();
+      nsAuto.addEventListener("change", function () {
+        koeNsSetAuto(nsAuto.checked);
+        nsApplyNow();
+      });
+    }
+    if (nsLv) {
+      nsLv.value = String(koeNsShownLevel());
+      nsLv.disabled = koeNsAutoOn();
+      if (nsLvLabel) nsLvLabel.textContent = nsLv.value + "%" + (koeNsAutoOn() ? "（おまかせ）" : "");
+      nsLv.addEventListener("input", function () {
+        if (nsLvLabel) nsLvLabel.textContent = nsLv.value + "%";
+        try {
+          localStorage.setItem("koe_ns_level", nsLv.value);
+        } catch (e) {}
+        nsApplyNow();
+        koeSyncCallNsPanel();
+      });
+    }
+    if (nsGate) {
+      nsGate.checked = localStorage.getItem("koe_ns_gate") === "1";
+      nsGate.addEventListener("change", function () {
+        try {
+          localStorage.setItem("koe_ns_gate", nsGate.checked ? "1" : "0");
+        } catch (e) {}
+        nsApplyNow();
+      });
+    }
+  } catch (e) {}
+  /* マイクのお試し(聴き比べ) */
+  try {
+    var mtBtn = document.getElementById("micTestBtn"),
+      mtPanel = document.getElementById("micTestPanel");
+    var mtLoad = function () {
+      return window.KoeMicTest
+        ? Promise.resolve()
+        : Promise.all([loadScript("noisecut.js"), loadScript("mictest.js")]);
+    };
+    var mtOn = function (id, fn) {
+      var el = document.getElementById(id);
+      if (el) el.addEventListener("click", fn);
+    };
+    if (mtBtn && mtPanel) {
+      mtBtn.addEventListener("click", async function () {
+        var show = mtPanel.style.display === "none";
+        mtPanel.style.display = show ? "" : "none";
+        mtBtn.textContent = show ? "マイクのお試しを閉じる" : "マイクを試す（聴き比べ）";
+        if (!show) {
+          try {
+            window.KoeMicTest && KoeMicTest.stop();
+          } catch (e) {}
+          return;
+        }
+        try {
+          await mtLoad();
+        } catch (e) {
+          toast("マイクのお試しを読み込めませんでした", "error");
+        }
+      });
+    }
+    mtOn("micTestStart", async function () {
+      try {
+        await mtLoad();
+        await KoeMicTest.start();
+      } catch (e) {
+        toast("マイクを使えませんでした: " + (e && e.message ? e.message : e), "error");
+      }
+    });
+    mtOn("micTestStop", function () {
+      try {
+        KoeMicTest.stop();
+      } catch (e) {}
+    });
+    mtOn("micTestRec", async function () {
+      try {
+        await mtLoad();
+        if (!KoeMicTest.isOpen()) await KoeMicTest.start();
+        KoeMicTest.record();
+      } catch (e) {
+        toast("録音できませんでした", "error");
+      }
+    });
+    mtOn("micTestPlayRaw", function () {
+      try {
+        KoeMicTest.play("raw");
+      } catch (e) {}
+    });
+    mtOn("micTestPlayWet", function () {
+      try {
+        KoeMicTest.play("wet");
+      } catch (e) {}
+    });
+    var mtMon = document.getElementById("micTestMonitor");
+    if (mtMon) {
+      mtMon.addEventListener("change", function () {
+        try {
+          KoeMicTest.monitor(mtMon.checked);
+        } catch (e) {}
       });
     }
   } catch (e) {}
@@ -11806,11 +12610,33 @@ function koeSkyWayRoomType(call) {
   return Number(call && call.connection_type) === 2 ? "p2p" : "sfu";
 }
 /* SFU の時は公式と同じ maxSubscribers=20 で配信する。 */
+/* 音声配信の設定。
+   ・useinbandfec=1 … opus の帯域内 FEC。少しの冗長データで、電波が悪くて届かなかった
+                       パケットを受け手側で補える。モバイルで音が途切れる主因を減らす。
+   ・usedtx=1        … 無音のときは送らない(DTX)。上りの負荷が下がり弱い回線でも安定する。
+   どちらも公式アプリ側は普通に復号できる(相互運用性を壊さない)標準設定。
+   codecCapabilities を渡すと落ちる端末/版に備え、publish 側で外して再試行する。 */
 function koeSkyWayPublishOptions() {
+  var opt = { codecCapabilities: [{ mimeType: "audio/opus", parameters: { useinbandfec: 1, usedtx: 1 } }] };
   try {
-    if (skRoom && skRoom.type === "sfu") return { maxSubscribers: 20 };
+    if (skRoom && skRoom.type === "sfu") opt.maxSubscribers = 20;
   } catch (e) {}
-  return undefined;
+  return opt;
+}
+/* publish は設定つきで試し、失敗したら設定を外してもう一度(音が出ないよりはよい)。 */
+async function koePublishStream(me, stream) {
+  try {
+    return await me.publish(stream, koeSkyWayPublishOptions());
+  } catch (e) {
+    var fb = undefined;
+    try {
+      if (skRoom && skRoom.type === "sfu") fb = { maxSubscribers: 20 };
+    } catch (e2) {}
+    try {
+      callLog && callLog("音声設定つきの配信に失敗したため、標準設定で配信します");
+    } catch (e3) {}
+    return await me.publish(stream, fb);
+  }
 }
 async function koeSyncPublish(initial) {
   if (!skMe || !skLocalStream) return;
@@ -11818,18 +12644,13 @@ async function koeSyncPublish(initial) {
   window.__koeSyncingPub = true;
   try {
     var can = koeCanSpeak();
-    var mb = document.getElementById("callMuteBtn");
     if (can && !skMyPub) {
-      skMyPub = await skMe.publish(skLocalStream, koeSkyWayPublishOptions());
+      skMyPub = await koePublishStream(skMe, skLocalStream);
       /* 配信開始前に押されたミュートをここで反映(状態確認つき) */
       await koeApplyMuteState();
       koeNotifyMuteState(skMuted);
-      if (mb) {
-        mb.disabled = false;
-        mb.title = "";
-        var sp = mb.querySelector("span");
-        if (sp) sp.textContent = skMuted ? "ミュート解除" : "ミュート";
-      }
+      koeRenderMuteButton();
+
       if (!initial) {
         try {
           toast("🎤 発言できるようになりました");
@@ -11844,12 +12665,8 @@ async function koeSyncPublish(initial) {
       try {
         skLocalStream.track && (skLocalStream.track.enabled = false);
       } catch (e) {}
-      if (mb) {
-        mb.disabled = true;
-        mb.title = "聞き専のため発言できません";
-        var sp2 = mb.querySelector("span");
-        if (sp2) sp2.textContent = "聞き専";
-      }
+      koeRenderMuteButton();
+
       if (!initial) {
         try {
           toast("🔇 聞き専になりました");
@@ -11859,12 +12676,8 @@ async function koeSyncPublish(initial) {
       try {
         skLocalStream.track && (skLocalStream.track.enabled = false);
       } catch (e) {}
-      if (mb) {
-        mb.disabled = true;
-        mb.title = "聞き専のため発言できません";
-        var sp3 = mb.querySelector("span");
-        if (sp3) sp3.textContent = "聞き専";
-      }
+      koeRenderMuteButton();
+
     }
   } catch (e) {
     try {
@@ -11980,6 +12793,10 @@ function koeShowVolume(uid, name) {
   } catch (e) {}
 }
 function renderCallParticipants(participants) {
+  /* 壊れた1件で参加者一覧そのものが描画されなくなるのを防ぐ */
+  participants = (participants || []).filter(function (x) {
+    return x && typeof x === "object";
+  });
   const el = document.getElementById("callParticipantList");
   if (!el) return;
   try {
@@ -11994,14 +12811,19 @@ function renderCallParticipants(participants) {
           ":" +
           (p.is_owner ? 1 : 0) +
           ":" +
+          (p.is_mod ? 1 : 0) +
+          ":" +
           (p.just_changed ? 1 : 0)
         );
       })
       .join("|");
-    if (el.__partSig === __sig) {
+    var __trialSig = Object.keys(window.__koeTrialUids || {})
+      .sort()
+      .join(",");
+    if (el.__partSig === __sig + "#" + __trialSig) {
       return;
     }
-    el.__partSig = __sig;
+    el.__partSig = __sig + "#" + __trialSig;
   } catch (e) {}
   setTimeout(applyNameMarquee, 60);
   if (!participants || !participants.length)
@@ -12009,23 +12831,22 @@ function renderCallParticipants(participants) {
       el.classList.remove("grouped", "size-lg", "size-md", "size-sm", "size-xs"),
       void (el.innerHTML = '<div class="callv2-empty">参加者を待っています…</div>')
     );
-  const card = (p) => {
-      const nm = p.name || "user " + p.user_id,
-        initial = (nm || "?").charAt(0).toUpperCase(),
-        bg =
-          p.icon_url && /^https?:\/\/[^'"()\\\s]+$/i.test(String(p.icon_url))
-            ? `background-image:url('${escAttr(koeThumb(p.icon_url, 96))}')`
-            : `background-color:${callAvatarColor(p.user_id)}`;
-      return `<div class="callv2-pcard" onclick="koeCallUserMenu(${Number(p.user_id) || 0})">\n      <div class="callv2-pav ${("applicant" === p.role ? "raised" : "listener" === p.role ? "listener" : "") + (p.just_changed ? " just-changed" : "")}" data-uid="${p.user_id}" style="${bg}">\n        ${p.icon_url ? "" : escapeHtml(initial)}\n        ${koeDecoUrl(p.deco_item) ? `<img class="callv2-deco" src="${escAttr(koeDecoUrl(p.deco_item))}" alt="" onerror="koeDecoImgErr(this)">` : ""}${p.badge_url ? `<img class="callv2-pbadge" src="${escAttr(koeWebp(p.badge_url))}" alt="" onerror="koeDecoImgErr(this)">` : ""}\n        ${p.is_owner ? '<span class="callv2-crown"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 8l4.5 3.5L12 5l4.5 6.5L21 8l-1.5 10.5a1 1 0 0 1-1 .5H5.5a1 1 0 0 1-1-.5L3 8Z"/></svg></span>' : ""}\n        ${p.is_mute && "listener" !== p.role ? '<span class="callv2-pmute"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="#ccc" stroke-width="2"><rect x="9" y="3" width="6" height="9" rx="3" fill="#ccc" stroke="none"/><path d="M6 11a6 6 0 0 0 12 0" stroke-linecap="round"/><path d="M4 3l16 16" stroke-linecap="round"/></svg></span>' : ""}\n        ${"applicant" === p.role ? '<span class="callv2-phand"><svg viewBox="0 0 24 24" width="13" height="13" fill="#fff"><path d="M7 11V6a1.4 1.4 0 0 1 2.8 0v4m0 0V4.4a1.4 1.4 0 0 1 2.8 0V10m0 0V6a1.4 1.4 0 0 1 2.8 0v6m0-2a1.4 1.4 0 0 1 2.8 0v4a6 6 0 0 1-6 6h-1a6 6 0 0 1-5.4-3.4L4.6 13a1.5 1.5 0 0 1 2.6-1.4"/></svg></span>' : ""}\n        ${"speaker" === p.role && Number(p.user_id) !== Number(window.__myUserId || 0) ? `<button class="callv2-vol" data-uid="${p.user_id}" data-name="${escAttr(nm)}" title="音量" onclick="event.stopPropagation();koeShowVolume(${Number(p.user_id) || 0},this.dataset.name)"><svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M4 9v6h4l5 4V5L8 9H4Z"/><path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>` : ""}\n      </div>\n      <div class="callv2-pname"><span>${escapeHtml(nm)}</span></div>\n    </div>`;
+
+  /* onTap を渡すとタップしたときの動きを変えられる(既定は操作メニュー) */
+  const card = (p, onTap) => {
+      const nm = koeCleanName(p.name) || "user " + p.user_id,
+        initial = String(nm || "?").charAt(0).toUpperCase();
+      return `<div class="callv2-pcard" onclick="${onTap || `koeCallUserMenu(${Number(p.user_id) || 0})`}">\n      <div class="callv2-pav ${("applicant" === p.role ? "raised" : "listener" === p.role ? "listener" : "") + (p.just_changed ? " just-changed" : "")}" data-uid="${p.user_id}" style="background-color:${callAvatarColor(p.user_id)}">\n        <span class="callv2-pini">${escapeHtml(initial)}</span>\n        ${p.icon_url && /^https?:\/\//i.test(String(p.icon_url)) ? `<img class="callv2-pimg" src="${escAttr(koeThumb(p.icon_url, 96))}" alt="" onerror="koeCallImgErr(this)">` : ""}\n        ${koeDecoUrl(p.deco_item) ? `<img class="callv2-deco" src="${escAttr(koeDecoUrl(p.deco_item))}" alt="" onerror="koeDecoImgErr(this)">` : ""}${p.badge_url ? `<img class="callv2-pbadge" src="${escAttr(koeWebp(p.badge_url))}" alt="" onerror="koeDecoImgErr(this)">` : ""}\n        ${p.is_owner ? '<span class="callv2-crown"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 8l4.5 3.5L12 5l4.5 6.5L21 8l-1.5 10.5a1 1 0 0 1-1 .5H5.5a1 1 0 0 1-1-.5L3 8Z"/></svg></span>' : ""}\n        ${p.is_mod ? '<span class="callv2-shield" title="モデレーター"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l7 3v5c0 4.6-3 8.4-7 10-4-1.6-7-5.4-7-10V5l7-3z"/></svg></span>' : ""}\n        ${p.is_mute && "listener" !== p.role ? '<span class="callv2-pmute"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="#ccc" stroke-width="2"><rect x="9" y="3" width="6" height="9" rx="3" fill="#ccc" stroke="none"/><path d="M6 11a6 6 0 0 0 12 0" stroke-linecap="round"/><path d="M4 3l16 16" stroke-linecap="round"/></svg></span>' : ""}\n        ${"applicant" === p.role ? '<span class="callv2-phand"><svg viewBox="0 0 24 24" width="13" height="13" fill="#fff"><path d="M7 11V6a1.4 1.4 0 0 1 2.8 0v4m0 0V4.4a1.4 1.4 0 0 1 2.8 0V10m0 0V6a1.4 1.4 0 0 1 2.8 0v6m0-2a1.4 1.4 0 0 1 2.8 0v4a6 6 0 0 1-6 6h-1a6 6 0 0 1-5.4-3.4L4.6 13a1.5 1.5 0 0 1 2.6-1.4"/></svg></span>' : ""}\n        ${"speaker" === p.role && Number(p.user_id) !== Number(window.__myUserId || 0) ? `<button class="callv2-vol" data-uid="${p.user_id}" data-name="${escAttr(nm)}" title="音量" onclick="event.stopPropagation();koeShowVolume(${Number(p.user_id) || 0},this.dataset.name)"><svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M4 9v6h4l5 4V5L8 9H4Z"/><path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>` : ""}\n      </div>\n      <div class="callv2-pname"><span>${escapeHtml(nm)}</span></div>\n    </div>`;
     },
     total = participants.length;
   (el.classList.remove("size-lg", "size-md", "size-sm", "size-xs"),
     el.classList.add(total <= 3 ? "size-lg" : total <= 6 ? "size-md" : total <= 12 ? "size-sm" : "size-xs"));
   const speakers = participants.filter((p) => "speaker" === p.role),
     applicants = participants.filter((p) => "applicant" === p.role),
-    listeners = participants.filter((p) => "listener" === p.role);
-  if (!applicants.length && !listeners.length)
-    return (el.classList.remove("grouped"), void (el.innerHTML = speakers.map(card).join("")));
+    listeners = participants.filter((p) => "listener" === p.role),
+    trials = koeTrialParticipants();
+  if (!applicants.length && !listeners.length && !trials.length)
+    return (el.classList.remove("grouped"), void (el.innerHTML = speakers.map((p) => card(p)).join("")));
   el.classList.add("grouped");
   let html = "";
   const section = (icon, label, n) =>
@@ -12036,20 +12857,353 @@ function renderCallParticipants(participants) {
         '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><rect x="9" y="3" width="6" height="10" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" fill="none" stroke="currentColor" stroke-width="2"/></svg>',
         "発言中",
         speakers.length,
-      ) + `<div class="callv2-subgrid">${speakers.map(card).join("")}</div>`),
+      ) + `<div class="callv2-subgrid">${speakers.map((p) => card(p)).join("")}</div>`),
     applicants.length &&
       (html +=
         section('<span style="color:#F5C542"></span>', "挙手中", applicants.length) +
-        `<div class="callv2-subgrid">${applicants.map(card).join("")}</div>`),
+        `<div class="callv2-subgrid">${applicants.map((p) => card(p)).join("")}</div>`),
     listeners.length &&
       (html +=
         section(
           '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M4 14v3a2 2 0 0 0 2 2h1v-6H6a2 2 0 0 0-2 1zM17 13v6h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-1zM12 3a9 9 0 0 0-9 9v1a3 3 0 0 1 3-1V12a6 6 0 0 1 12 0v1a3 3 0 0 1 3 1v-1a9 9 0 0 0-9-9z"/></svg>',
           "聞いてるだけ",
           listeners.length,
-        ) + `<div class="callv2-subgrid">${listeners.map(card).join("")}</div>`),
+        ) + `<div class="callv2-subgrid">${listeners.map((p) => card(p)).join("")}</div>`),
+    trials.length &&
+      (html +=
+        section(
+          '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 3a9 9 0 0 0-9 9v5a2 2 0 0 0 2 2h2v-7H5v0a7 7 0 0 1 14 0v0h-2v7h2a2 2 0 0 0 2-2v-5a9 9 0 0 0-9-9z"/></svg>',
+          "試し聞き",
+          trials.length,
+        ) +
+        /* 試し聞きの人もタップで操作メニュー(プロフィール・退出させる など)を出す */
+        `<div class="callv2-subgrid">${trials.map((p) => card(p)).join("")}</div>`),
     (el.innerHTML = html));
 }
+
+/* 「試し聞き」の欄に出す人たち。koeUpdateTrialListeners が見つけたぶんを並べる。
+   何かの拍子に大量に増えても画面が潰れないよう、出す数には上限をつける。 */
+var KOE_TRIAL_MAX = 30;
+
+function koeTrialParticipants() {
+  var out = [];
+  try {
+    var t = window.__koeTrialUids || {};
+    Object.keys(t).forEach(function (uid) {
+      out.push({
+        user_id: Number(uid),
+        name: t[uid].name || "user " + uid,
+        icon_url: t[uid].icon || "",
+        role: "trial",
+        is_mute: false,
+        is_owner: false,
+      });
+    });
+  } catch (e) {}
+  return out.slice(0, KOE_TRIAL_MAX);
+}
+/* ===== お試し聞きの人を見つける =====
+   声ともには「いま誰がお試し聞きしているか」を教えてくれる窓口が無い。
+   ただしお試し聞きの人も、音を聞くために通話サーバーには入ってくる。
+   そこで「通話サーバーには居るのに、枠の名簿(主催者・発言者・リスナー)に載っていない人」を
+   お試し聞き中とみなす。確実ではないので、画面にもその意味が分かる言葉で出す。 */
+function koeUpdateTrialListeners() {
+  try {
+    if (!currentRoomId) return;
+    var now = Date.now();
+
+    /* --- ① 枠に音として繋がっている人を集める --- */
+    //   通話サーバーの参加者と、声とも側の名簿(RTDB)の両方を見る。
+    //   どちらか片方にしか出ない場合があるので、両方を足し合わせる。
+    var present = {};
+    try {
+      if (window.skRoom && skRoom.members) {
+        koeLiveMembers().forEach(function (m) {
+          var uid = callMemberUid(m);
+          if (uid) present[uid] = { name: callMemberName(m) || "", src: "通話" };
+        });
+      }
+    } catch (e) {}
+    /* 声とも側の名簿(RTDB)にも当たる。ただしここは枠にいる人なら誰でも書けるので、
+       「通話サーバーに居ることを確かめられない人」は少数だけ受け付ける。
+       こうしないと、偽の「試し聞き」をいくらでも並べられてしまう。 */
+    var RTDB_ONLY_MAX = 5;
+    try {
+      var rtdbOnly = 0;
+      Object.keys(window.__koeMemberRoles || {}).forEach(function (uid) {
+        var id = Number(uid);
+        if (!id) return;
+        if (present[id]) {
+          present[id].src += "+名簿";
+        } else {
+          if (rtdbOnly >= RTDB_ONLY_MAX) {
+            if (!window.__koeRtdbOnlyLogged) {
+              window.__koeRtdbOnlyLogged = true;
+              callLog(
+                "見張り: 通話サーバーで確かめられない参加者が名簿に大量に書かれています。" +
+                  RTDB_ONLY_MAX +
+                  "人ぶんだけ見ます",
+              );
+            }
+            return;
+          }
+          rtdbOnly++;
+          present[id] = { name: "", src: "名簿" };
+        }
+        present[id].role = window.__koeMemberRoles[uid];
+      });
+    } catch (e) {}
+
+    /* --- ② 正式な参加者を引く --- */
+    //   公式APIが返した名簿だけを使う(RTDB から組み立てた名簿には試し聞きも混ざるため)。
+    var api = window.__koeApiRoster;
+    var formal = (api && api.uids) || {};
+    var me = Number(window.__myUserId || 0);
+
+    /*   名簿(RTDB)で「発言者」「主催者」として載っている人は、正式な参加者で確定。
+         お試し聞きの人は音を聞くだけで発言できないので、この役割にはならない。
+         公式APIの一覧にたまたま載ってこないことがあるため、ここで先に除いておく。 */
+    var FORMAL_ROLES = { speaker: 1, owner: 1, host: 1, moderator: 1 };
+
+    var candidates = {};
+    Object.keys(present).forEach(function (uid) {
+      var id = Number(uid);
+      if (id === me || formal[id]) return;
+      if (present[id].role && FORMAL_ROLES[String(present[id].role).toLowerCase()]) return;
+      candidates[id] = present[id];
+    });
+
+    /* --- ③ 名簿を取り直してから決める(待たずに、その場で) --- */
+    //   「名簿に無い」とすぐ決めつけると、入ったばかりの正式な参加者を取り違える。
+    //   時間で待つのではなく、その人が現れたあとに名簿を取り直し、
+    //   取り直した名簿にも居なければ試し聞きとみなす。往復1回ぶんで済む。
+    var pend = window.__koeTrialPending || {};
+    var needRefresh = false;
+    Object.keys(candidates).forEach(function (uid) {
+      if (!pend[uid]) {
+        pend[uid] = now; // この人に初めて気づいた時刻
+        needRefresh = true;
+      }
+    });
+    Object.keys(pend).forEach(function (uid) {
+      if (!candidates[uid]) delete pend[uid];
+    });
+    window.__koeTrialPending = pend;
+
+    if (needRefresh) {
+      // 立て続けに呼ばない(1.5秒に1回まで)
+      var last = window.__koeTrialRefreshAt || 0;
+      if (now - last > 1500) {
+        window.__koeTrialRefreshAt = now;
+        try {
+          if (typeof refreshRoomStateNow === "function")
+            refreshRoomStateNow()
+              .then(function () {
+                koeUpdateTrialListeners();
+              })
+              .catch(function () {});
+        } catch (e) {}
+      }
+    }
+
+    /* 名簿を取り直してもまだ載っていない人だけを「試し聞き」とする。
+       通信の行き違いで一度だけ抜けることがあるので、2回続けて載っていないときに確定する
+       (1回で決めると、入ったばかりの正式な参加者に札を貼ってしまう)。 */
+    var seenAbsent = (window.__koeTrialAbsent = window.__koeTrialAbsent || {});
+    Object.keys(seenAbsent).forEach(function (uid) {
+      if (!candidates[uid]) delete seenAbsent[uid];
+    });
+    var confirmed = {};
+    Object.keys(candidates).forEach(function (uid) {
+      if (!api || api.at < pend[uid]) return; // 取り直しがまだ終わっていない
+      var mark = seenAbsent[uid];
+      if (!mark || api.at > mark) {
+        seenAbsent[uid] = api.at; // 何回目の名簿で見つからなかったかを控える
+        if (!mark) return; // 1回目は様子を見る
+      }
+      confirmed[uid] = candidates[uid];
+    });
+
+    /* --- ④ 名前を用意する(分からなければ声ともに聞く) --- */
+    var need = Object.keys(confirmed).filter(function (uid) {
+      return !confirmed[uid].name;
+    });
+    if (need.length) {
+      window.__koeTrialNames = window.__koeTrialNames || {};
+      var ask = need.filter(function (uid) {
+        return !window.__koeTrialNames[uid];
+      });
+      if (ask.length) {
+        ask.forEach(function (uid) {
+          window.__koeTrialNames[uid] = "user " + uid; // 二重に聞かないための仮置き
+        });
+        window.__koeTrialIcons = window.__koeTrialIcons || {};
+        callApi("resolve_users", ask.join(","))
+          .then(function (r) {
+            ((r && r.users) || []).forEach(function (u) {
+              window.__koeTrialNames[u.user_id] = u.name || "user " + u.user_id;
+              window.__koeTrialIcons[u.user_id] = u.icon_url || "";
+            });
+            koeUpdateTrialListeners();
+          })
+          .catch(function () {});
+      }
+      need.forEach(function (uid) {
+        var nm = (window.__koeTrialNames || {})[uid];
+        var waited = now - (pend[uid] || now);
+        // 名前がまだ来ていない人は、この回では出さない。
+        // 名前が届くとこの関数がもう一度呼ばれるので、そのときに出る。
+        // ただし 3 秒たっても分からなければ、番号のまま出す(出さないより良い)。
+        if ((!nm || nm === "user " + uid) && waited < 3000) delete confirmed[uid];
+        else {
+          confirmed[uid].name = nm || "user " + uid;
+          confirmed[uid].icon = (window.__koeTrialIcons || {})[uid] || "";
+        }
+      });
+    }
+
+    /* --- ⑤ 出入りをログに残して、画面に出す --- */
+    var prev = window.__koeTrialUids || {};
+    Object.keys(confirmed).forEach(function (uid) {
+      if (!prev[uid]) {
+        csSeen(Number(uid), confirmed[uid].name);
+        csEvent("trial", Number(uid), confirmed[uid].name);
+        callLog(
+          "試し聞きとみなした根拠: " +
+            confirmed[uid].name +
+            " は " +
+            confirmed[uid].src +
+            " に居るのに正式な参加者の一覧に無い" +
+            (confirmed[uid].role ? " / 名簿上の役割=" + confirmed[uid].role : ""),
+          Number(uid),
+        );
+      }
+    });
+    Object.keys(prev).forEach(function (uid) {
+      if (!confirmed[uid]) csEvent("trial_leave", Number(uid), prev[uid].name || prev[uid]);
+    });
+    window.__koeTrialUids = confirmed;
+
+    // 顔ぶれが変わったら参加者一覧に反映する
+    try {
+      updateCallGrid();
+    } catch (e) {}
+  } catch (e) {}
+}
+
+/* 名簿の取り直しを待たずに気づけるよう、通話中は数秒おきにも見直す */
+function koeStartTrialWatch() {
+  try {
+    if (window.__koeTrialTimer) clearInterval(window.__koeTrialTimer);
+    window.__koeTrialTimer = setInterval(function () {
+      if (!currentRoomId) {
+        clearInterval(window.__koeTrialTimer);
+        window.__koeTrialTimer = null;
+        return;
+      }
+      koeUpdateTrialListeners();
+    }, 3000);
+  } catch (e) {}
+}
+
+/** 番号から名前を引く。手元に無ければ声ともに聞きに行く。分からなければ「user 番号」。 */
+function koeNameFor(uid) {
+  uid = Number(uid) || 0;
+  if (!uid) return Promise.resolve("不明な人");
+  try {
+    var u = typeof findRosterUser === "function" ? findRosterUser(uid) : null;
+    if (u && u.name) return Promise.resolve(u.name);
+  } catch (e) {}
+  try {
+    var seen = (window.__callSession && window.__callSession.seen) || {};
+    if (seen[uid] && seen[uid].name && String(seen[uid].name).indexOf("user ") !== 0)
+      return Promise.resolve(seen[uid].name);
+  } catch (e) {}
+  window.__koeNameCache = window.__koeNameCache || {};
+  if (window.__koeNameCache[uid]) return Promise.resolve(window.__koeNameCache[uid]);
+  return callApi("resolve_users", String(uid))
+    .then(function (r) {
+      var list = (r && r.users) || [];
+      var nm = (list[0] && list[0].name) || "user " + uid;
+      window.__koeNameCache[uid] = nm;
+      try {
+        csSeen(uid, nm);
+      } catch (e) {}
+      return nm;
+    })
+    .catch(function () {
+      return "user " + uid;
+    });
+}
+
+/**
+ * 通話サーバーの枠に入る。
+ *
+ * 前回の接続が残っていると「同じ名前の人がもう居ます」と断られて入れない
+ * (アプリを強制終了した直後や、切れてすぐ入り直したとき)。
+ * その場合は、少し待って古い接続が消えるのを待ち、それでも駄目なら
+ * 名前の後ろに印を足して入り直す。番号の部分は変えないので、誰なのかは変わらない。
+ */
+async function koeJoinSkyWayRoom(room, memberName) {
+  var isDuplicate = function (e) {
+    var m = String((e && (e.message || e.detail)) || e);
+    return /同じName|already exists|duplicated|Duplicate/i.test(m);
+  };
+  /* 公式アプリと同じ手順: 同じ名前の自分が残っていたら、先にそれを退室させる。 */
+  var evictStale = async function () {
+    try {
+      var stale = (room.members || []).filter(function (m) {
+        return m && m.name === memberName;
+      });
+      if (!stale.length) return false;
+      callLog("前の接続が残っていたので、先に退室させます");
+      for (var i = 0; i < stale.length; i++) {
+        try {
+          await room.leave(stale[i]);
+        } catch (e) {}
+      }
+      return true;
+    } catch (e) {
+      return false;
+    }
+  };
+
+  await evictStale();
+  try {
+    return await room.join({ name: memberName });
+  } catch (e) {
+    if (!isDuplicate(e)) throw e;
+    // 入る直前に増えていた場合に備えて、もう一度だけ退室させてからやり直す
+    await evictStale();
+    await new Promise(function (r) {
+      setTimeout(r, 1200);
+    });
+    try {
+      return await room.join({ name: memberName });
+    } catch (e2) {
+      if (!isDuplicate(e2)) throw e2;
+      var alt = memberName + "_" + Date.now().toString(36);
+      callLog("名前を変えて入り直します");
+      return await room.join({ name: alt });
+    }
+  }
+}
+
+/* 通話サーバー(SkyWay)の参加者のうち、いま本当に居る人だけを返す。
+   SkyWay の room.members には退出した人も state:"left" のまま残ることがあり、
+   そのまま数えると「抜けた人が一覧に残る」「人数が減らない」原因になる。 */
+function koeLiveMembers() {
+  try {
+    if (!window.skRoom || !skRoom.members) return [];
+    return skRoom.members.filter(function (m) {
+      var st = m && m.state;
+      return !st || String(st).toLowerCase() !== "left";
+    });
+  } catch (e) {
+    return [];
+  }
+}
+
 function callMemberUid(m) {
   try {
     var nm = String((m && (m.name || m.id)) || "");
@@ -12083,6 +13237,48 @@ function callMemberName(m) {
   } catch (e) {}
   return "ユーザー" + uid;
 }
+/* 自分のマイクの入り具合を示すバー。
+   通話画面の下(ボタンの上)に出す。起動時に作れなかった端末でも、
+   通話に入るたびに作り直すので必ず出る。 */
+/* 音の大きさ(0〜1)を、耳に合ったものさし(dB)でバーの割合に直す。
+   -55dB で 0%、-5dB で 100%。線形のままだと小さな声でほとんど動かない。 */
+function koeMicMeterPercent(rms) {
+  var db = 20 * Math.log10((rms || 0) + 1e-9);
+  return Math.max(0, Math.min(100, Math.round(((db + 55) / 50) * 100)));
+}
+
+function koeEnsureMicMeter() {
+  try {
+    const c = document.querySelector(".callv2");
+    if (!c) return null;
+    let m = document.getElementById("callMicMeter");
+    if (!m) {
+      m = document.createElement("div");
+      m.id = "callMicMeter";
+      m.innerHTML =
+        '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span class="mic-meter-label">自分のマイク</span><div class="mic-meter-track"><div id="callMicMeterFill"></div></div>';
+      m.style.display = "none";
+    }
+    const bottom = c.querySelector(".callv2-bottom");
+    /* 一度も入れていない場合も、間に別の要素が入り込んだ場合も、ここで並べ直す */
+    if (bottom && m.nextElementSibling !== bottom) c.insertBefore(m, bottom);
+    return m;
+  } catch (e) {
+    return null;
+  }
+}
+/* 自分の声を拾えている時だけバーを出す(聞き専の時は出さない) */
+function koeShowMicMeter(on) {
+  try {
+    const m = koeEnsureMicMeter();
+    if (!m) return;
+    m.style.display = on ? "flex" : "none";
+    if (!on) {
+      const f = document.getElementById("callMicMeterFill");
+      if (f) f.style.width = "0%";
+    }
+  } catch (e) {}
+}
 function addSpeakAnalyser(uid, mediaStream) {
   try {
     if (!uid || !mediaStream) return;
@@ -12103,6 +13299,7 @@ function addSpeakAnalyser(uid, mediaStream) {
       src.connect(an),
       callAnalysers.push({ uid: uid, analyser: an, buf: new Uint8Array(an.fftSize) }),
       KoeSched.isRunning("speakLoop") || startSpeakLoop());
+    if (uid === window.__myUserId) koeShowMicMeter(!0);
   } catch (e) {}
 }
 function callMiniMode() {
@@ -12425,6 +13622,48 @@ function closeCallLogModal() {
   if (m) m.style.display = "none";
 }
 function csInit(roomName, ownerUid) {
+  /* 前の枠の名簿がそのまま残っていると、入った瞬間に
+     「前の枠の人が全員退出」「この枠の人が全員参加」という記録が一気に出てしまう。
+     通話を始めるところで、前回分の記憶をすべて捨てる。 */
+  window.__prevAllUids = null;
+  window.__prevOfficialUids = null;
+  window.__koeSpeakerBaselineDone = false;
+  window.__prevApplicantUids = null;
+  window.__prevSpeakerUids = null;
+  window.__prevMuteState = null;
+  window.__koePrevMuteRtdb = null;
+  window.__koeTrialUids = null;
+  window.__koeTrialPending = null;
+  window.__koeTrialAbsent = null;
+  window.__koeSeenRoles = null;
+  window.__koeApiRoster = null;
+  window.__koeHeldLogged = null;
+  // 見張りと挙手の自動処理は、枠ごとにやり直す
+  window.__koeAutoHandled = {};
+  window.__koeAutoHandledCount = {};
+  window.__koeRoomCloseAt = 0;
+  window.__koeRemainOddLogged = false;
+  window.__koeRemainSentAt = 0;
+  window.__koeInviteSent = {};
+  window.__koeMyRolePrev = null;
+  window.__koeOwnerPrev = null;
+  window.__koeRoleGuardLogged = false;
+  window.__koeMyRoleIntentAt = 0;
+  window.__koeInvitePromptAt = 0;
+  window.__koeApprovedSpeakers = null; // 枠に入ったときに端末の控えから読み直す
+  window.__koeSeenApplicants = {};
+  window.__koeRevertCount = {};
+  window.__koePubByUid = {};
+  window.__csEventTimes = [];
+  window.__csFloodLogged = 0;
+  window.__koeGhostLogged = false;
+  window.__koeStaleLogged = false;
+  window.__koeMuteFlood = {};
+
+  /* 入った直後は、いま枠に居る人が「たったいま参加した」ように見えてしまう。
+     最初の数秒は、その場に居た人を記録の起点として扱い、出入りとしては知らせない。 */
+  window.__csQuietUntil = Date.now() + 3000;
+
   window.__callSession = {
     startMs: Date.now(),
     roomName: roomName || "通話",
@@ -12446,15 +13685,54 @@ function csSeen(uid, name, icon) {
     if (icon && !s.seen[uid].icon) s.seen[uid].icon = icon;
   }
 }
+/* 通話中の出来事を日本語にするための対応表 */
+var CS_EVENT_TEXT = {
+  join: "が参加しました",
+  leave: "が退出しました",
+  promote: "が発言者になりました",
+  lower: "がリスナーに戻りました",
+  raise: "が発言をリクエストしました",
+  mute: "がミュートしました",
+  unmute: "がミュートを解除しました",
+  trial: "がお試し聞きで入ってきました",
+  trial_leave: "がお試し聞きをやめました",
+};
+
+/* 出入りや挙手を大量に繰り返して記録を埋め尽くす荒らしへの備え。
+   10秒に12件を超えたら、その間の記録は出さずに「多すぎます」と一度だけ残す。 */
+function csEventFlooding(type) {
+  if (type !== "join" && type !== "leave" && type !== "raise" && type !== "lower") return false;
+  var now = Date.now();
+  var hist = (window.__csEventTimes = (window.__csEventTimes || []).filter(function (t) {
+    return now - t < 10000;
+  }));
+  hist.push(now);
+  if (hist.length <= 12) return false;
+  if (!window.__csFloodLogged || now - window.__csFloodLogged > 30000) {
+    window.__csFloodLogged = now;
+    try {
+      callLog("見張り: 出入りの知らせが多すぎるので、しばらくまとめて省きます");
+    } catch (e) {}
+  }
+  return true;
+}
+
 function csEvent(type, uid, name) {
   if (!window.__callSession || !uid) return;
   var s = window.__callSession;
+  var who = name || (s.seen[uid] && s.seen[uid].name) || "user " + uid;
   s.events.push({
     t: Date.now() - s.startMs,
     type: type,
     uid: Number(uid),
-    name: name || (s.seen[uid] && s.seen[uid].name) || "user " + uid,
+    name: who,
   });
+  // 通話中のログにも、誰が何をしたかをその場で出す(入った直後の数秒は除く)
+  try {
+    var text = CS_EVENT_TEXT[type];
+    if (text && Date.now() >= (window.__csQuietUntil || 0) && !csEventFlooding(type))
+      callLog(who + " " + text, uid);
+  } catch (e) {}
 }
 function csSpeakTick(uid, ms) {
   if (!window.__callSession || !uid) return;
@@ -12588,8 +13866,29 @@ function startSpeakLoop() {
         }
         if (a.uid === window.__myUserId && __now - lastMeter > 120) {
           lastMeter = __now;
+          /* 途中で聞き専に戻されたら、自分の声はもう送っていないのでバーごと隠す */
+          var canTalk = true;
+          try {
+            canTalk = koeCanSpeak();
+          } catch (e) {}
+          /* ノイズ抑制を通しているときは、その中で測った「相手に届く音」を使う。
+             解析器は音の流れをまたぐので端末によっては無音に見えることがあり、
+             ノイズ抑制パネルのメーターと同じ値を使う方が確実。 */
+          var myLvl = lvl;
+          try {
+            var cut = window.__koeNoiseCut;
+            if (cut && cut.levels) {
+              var lv = cut.levels();
+              if (lv && typeof lv.out === "number") myLvl = lv.out;
+            }
+          } catch (e) {}
           const f = document.getElementById("callMicMeterFill");
-          if (f) f.style.width = Math.min(100, Math.round(450 * lvl)) + "%";
+          if (f) f.style.width = (muteMe || !canTalk ? 0 : koeMicMeterPercent(myLvl)) + "%";
+          const mm = document.getElementById("callMicMeter");
+          if (mm) {
+            mm.style.display = canTalk ? "flex" : "none";
+            mm.classList.toggle("is-mute", !!muteMe);
+          }
         }
         if (rawSpeaking) {
           try {
@@ -12611,6 +13910,9 @@ function startSpeakLoop() {
 function stopSpeakAnalysers() {
   (KoeSched.stop("speakLoop"), (callAnalysers = []));
   try {
+    koeShowMicMeter(!1);
+  } catch (e) {}
+  try {
     audioCtx && (audioCtx.close(), (audioCtx = null));
   } catch (e) {}
 }
@@ -12624,12 +13926,21 @@ async function updateCallGrid() {
   }
 }
 async function __updateCallGridInner() {
+  /* 自分がモデレーターのとき、通話ヘッダーに「あなたはモデレーター」を出す */
+  try {
+    var __mb = document.getElementById("callModBadge");
+    var __amMod = !!(window.KoeMod && KoeMod.amMod && KoeMod.amMod());
+    if (__mb) __mb.style.display = __amMod ? "" : "none";
+    // バッジを出すときは「通話中」を省いて1行に収める
+    var __ic = document.getElementById("callInCallLabel");
+    if (__ic && __amMod) __ic.style.display = "none";
+  } catch (e) {}
   const myUid = window.__myUserId || 0,
     roster = window.__roomRoster,
     muteByUid = {},
     skUids = [];
   skRoom &&
-    (skRoom.members || []).forEach((m) => {
+    koeLiveMembers().forEach((m) => {
       const nm = String(m.name || m.id || "");
       let uid = parseInt(nm.split("_")[0], 10);
       if (!uid) {
@@ -12645,7 +13956,10 @@ async function __updateCallGridInner() {
       }
     });
   const ownerUid = window.__callOwnerUid || (roster && roster.owner) || 0;
-  if (roster && (roster.speakers.length || roster.listeners.length || roster.applicants.length)) {
+  /* 枠を開いた人が分かっているなら、名簿が空でもこちらで描く。
+     ここを通らないと、通話サーバーの参加者だけで描くことになり、
+     退出した人が残ったり、役割が当て推量になったりする。 */
+  if (roster && (ownerUid || roster.speakers.length || roster.listeners.length || roster.applicants.length)) {
     const seen = new Set(),
       mk = (u, role) => {
         const uid = Number(u.user_id);
@@ -12665,6 +13979,7 @@ async function __updateCallGridInner() {
           deco_item: u.deco_item || 0,
           badge_url: u.badge_url || "",
           is_owner: uid === ownerUid,
+          is_mod: uid !== ownerUid && !!(window.KoeMod && KoeMod.isMod && KoeMod.isMod(uid)),
           is_mute: muted,
           role: role,
           just_changed: justChanged,
@@ -12672,10 +13987,12 @@ async function __updateCallGridInner() {
       },
       parts = [];
     if (ownerUid) {
-      const ou = roster.speakers.concat(roster.listeners).find((x) => Number(x.user_id) === ownerUid) || {
-          user_id: ownerUid,
-          name: myUid === ownerUid ? "あなた(主催)" : "主催者",
-        },
+      /* 自分の枠では、声ともの名簿に自分が載らないことがある。
+         そのときは「あなた(主催)」ではなく、自分のプロフィールの名前とアイコンを使う。 */
+      const ou = roster.speakers.concat(roster.listeners).find((x) => Number(x.user_id) === ownerUid) ||
+          (myUid === ownerUid
+            ? { user_id: ownerUid, name: window.__myName || "user " + ownerUid, icon_url: window.__myIcon || "" }
+            : { user_id: ownerUid, name: "主催者" }),
         p = mk(ou, "speaker");
       p && parts.push(p);
     }
@@ -12824,6 +14141,11 @@ async function startInWindowCall(call) {
   try {
     window.AndroidApi && window.AndroidApi.startCallAudio && window.AndroidApi.startCallAudio();
   } catch (e) {}
+  /* 挙手の自動処理は、このチェックの状態をそのまま見て動く。
+     通話ページを一度も開かずに枠へ入ると読み込まれていないことがあるので、ここでも読む。 */
+  try {
+    loadModerationSettings();
+  } catch (e) {}
   try {
     const cmEl = document.getElementById("callMascot");
     if (cmEl) cmEl.style.display = "flex";
@@ -12835,10 +14157,7 @@ async function startInWindowCall(call) {
     (document.getElementById("callMemberCount").textContent = "0"),
     (document.getElementById("callLeaveBtn").disabled = !0));
   {
-    const mb = document.getElementById("callMuteBtn");
-    ((mb.disabled = !1), mb.classList.remove("muted"));
-    const ms = mb.querySelector("span");
-    ms && (ms.textContent = "マイク");
+    koeRenderMuteButton();
   }
   {
     const __showOwnerUi = skIsOwner && !window.__koeOneOnOne;
@@ -12867,13 +14186,19 @@ async function startInWindowCall(call) {
          マイク取得(getUserMedia: 許可ダイアログや端末によって数百ms〜数秒)は部屋への参加と並行して始め、
          参加 → 既存配信の購読 を先に済ませる。自分の配信(publish)はマイクが取れてから。 */
       const savedMic = localStorage.getItem(CALL_LS_MIC);
+      /* 端末側のエコー除去・ノイズ除去・音量そろえは常に頼む(反響を消せるのは端末側だけ) */
+      const micBase = {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      };
       const micPromise = SkyWayStreamFactory.createMicrophoneAudioStream(
-        savedMic ? { deviceId: { exact: savedMic } } : void 0,
+        savedMic ? Object.assign({ deviceId: { exact: savedMic } }, micBase) : micBase,
       ).catch(async (err) => {
         /* 覚えていたマイクが無い(抜かれた等)なら既定のマイクで取り直す */
         if (savedMic) {
           try {
-            return await SkyWayStreamFactory.createMicrophoneAudioStream();
+            return await SkyWayStreamFactory.createMicrophoneAudioStream(micBase);
           } catch (e2) {
             throw e2;
           }
@@ -12884,19 +14209,65 @@ async function startInWindowCall(call) {
         type: koeSkyWayRoomType(call),
         name: (window.__callChannel = call.channel),
       })),
-        (skMe = await skRoom.join({ name: call.member || "me" })),
-        (document.getElementById("callMemberCount").textContent = skRoom.members.length),
+        (skMe = await koeJoinSkyWayRoom(skRoom, call.member || "me")),
+        (document.getElementById("callMemberCount").textContent = koeLiveMembers().length),
+        koeUpdateTrialListeners(),
+        koeStartTrialWatch(),
         updateCallGrid());
       const skSubscribedPubIds = new Set();
       window.__skSubs = window.__skSubs || {};
+      /* --- 接続が切れたら立て直す ---
+         SkyWay 自体が一時的な切断は再接続してくれる。ここでは状態を画面に出し、
+         復帰したら自分の配信と購読をやり直す。完全に切れた(disconnected)ら安全に入り直す。 */
+      window.__koeActiveCall = call;
+      try {
+        if (context && context.onConnectionStateChanged && !context.__koeCsWired) {
+          context.__koeCsWired = true;
+          context.onConnectionStateChanged.add(function (state) {
+            window.__koeConnState = state;
+            try {
+              if (state === "reconnecting") {
+                callSetStatus("接続が不安定です。再接続中…");
+                koeShowReconnectBanner("再接続中…");
+              } else if (state === "connected") {
+                callSetStatus("接続中");
+                window.__koeReconnAttempts = 0;
+                koeHideReconnectBanner();
+                try {
+                  koeSyncPublish && koeSyncPublish(true);
+                } catch (e) {}
+                try {
+                  window.__koeSyncSubs && window.__koeSyncSubs();
+                } catch (e) {}
+              } else if (state === "closed" || state === "disconnected") {
+                /* SkyWay が再接続を諦めた。勝手に画面を立ち上げ直すと、裏に回っている間に
+                   通話画面が前面に出て「真っ暗で固まる」ことがあるので、タップで入り直せる
+                   バナーを出すだけにする(実際の入り直しは前面にいるときだけ)。 */
+                if (currentRoomId && window.__koeActiveCall) {
+                  koeShowReconnectBanner("接続が切れました。タップして再接続", true);
+                }
+              }
+            } catch (e) {}
+          });
+        }
+      } catch (e) {}
       /* 公式と同じく「名簿(speakers)に入っている人」だけを購読する。聞き専(listeners)や名簿外の人が
    音声を配信していても再生しない。名簿がまだ無い時は主催者のみ許可。 */
+      /* 誰の声を受け取ってよいかを決める。
+         通話サーバー側の名簿(RTDB)は枠にいる人なら誰でも書き換えられるので、
+         そこに「自分は発言者だ」と書くだけで全員に声を届けられてしまう。
+         そのため、ここでは声とも本体が返した名簿だけを信じる。 */
       const koeAllowedSpeaker = (uid) => {
         try {
           if (!uid) return false;
+          // 枠の防御で「声を受け取らない」ことにした人は、名簿に居ても受け取らない
+          if (window.KoeGuard && KoeGuard.isSilenced && KoeGuard.isSilenced(uid)) return false;
           var r = window.__roomRoster;
-          var owner = window.__callOwnerUid || (r && r.owner) || 0;
+          var owner = Number(window.__callOwnerUid || (r && r.owner) || 0);
           if (uid === owner) return true;
+          var api = window.__koeApiRoster;
+          if (api && api.speakers && Date.now() - api.at < 120000) return !!api.speakers[uid];
+          // 公式の名簿がしばらく届いていないときだけ、手元の名簿で代用する
           if (!r) return false;
           return (r.speakers || []).some((x) => Number(x.user_id || x.userId) === uid);
         } catch (e) {
@@ -12918,11 +14289,62 @@ async function startInWindowCall(call) {
           }
         })();
         if (!koeAllowedSpeaker(pubUid)) {
+          /* 枠の防御が自分で止めている相手は、理由が分かっているので疑わない。
+             (ここを素通りさせると、止めた相手を何度も「道具の疑い」として扱ってしまう) */
           try {
-            callLog("購読保留(聞き専/名簿外): user " + pubUid);
+            if (window.KoeGuard && KoeGuard.isSilenced && KoeGuard.isSilenced(pubUid)) return;
+          } catch (_) {}
+          // 同じ人で何度も出さない。名前が分かるまでは番号で出し、分かったら名前で言い直す。
+          try {
+            window.__koeHeldLogged = window.__koeHeldLogged || {};
+            if (pubUid && !window.__koeHeldLogged[pubUid]) {
+              window.__koeHeldLogged[pubUid] = true;
+              koeNameFor(pubUid).then(function (nm) {
+                callLog("音声を受け取っていません(発言者の名簿に無い): " + nm, pubUid);
+              });
+              // 名簿を取り直してから疑う。本物の新しい発言者を取り違えないため。
+              try {
+                var last = window.__koeSubRefreshAt || 0;
+                if (Date.now() - last > 1500) {
+                  window.__koeSubRefreshAt = Date.now();
+                  refreshRoomStateNow()
+                    .then(function () {
+                      if (koeAllowedSpeaker(pubUid)) {
+                        window.__koeHeldLogged[pubUid] = false;
+                        window.__koeSyncSubs && window.__koeSyncSubs();
+                        return;
+                      }
+                      try {
+                        window.KoeGuard &&
+                          KoeGuard.noteSuspectTool &&
+                          KoeGuard.noteSuspectTool(pubUid, "発言者ではないのに音声を送っている");
+                      } catch (_) {}
+                    })
+                    .catch(function () {});
+                }
+              } catch (_) {}
+            }
           } catch (_) {}
           return;
         }
+        /* 同じ人の名前で二つ目の音声が流れてきたら、どちらかが偽物。
+           声ともの画面では一人が二つの音声を出すことはできない。 */
+        try {
+          var seenPub = (window.__koePubByUid = window.__koePubByUid || {});
+          if (pubUid) {
+            if (seenPub[pubUid] && seenPub[pubUid] !== pub.id) {
+              callLog("見張り: " + koeNameOfSafe(pubUid) + " の声が二重に流れてきました。後から来た方は受け取りません", pubUid);
+              try {
+                window.KoeGuard &&
+                  KoeGuard.noteSuspectTool &&
+                  KoeGuard.noteSuspectTool(pubUid, "同じ人の音声が二重に流れてきた");
+              } catch (_) {}
+              return;
+            }
+            seenPub[pubUid] = pub.id;
+          }
+        } catch (_) {}
+
         skSubscribedPubIds.add(pub.id);
         try {
           if ("audio" === pub.contentType) {
@@ -13006,7 +14428,9 @@ async function startInWindowCall(call) {
               delete window.__skSubs[pid];
               skSubscribedPubIds.delete(pid);
               try {
-                callLog("購読解除(聞き専に変更): user " + e.uid);
+                koeNameFor(e.uid).then(function (nm) {
+                  callLog("音声の受け取りをやめました(聞き専に変わった): " + nm, e.uid);
+                });
               } catch (_) {}
             }
           }
@@ -13042,6 +14466,23 @@ async function startInWindowCall(call) {
       /* ここまでで相手の音声は鳴り始めている。ここからは自分のマイク(取得を待つ) */
       callSetStatus("マイク取得中...(許可を求められたら許可してください)");
       skLocalStream = await micPromise;
+      /* 送る前に雑音を消す。設定が「強力」のときだけ、処理した音に差し替える。
+         うまくいかない端末では元のマイクのまま続ける(通話は止めない)。 */
+      try {
+        if (window.KoeNoiseCut || (await loadScript("noisecut.js"), window.KoeNoiseCut)) {
+          if (KoeNoiseCut.mode() === "strong" && skLocalStream.track) {
+            const cut = await KoeNoiseCut.attach(skLocalStream.track, callLog);
+            if (cut && cut.track && cut.track !== skLocalStream.track) {
+              window.__koeNoiseCut = cut;
+              skLocalStream = new skyway_room.LocalAudioStream(cut.track);
+            }
+          }
+        }
+      } catch (e) {
+        try {
+          callLog("ノイズ抑制を使えませんでした: " + (e && e.message ? e.message : e));
+        } catch (_) {}
+      }
       try {
         const mine = skLocalStream.track ? new MediaStream([skLocalStream.track]) : null;
         mine && addSpeakAnalyser(window.__myUserId, mine);
@@ -13057,6 +14498,7 @@ async function startInWindowCall(call) {
           });
       } catch (e) {}
       await koeSyncPublish(true);
+      koeStartCallWatchdog();
       (startCallTimer(), callSetStatus("接続完了"), koeVibrate(40));
       {
         const cv = document.querySelector(".callv2");
@@ -13068,7 +14510,8 @@ async function startInWindowCall(call) {
       } catch (e) {}
       (skRoom.onMemberJoined.add((e) => {
         try {
-          document.getElementById("callMemberCount").textContent = skRoom.members.length;
+          document.getElementById("callMemberCount").textContent = koeLiveMembers().length;
+          koeUpdateTrialListeners();
         } catch (_) {}
         try {
           var nm = callMemberName(e && e.member);
@@ -13078,8 +14521,7 @@ async function startInWindowCall(call) {
               csSeen(lu, nm);
               csEvent("join", lu, nm);
             } catch (_e) {}
-            toast(" " + nm + " が入室しました");
-            callLog("入室: " + nm);
+            if (Date.now() >= (window.__csQuietUntil || 0)) toast(" " + nm + " が入室しました");
           }
         } catch (_) {}
         try {
@@ -13089,7 +14531,8 @@ async function startInWindowCall(call) {
       }),
         skRoom.onMemberLeft.add((e) => {
           try {
-            document.getElementById("callMemberCount").textContent = skRoom.members.length;
+            document.getElementById("callMemberCount").textContent = koeLiveMembers().length;
+            koeUpdateTrialListeners();
           } catch (_) {}
           try {
             var nm = callMemberName(e && e.member);
@@ -13102,9 +14545,9 @@ async function startInWindowCall(call) {
               if (lu && lu === ownerUid) {
                 toast(" 主催者が退出しました。枠が終了した可能性があります");
                 callLog("主催者退出(枠終了の可能性)");
-              } else {
+              } else if (Date.now() >= (window.__csQuietUntil || 0)) {
+                // 記録は csEvent が名前と番号つきで残すので、ここでは画面に出すだけ
                 toast(" " + nm + " が退出しました");
-                callLog("退出: " + nm);
               }
             }
           } catch (_) {}
@@ -13170,7 +14613,315 @@ function koeSeedRosterFromJoin(call) {
     window.__roomRoster = { speakers: speakers, listeners: listeners, applicants: applicants, owner: owner };
   } catch (e) {}
 }
+/* ===== 通話の見張り(裏に回っている間の切れ対策) =====
+   画面を消したりアプリを裏に回すと、端末側がマイクを取り上げたり
+   配信が止まったりして「相手に声が届かないまま気づかない」ことがある。
+   15秒ごとに自分のマイクと配信を見て、止まっていたら取り直して送り直す。
+   画面が消えていても動かす必要があるので hiddenMs も 15 秒にしてある。 */
+var KOE_MICWATCH_MS = 15000;
+
+/* マイクが生きているか。端末に取り上げられると readyState が ended になる */
+function koeMicAlive() {
+  try {
+    var t = skLocalStream && skLocalStream.track;
+    return !!(t && t.readyState === "live");
+  } catch (e) {
+    return false;
+  }
+}
+
+/* マイクを取り直して、雑音消しを掛け直し、配信を差し替える */
+async function koeRecoverMic() {
+  if (window.__koeRecoveringMic) return false;
+  window.__koeRecoveringMic = true;
+  try {
+    var F = window.skyway_room && window.skyway_room.SkyWayStreamFactory;
+    if (!F || !skMe) return false;
+    callLog("マイクが止まっていたので取り直します");
+    var base = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+    var saved = null;
+    try {
+      saved = localStorage.getItem(CALL_LS_MIC);
+    } catch (e) {}
+    var fresh = null;
+    try {
+      fresh = await F.createMicrophoneAudioStream(saved ? Object.assign({ deviceId: { exact: saved } }, base) : base);
+    } catch (e) {
+      fresh = await F.createMicrophoneAudioStream(base);
+    }
+    /* 古い通り道を閉じてから、新しいマイクに雑音消しを掛け直す */
+    try {
+      if (window.__koeNoiseCut) {
+        window.__koeNoiseCut.stop();
+        window.__koeNoiseCut = null;
+      }
+    } catch (e) {}
+    try {
+      if (window.KoeNoiseCut && KoeNoiseCut.mode() === "strong" && fresh.track) {
+        var cut = await KoeNoiseCut.attach(fresh.track, callLog);
+        if (cut && cut.track && cut.track !== fresh.track) {
+          window.__koeNoiseCut = cut;
+          fresh = new skyway_room.LocalAudioStream(cut.track);
+        }
+      }
+    } catch (e) {}
+    /* 前の配信を片付けてから差し替える(残すと同じ人の音が二重になる) */
+    if (skMyPub) {
+      try {
+        await skMe.unpublish(skMyPub.id);
+      } catch (e) {}
+      skMyPub = null;
+    }
+    /* 古いマイクは掴んだままにしない(端末によっては次の取得が拒否される) */
+    try {
+      skLocalStream && skLocalStream.track && skLocalStream.track.stop();
+    } catch (e) {}
+    skLocalStream = fresh;
+    if (!skRoom || !skMe) {
+      /* 取り直している間に通話が終わっていた。掴んだマイクを離して何もしない */
+      try {
+        fresh.track && fresh.track.stop();
+      } catch (e) {}
+      return false;
+    }
+    await koeSyncPublish(true);
+    try {
+      if (fresh.track) addSpeakAnalyser(window.__myUserId, new MediaStream([fresh.track]));
+    } catch (e) {}
+    callLog("マイクを取り直しました");
+    toast("マイクをつなぎ直しました");
+    return true;
+  } catch (e) {
+    callLog("マイクを取り直せませんでした: " + (e && e.message ? e.message : e));
+    return false;
+  } finally {
+    window.__koeRecoveringMic = false;
+  }
+}
+
+function koeStartCallWatchdog() {
+  KoeSched.start(
+    "micWatch",
+    async function () {
+      if (!skRoom || !skMe) return;
+      if (!koeCanSpeak()) return; // 聞き専のときは見張らない
+      /* ミュート中は SkyWay がマイクを無音のダミーに差し替えるので、
+         「止まっている」と誤解して取り直すと勝手にミュートが解ける。見張らない。 */
+      if (skMuted) {
+        window.__koeMicDeadSince = 0;
+        return;
+      }
+      if (koeMicAlive()) {
+        window.__koeMicDeadSince = 0;
+        /* マイクは生きているのに配信だけ止まっている(裏に回った拍子に落ちた)ときは送り直す */
+        if (!skMyPub) {
+          try {
+            await koeSyncPublish(true);
+          } catch (e) {}
+        }
+        return;
+      }
+      /* 一度の空振りでは動かない。2回続けて止まっていたら取り直す */
+      if (!window.__koeMicDeadSince) {
+        window.__koeMicDeadSince = Date.now();
+        return;
+      }
+      if (Date.now() - window.__koeMicDeadSince < KOE_MICWATCH_MS) return;
+      window.__koeMicDeadSince = 0;
+      await koeRecoverMic();
+    },
+    { ms: KOE_MICWATCH_MS, hiddenMs: KOE_MICWATCH_MS },
+  );
+  /* 相手の音声の詰まりを直す見張り。
+     受信音の <audio> が「送信は続いている(track が live)のに再生位置が進まない」ときは、
+     端末が裏に回った拍子などで再生が止まっている。play() を呼び直して鳴らし直す。
+     わざと消している音(スピーカーOFF / 枠の防御でミュート)は対象外。 */
+  KoeSched.start(
+    "recvWatch",
+    function () {
+      try {
+        var subs = window.__skSubs || {};
+        Object.keys(subs).forEach(function (pid) {
+          var e = subs[pid],
+            a = e && e.audio;
+          if (!a || !a.srcObject || a.muted) {
+            if (a) {
+              a.__koeCt = a.currentTime;
+              a.__koeStall = 0;
+            }
+            return;
+          }
+          var tr = null;
+          try {
+            tr = a.srcObject.getAudioTracks ? a.srcObject.getAudioTracks()[0] : null;
+          } catch (_) {}
+          if (!tr || tr.readyState !== "live") return; // 送信が終わった人は対象外
+          var ct = a.currentTime || 0;
+          if (a.__koeCt !== undefined && ct === a.__koeCt) {
+            a.__koeStall = (a.__koeStall || 0) + 1;
+            if (a.__koeStall >= 2) {
+              // 2回続けて止まっていたら鳴らし直す
+              a.__koeStall = 0;
+              try {
+                var pr = a.play();
+                pr && pr.catch && pr.catch(function () {});
+              } catch (_) {}
+            }
+          } else {
+            a.__koeStall = 0;
+          }
+          a.__koeCt = ct;
+        });
+      } catch (_) {}
+    },
+    { ms: 3000, hiddenMs: 6000 },
+  );
+}
+
+/* 通話の再接続バナー(画面上部)。tapRetry=true でタップすると手動でもう一度試す。 */
+function koeShowReconnectBanner(msg, tapRetry) {
+  try {
+    var b = document.getElementById("callReconnectBanner");
+    if (!b) {
+      b = document.createElement("div");
+      b.id = "callReconnectBanner";
+      b.className = "call-reconnect-banner";
+      var host = document.getElementById("callOverlay") || document.body;
+      host.appendChild(b);
+    }
+    b.textContent = msg || "再接続中…";
+    b.classList.toggle("tap", !!tapRetry);
+    b.onclick = tapRetry
+      ? function () {
+          window.__koeReconnAttempts = 0;
+          koeReconnectCall("手動で再接続");
+        }
+      : null;
+    b.style.display = "block";
+  } catch (e) {}
+}
+function koeHideReconnectBanner() {
+  try {
+    var b = document.getElementById("callReconnectBanner");
+    if (b) b.style.display = "none";
+  } catch (e) {}
+}
+/* 通話が切れたときに、枠からは退出せず(声とも本体の在室はそのまま)SkyWay の音声だけ入り直す。
+   3回までは自動、それ以上はバナーのタップで手動。トークンが失効していれば入り直しに失敗し、バナーが残る。 */
+async function koeReconnectCall(reason) {
+  if (window.__koeReconnecting) return;
+  if (!currentRoomId || !window.__koeActiveCall) return; // 通話中でなければ何もしない
+  if (document.hidden) return; // 裏にいる間は入り直さない(前面で通話画面が真っ暗になるのを防ぐ)
+  window.__koeReconnecting = true;
+  var attempts = (window.__koeReconnAttempts = (window.__koeReconnAttempts || 0) + 1);
+  try {
+    callLog("通話の接続が切れたためつなぎ直します(" + attempts + "回目): " + (reason || ""));
+    koeShowReconnectBanner("再接続しています…");
+    try {
+      KoeSched.stop("recvWatch");
+      KoeSched.stop("micWatch");
+    } catch (e) {}
+    /* いまの SkyWay を静かに片付ける */
+    try {
+      skMe && (await skMe.leave());
+    } catch (e) {}
+    try {
+      skRoom && (await skRoom.dispose());
+    } catch (e) {}
+    skMe = null;
+    skRoom = null;
+    skMyPub = null;
+    try {
+      skLocalStream && skLocalStream.track && skLocalStream.track.stop();
+    } catch (e) {}
+    skLocalStream = null;
+    window.__skSubs = {};
+    window.__koeRemoteAudio = {};
+    try {
+      var ra = document.getElementById("remoteAudios");
+      if (ra) ra.innerHTML = "";
+    } catch (e) {}
+    if (attempts > 3) {
+      koeShowReconnectBanner("再接続できません。タップしてもう一度試す", true);
+      return;
+    }
+    await new Promise(function (r) {
+      setTimeout(r, Math.min(1000 * attempts, 4000));
+    });
+    if (!currentRoomId) return; // 待っている間に退出した
+    await startInWindowCall(window.__koeActiveCall);
+    /* 入り直せたか確認。ダメならバナーを残して手動に委ねる(トークン失効など)。 */
+    if (skRoom && skMe) koeHideReconnectBanner();
+    else koeShowReconnectBanner("再接続できませんでした。タップして再試行", true);
+  } catch (e) {
+    callLog("つなぎ直しに失敗: " + (e && e.message ? e.message : e));
+    koeShowReconnectBanner("再接続できませんでした。タップして再試行", true);
+  } finally {
+    window.__koeReconnecting = false;
+  }
+}
+/* 出力先(スピーカー/Bluetooth/有線)の抜き差しに追従する。
+   保存した出力先が生きていればそれを使い、無ければ新しく挿さったヘッドセット等へ、無ければ既定へ。 */
+async function koeApplyOutputRoute() {
+  try {
+    if (!document.body.classList.contains("in-call")) return;
+    var audios = document.querySelectorAll("#remoteAudios audio");
+    if (!audios.length) return;
+    var saved = "";
+    try {
+      saved = localStorage.getItem(CALL_LS_SPK) || "";
+    } catch (e) {}
+    var devs = [];
+    try {
+      devs = await navigator.mediaDevices.enumerateDevices();
+    } catch (e) {}
+    var outs = devs.filter(function (d) {
+      return d.kind === "audiooutput";
+    });
+    var target = "";
+    if (saved && outs.some(function (d) { return d.deviceId === saved; })) {
+      target = saved; // ユーザーが選んだ出力先がまだある
+    } else {
+      var pref = outs.filter(function (d) {
+        return /blue|bt|airpods|headset|wired|headphone|earphone|usb/i.test(d.label || "");
+      })[0];
+      target = pref ? pref.deviceId : outs[0] ? outs[0].deviceId : "";
+      /* 自動で選んだ先は、ユーザーが明示指定していないときだけ控える(指定は上書きしない) */
+      if (target && !saved) {
+        try {
+          localStorage.setItem(CALL_LS_SPK, target);
+        } catch (e) {}
+      }
+    }
+    if (!target) return;
+    audios.forEach(function (a) {
+      a.setSinkId && a.setSinkId(target).catch(function () {});
+    });
+    try {
+      populateCallDevices().catch(function () {});
+    } catch (e) {}
+  } catch (e) {}
+}
+try {
+  if (navigator.mediaDevices && navigator.mediaDevices.addEventListener && !window.__koeDevWatch) {
+    window.__koeDevWatch = true;
+    navigator.mediaDevices.addEventListener("devicechange", function () {
+      koeApplyOutputRoute();
+    });
+  }
+} catch (e) {}
 async function teardownCall(notifyServer) {
+  /* 片付けの最初に見張りを止める。
+     マイクを止めたあとに見張りが動くと「止まっている」と誤解して取り直してしまう。 */
+  try {
+    KoeSched.stop("micWatch");
+    KoeSched.stop("recvWatch");
+    window.__koeMicDeadSince = 0;
+    /* 退出時の dispose() で出る「切断」通知で誤って入り直さないよう、先に手がかりを消す。 */
+    window.__koeActiveCall = null;
+    window.__koeReconnAttempts = 0;
+    koeHideReconnectBanner();
+  } catch (e) {}
   if (notifyServer) {
     try {
       csSave();
@@ -13188,6 +14939,13 @@ async function teardownCall(notifyServer) {
   } catch (e) {}
   try {
     skLocalStream && skLocalStream.track && skLocalStream.track.stop();
+  } catch (e) {}
+  /* 雑音を消すための音の通り道を閉じる(残しておくとマイクを掴んだままになる) */
+  try {
+    if (window.__koeNoiseCut) {
+      window.__koeNoiseCut.stop();
+      window.__koeNoiseCut = null;
+    }
   } catch (e) {}
   window.__koeRemoteAudio = {};
   window.__koeGains = {};
@@ -13220,11 +14978,16 @@ async function teardownCall(notifyServer) {
     (skLocalStream = null),
     (skMuted = !1),
     (skMyPub = null),
+    (window.__koeTrialUids = null),
+    (window.__koeTrialPending = null),
+    (window.__koeTrialAbsent = null),
     (window.__roomRoster = null),
     (window.__rosterSig = null),
     (window.__prevApplicantUids = null),
     (window.__prevSpeakerUids = null),
     (window.__prevAllUids = null),
+    (window.__prevOfficialUids = null),
+    (window.__koeSpeakerBaselineDone = false),
     (window.__prevMuteState = null),
     (window.__justRaisedUids = null),
     (window.__justPromotedUids = null),
@@ -13329,12 +15092,48 @@ function koeNotifyMuteState(muted) {
     callApi("room_mute_status", String(currentRoomId), muted ? "1" : "0").catch(function () {});
   } catch (e) {}
 }
-/* ミュートボタン(通話画面)と復帰バナーのマイク表示を skMuted に合わせる */
+/* ミュートボタン(通話画面)と復帰バナーのマイク表示を skMuted に合わせる。
+   表示は 3 通りしかない:
+     ・発言できる／マイクON  → 「ミュート」(押すと消音)
+     ・発言できる／ミュート中 → 「ミュート解除」(押すと声が出る)
+     ・聞き専               → 「手を挙げる」(押すと発言を申請する)
+   以前は場所によって「マイク」「解除」「ミュート」「聞き専」とバラバラで、
+   押すと何が起きるのか分からなかった。 */
+/* マイクボタンの中身(外側の <svg> は差し替えず中身だけ入れ替える) */
+const KOE_MIC_ICONS = {
+  on: '<rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><rect x="11" y="18" width="2" height="3.4" rx="1"/>',
+  off: '<rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><rect x="11" y="18" width="2" height="3.4" rx="1"/><path d="M4 3l16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+  hand: '<path d="M7 11V6a1.5 1.5 0 0 1 3 0v4m0 0V4.5a1.5 1.5 0 0 1 3 0V10m0 0V6a1.5 1.5 0 0 1 3 0v6m0-2a1.5 1.5 0 0 1 3 0v4a6 6 0 0 1-6 6h-1a6 6 0 0 1-5.4-3.4L4.5 13a1.6 1.6 0 0 1 2.8-1.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+};
+function koeMicCanSpeak() {
+  try {
+    return typeof koeCanSpeak === "function" ? !!koeCanSpeak() : true;
+  } catch (e) {
+    return true;
+  }
+}
 function koeRenderMuteButton() {
   const b = document.getElementById("callMuteBtn");
   if (b) {
     const s2 = b.querySelector("span");
-    (s2 && (s2.textContent = skMuted ? "解除" : "マイク"), b.classList.toggle("muted", skMuted));
+    const canSpeak = koeMicCanSpeak();
+    b.disabled = false; // 聞き専でも押せる(挙手になる)
+    b.classList.toggle("muted", canSpeak ? !!skMuted : true);
+    b.classList.toggle("callv2-mic-listen", !canSpeak);
+    if (!canSpeak) {
+      if (s2) s2.textContent = "手を挙げる";
+      b.title = "いまは聞き専です。押すと発言を申し込めます";
+    } else {
+      if (s2) s2.textContent = skMuted ? "ミュート解除" : "ミュート";
+      b.title = skMuted ? "押すと声が相手に届きます" : "押すと自分の声が止まります";
+    }
+    /* 消音中はマイクに斜線を入れる(色だけだと屋外や色覚差で気づきにくい) */
+    const want = canSpeak && skMuted ? "off" : canSpeak ? "on" : "hand";
+    if (b.dataset.micIcon !== want) {
+      b.dataset.micIcon = want;
+      const svg = b.querySelector("svg");
+      if (svg) svg.innerHTML = KOE_MIC_ICONS[want];
+    }
   }
   const m = document.getElementById("rcbMic");
   m &&
@@ -13376,7 +15175,20 @@ function reopenCall() {
   } catch (e) {}
 }
 function bindCallOverlayControls() {
-  ((document.getElementById("callMuteBtn").onclick = () => setCallMuted(!skMuted)),
+  ((document.getElementById("callMuteBtn").onclick = () => {
+    /* 聞き専のときは「押しても何も起きないボタン」ではなく、そのまま発言の申し込みにする */
+    if (!koeMicCanSpeak()) {
+      try {
+        const r0 = window.__roomRoster,
+          my0 = window.__myUserId || 0;
+        const applying =
+          r0 && (r0.applicants || []).some((a) => Number(a.userId || a.user_id) === my0);
+        applying ? doLowerHand() : doRaiseHand();
+      } catch (e) {}
+      return;
+    }
+    setCallMuted(!skMuted);
+  }),
     (document.getElementById("callLeaveBtn").onclick = async () => {
       var __own =
         !!skIsOwner ||
@@ -13411,6 +15223,9 @@ function bindCallOverlayControls() {
       btn.disabled = true;
       try {
         const r = await callApi("room_update_title", skCurrentRoomId, t);
+        try {
+          if (r && r.ok && window.KoeGuard) KoeGuard.rememberRoomTitle(t);
+        } catch (e) {}
         callLog(r.ok ? "タイトルを変更しました: " + t : "タイトル変更失敗: " + JSON.stringify(r));
         toast(r.ok ? "タイトルを変更しました" : "タイトル変更に失敗しました", r.ok ? undefined : "error");
         if (r.ok) {
@@ -13464,8 +15279,8 @@ async function loadChats() {
   renderChatList(list, result);
 }
 function renderChatList(list, result) {
-  result.ok
-    ? result.rooms.length
+  if (!result || typeof result !== "object") result = { ok: false };
+  result.ok ? (result.rooms || []).length
       ? ((window.__chatRooms = result.rooms),
         (list.innerHTML = result.rooms
           .map(
@@ -14172,7 +15987,7 @@ async function loadCommunitiesFeed() {
     ? (box.innerHTML = posts
         .map(
           (p) =>
-            `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}${p.deco_url ? " has-deco" : ""}" data-pid="${p.id}" data-likes="${p.likes || 0}"${p.deco_url ? ` style="--koe-deco:url(${escAttr(JSON.stringify(String(p.deco_url)))})"` : ""}>\n      <div class="tl-head">\n        <div class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})' style="cursor:pointer;">${avatarHtml(p.name, p.icon_url)}</div>\n        <div class="tl-meta">\n          <div class="tl-name">${escapeHtml(p.name || "user " + p.user_id)}</div>\n          <div class="tl-time">${p.community_name ? " " + escapeHtml(p.community_name) + " ・ " : ""}${koeTimeLabel(p.created_at)}</div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : ""}\n    </div>`,
+            `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}${p.deco_url ? " has-deco" : ""}" data-pid="${p.id}" data-likes="${p.likes || 0}"${p.deco_url ? ` style="--koe-deco:url('${koeSafeUrl(p.deco_url)}')"` : ""}>\n      <div class="tl-head">\n        <div class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})' style="cursor:pointer;">${avatarHtml(p.name, p.icon_url)}</div>\n        <div class="tl-meta">\n          <div class="tl-name">${escapeHtml(p.name || "user " + p.user_id)}</div>\n          <div class="tl-time">${p.community_name ? " " + escapeHtml(p.community_name) + " ・ " : ""}${koeTimeLabel(p.created_at)}</div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : ""}\n    </div>`,
         )
         .join(""))
     : (box.innerHTML = '<div class="empty-msg">参加中コミュニティの投稿がありません</div>');
@@ -14462,7 +16277,7 @@ async function loadRegulatedWords() {
   if (!list) return;
   list.innerHTML = '<div class="empty-msg">読み込み中...</div>';
   const result = await callApi("get_regulated_words");
-  result.ok && result.words.length
+  result.ok && (result.words || []).length
     ? (list.innerHTML = result.words
         .slice()
         .reverse()
@@ -14473,6 +16288,22 @@ async function loadRegulatedWords() {
         .join(""))
     : (list.innerHTML =
         '<div class="empty-msg">まだ検出された投稿はありません(タイムラインを開くと自動でチェックされます)</div>');
+}
+/* 枠にどれくらい居たかの表示。
+   退出の合図が来ないまま終わった記録(電池切れ・強制終了など)は、
+   最後に生きていた時刻までを「以上」として出す。 */
+function koeStayLabel(h) {
+  try {
+    if (h.open) return " ・ 通話中";
+    var st = Date.parse(h.joined_at) || 0;
+    var en = Date.parse(h.left_at || "") || 0;
+    if (!st || !en || en <= st) return "";
+    var sec = Math.round((en - st) / 1000);
+    var text = sec < 60 ? sec + "秒" : sec < 3600 ? Math.round(sec / 60) + "分" : (sec / 3600).toFixed(1) + "時間";
+    return h.ended_by ? " ・ " + text + "以上（途中で終了）" : " ・ " + text;
+  } catch (e) {
+    return "";
+  }
 }
 function renderRoomHistory(history) {
   var logs = [];
@@ -14532,7 +16363,9 @@ function renderRoomHistory(history) {
         "</span></div>" +
         '<div class="card-sub">' +
         (relTime(h.joined_at) || escapeHtml(h.joined_at)) +
-        " に参加 ・ " +
+        " に参加" +
+        koeStayLabel(h) +
+        " ・ " +
         hint +
         "</div>" +
         "</div></div>"
@@ -14585,7 +16418,7 @@ async function loadActivityHeatmap() {
       let cur = 0;
       {
         const d = new Date();
-        for (has(d) || d.setDate(d.getDate() - 1); has(d);) (cur++, d.setDate(d.getDate() - 1));
+        for (has(d) || d.setDate(d.getDate() - 1); has(d); ) (cur++, d.setDate(d.getDate() - 1));
       }
       let longest = 0,
         run = 0,
@@ -16291,7 +18124,9 @@ async function loadUserSettings() {
     PRIVACY_TOGGLES.map(([key, label, desc]) => settingToggleHtml(key, label, desc, s[key])).join("") +
     `\n    <div class="field-label" style="margin-top:16px;">DM(チャット)を受け付ける相手</div>\n    <select id="chatPermLevel">${CHAT_PERMISSION_LEVELS.map(
       ([value, label]) => `<option value="${value}"${value === level ? " selected" : ""}>${label}</option>`,
-    ).join("")}</select>\n    <div id="chatPermCustom"${level === CHAT_PERMISSION_CUSTOM ? "" : ' style="display:none;"'}>${CHAT_PERMISSION_SCOPES.map(
+    ).join(
+      "",
+    )}</select>\n    <div id="chatPermCustom"${level === CHAT_PERMISSION_CUSTOM ? "" : ' style="display:none;"'}>${CHAT_PERMISSION_SCOPES.map(
       ([key, label]) => settingToggleHtml(key, label, "", s[key]),
     ).join("")}</div>`;
   box.querySelectorAll("input[data-setting]").forEach((inp) => {
@@ -16555,12 +18390,11 @@ async function reloadCommunityPosts() {
   const box = document.getElementById("communityPosts");
   box.innerHTML = '<div class="empty-msg">読み込み中...</div>';
   const result = await callApi("get_community_posts", currentCommunity.id);
-  result.ok
-    ? result.posts.length
+  result.ok ? (result.posts || []).length
       ? (box.innerHTML = result.posts
           .map(
             (p) =>
-              `\n    <div class="community-post">\n      <div class="card-name">${escapeHtml(p.name)} ${p.user_id ? `<span class="uid-tag">ID:${Number(p.user_id) || 0}</span>` : ""}</div>\n      <div class="card-sub" style="white-space:normal;">${escapeHtml(p.text)}</div>\n      <div class="post-actions">\n        <span class="like-btn ${p.liked ? "liked" : ""}" onclick='toggleLike(${Number(p.id) || 0}, ${!!p.liked})'>\n          ${p.liked ? '<svg class="ico" viewBox="0 0 24 24" fill="currentColor" style="color:#ff5a6a"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>' : '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20.3 4.6 13c-2-2-2-5.2 0-7.1 1.9-1.8 4.9-1.6 6.7.3l.7.8.7-.8c1.8-1.9 4.8-2.1 6.7-.3 2 1.9 2 5.1 0 7.1L12 20.3Z"/></svg>'} いいね\n        </span>\n        <span class="comment-btn" onclick="toggleComments(${Number(p.id) || 0})"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8A2.5 2.5 0 0 1 17.5 16H9l-4 3.6a.8.8 0 0 1-1.3-.6V5.5Z"/></svg> コメント</span>\n      </div>\n      <div id="comments-${p.id}" class="community-comments" style="display:none;"></div>\n    </div>\n  `,
+              `\n    <div class="community-post">\n      <div class="card-name">${escapeHtml(p.name)} ${p.user_id ? `<span class="uid-tag">ID:${Number(p.user_id) || 0}</span>` : ""}</div>\n      <div class="card-sub" style="white-space:normal;">${escapeHtml(p.text)}</div>\n      <div class="post-actions">\n        <span class="like-btn ${p.liked ? "liked" : ""}" onclick='toggleLike(${Number(p.id) || 0}, ${!!p.liked})'>\n          ${p.liked ? '<i class="ico kiHeartOn" style="color:#ff5a6a"></i>' : '<i class="ico kiHeartOff"></i>'} いいね\n        </span>\n        <span class="comment-btn" onclick="toggleComments(${Number(p.id) || 0})"><i class="ico kiCmt"></i> コメント</span>\n      </div>\n      <div id="comments-${p.id}" class="community-comments" style="display:none;"></div>\n    </div>\n  `,
           )
           .join(""))
       : (box.innerHTML = '<div class="empty-msg">投稿がありません</div>')
@@ -16621,6 +18455,9 @@ async function submitCommunityPost() {
       : toast(`投稿失敗: ${koeErrMsg(result)}`.slice(0, 120), "error"));
 }
 window.addEventListener("pywebviewready", async () => {
+  /* 合図が二重に来ても起動処理は一度だけ(ブリッジ側と保険側の両方から来ることがある) */
+  if (window.__koeBootRan) return;
+  window.__koeBootRan = 1;
   try {
     setTimeout(koeUiReady, 1200);
   } catch (e) {}
@@ -16637,6 +18474,20 @@ window.addEventListener("pywebviewready", async () => {
   } catch (e) {
     console.error("initUiExtras", e);
   }
+  /* ★画面を先に出す:
+     以前はこの下にある数百行のイベント配線を全部終えてからでないと画面が出ず、
+     ロード画面が必要以上に長く残っていた(実測で約200ms)。
+     保存アカウントがあるなら、配線より前にシェル(メイン画面)を描いてしまう。
+     配線はこの直後に続けて行われるので、操作できるようになるまでの差は無い。 */
+  try {
+    var __a0 = getAccounts(),
+      __c0 = currentAccountId();
+    var __ac0 =
+      (__a0 || []).find(function (x) {
+        return x.user_id === __c0;
+      }) || (__a0 || [])[0];
+    if (__ac0 && __ac0.token) koeBootShell(__ac0);
+  } catch (e) {}
   ["pointerdown", "touchstart", "mousedown", "keydown"].forEach((ev) =>
     document.addEventListener(
       ev,
@@ -16771,6 +18622,7 @@ window.addEventListener("pywebviewready", async () => {
     document.getElementById("refreshRoomsBtn").addEventListener("click", function () {
       window.__roomsAllLoaded = false;
       window.__roomPage = 1;
+      window.__roomsSweptAt = 0; // 「90秒以内は1ページだけ」の短縮を飛ばして全件読み直す
       koeRoomNotice("");
       loadGroupRooms(false, true);
     }));
@@ -16949,15 +18801,6 @@ window.addEventListener("pywebviewready", async () => {
     const eb = document.getElementById("composeEmojiBtn");
     eb && eb.addEventListener("click", toggleEmojiPicker);
   }
-  try {
-    var __a0 = getAccounts(),
-      __c0 = currentAccountId();
-    var __ac0 =
-      (__a0 || []).find(function (x) {
-        return x.user_id === __c0;
-      }) || (__a0 || [])[0];
-    if (__ac0 && __ac0.token) koeBootShell(__ac0);
-  } catch (e) {}
   let loggedIn;
   try {
     loggedIn = await api().is_logged_in();
@@ -17069,6 +18912,9 @@ function koeBootShell(acc) {
     if (!currentRoomId) return { ok: false };
     __koeCommentEnabled = !__koeCommentEnabled;
     const r = await callApi("room_switch_comment_enabled", currentRoomId, __koeCommentEnabled);
+    try {
+      if (r && r.ok && window.KoeGuard) KoeGuard.rememberCommentEnabled(__koeCommentEnabled);
+    } catch (e) {}
     toast(
       r && r.ok
         ? "コメント欄を" + (__koeCommentEnabled ? "ONにしました" : "OFFにしました")
@@ -17091,15 +18937,14 @@ function koeBootShell(acc) {
     return r;
   };
 
+  /* 自分がこの枠を開いた人かどうか。
+     自分の枠に居るときは currentRoomOwnerId が null になるので、
+     それだけを見ていると枠主のときに false になってしまう(招待も長押しキックも出なかった)。
+     判定はアプリ共通の koeIsOwner() に任せる。 */
   function __koeIsRoomOwner() {
     try {
-      return (
-        typeof currentRoomOwnerId !== "undefined" &&
-        typeof myUserId !== "undefined" &&
-        currentRoomOwnerId &&
-        myUserId &&
-        Number(currentRoomOwnerId) === Number(myUserId)
-      );
+      if (typeof window.koeIsOwner === "function") return window.koeIsOwner();
+      return false;
     } catch (e) {
       return false;
     }
@@ -18814,6 +20659,101 @@ function koeBootShell(acc) {
     if (rc) rc.addEventListener("click", loadCoins);
     const rd = document.getElementById("receiverDetailBtn");
     if (rd) rd.addEventListener("click", loadDetail);
+    const rpl = document.getElementById("receiverProfileLoadBtn");
+    if (rpl) rpl.addEventListener("click", loadReceiverProfile);
+    const rps = document.getElementById("receiverProfileSaveBtn");
+    if (rps) rps.addEventListener("click", saveReceiverProfile);
+  }
+
+  /* ---- 受け手プロフィールの詳細設定 ---- */
+  function profileMsg(text) {
+    const el = document.getElementById("receiverProfileMsg");
+    if (el) el.textContent = text || "";
+  }
+  /* いま登録されている内容を読み込んで、入力欄とコインの選択肢を埋める */
+  async function loadReceiverProfile() {
+    const rid = receiverId();
+    if (!rid) {
+      profileMsg("受け手IDが分かりません");
+      return;
+    }
+    profileMsg("読み込み中...");
+    let detail = null,
+      coins = null;
+    try {
+      const both = await Promise.all([
+        callApi("get_cheering_receiver_detail", rid),
+        callApi("get_cheering_receiver_coin_list", rid),
+      ]);
+      detail = both[0];
+      coins = both[1];
+    } catch (e) {}
+    const d =
+      (detail && detail.ok && (detail.detail || detail.data)) || (detail && detail.ok ? detail : null);
+    const sel = document.getElementById("receiverCoinSelect");
+    if (sel) {
+      const items = genericItems(coins || {}, ["coins", "data", "coin_list"]);
+      sel.innerHTML =
+        '<option value="">変更しない</option>' +
+        items
+          .map(function (c) {
+            const id = c.id || c.cheering_coin_id || "";
+            const label = c.name || (c.coin ? c.coin + "コイン" : "コイン " + id);
+            return '<option value="' + esc(id) + '">' + esc(label) + "</option>";
+          })
+          .join("");
+    }
+    if (!d) {
+      profileMsg("いまの内容は取得できませんでした（新しく作る場合はそのまま入力して保存してください）");
+      return;
+    }
+    const setV = function (id, v) {
+      const el = document.getElementById(id);
+      if (el && v != null) el.value = String(v);
+    };
+    setV("receiverMessageInput", d.message || "");
+    setV("receiverPicInput", d.profile_picture_file_path || "");
+    setV("receiverVoiceInput", d.profile_voice_file_path || "");
+    if (sel && d.cheering_coin_id) sel.value = String(d.cheering_coin_id);
+    const st = document.getElementById("receiverStatusSelect");
+    if (st && d.status) st.value = String(d.status);
+    profileMsg("いまの内容を読み込みました");
+  }
+  /* 入力された項目だけを送る(空欄は「変更しない」) */
+  async function saveReceiverProfile() {
+    const rid = receiverId();
+    const btn = document.getElementById("receiverProfileSaveBtn");
+    const val = function (id) {
+      const el = document.getElementById(id);
+      return el && el.value ? String(el.value).trim() : "";
+    };
+    const body = {};
+    const message = val("receiverMessageInput");
+    if (message) body.message = message;
+    const coin = val("receiverCoinSelect");
+    if (coin) body.cheering_coin_id = coin;
+    const status = val("receiverStatusSelect");
+    if (status) body.status = status;
+    const pic = val("receiverPicInput");
+    if (pic) body.profile_picture_file_path = pic;
+    const voice = val("receiverVoiceInput");
+    if (voice) body.profile_voice_file_path = voice;
+    if (!Object.keys(body).length) {
+      profileMsg("変更する項目がありません");
+      return;
+    }
+    if (btn) btn.disabled = true;
+    profileMsg("保存中...");
+    let r;
+    try {
+      r = await callApi("save_cheering_receiver", rid || "", JSON.stringify(body));
+    } catch (e) {
+      r = null;
+    }
+    if (btn) btn.disabled = false;
+    const okd = !!(r && r.ok);
+    profileMsg(okd ? "保存しました" : "保存できませんでした" + (r && r.status ? "（HTTP " + r.status + "）" : ""));
+    toastMsg(okd ? "受け手プロフィールを保存しました" : "保存できませんでした", okd ? undefined : "error");
   }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", initReceiverConsole);
@@ -22730,12 +24670,14 @@ function koeBootShell(acc) {
       tries++;
       var ls = document.getElementById("loginScreen");
       var onLogin = ls && getComputedStyle(ls).display !== "none";
-      var uid = (typeof myUserId !== "undefined" && myUserId) || (typeof currentAccountId === "function" && currentAccountId());
+      var uid =
+        (typeof myUserId !== "undefined" && myUserId) ||
+        (typeof currentAccountId === "function" && currentAccountId());
       if (!onLogin && uid) {
         clearInterval(t);
         fn();
       } else if (tries > 600) {
-        clearInterval(t);   // 10 分たっても入らないならあきらめる
+        clearInterval(t); // 10 分たっても入らないならあきらめる
       }
     }, 1000);
   }
@@ -22951,24 +24893,86 @@ async function __koeDoUserSearchModal() {
       box.innerHTML = '<div class="empty-msg">取得できませんでした</div>';
       return;
     }
-    var withImg = (r.posts || []).filter(function (p) {
-      return !!p.image_url;
-    });
-    if (!withImg.length) {
+    box.__koeAlbumSeen = {};
+    var withImg = koeAlbumPick((r.posts || []), box);
+    if (!withImg.length && !(r && r.next_max_id)) {
       box.innerHTML = '<div class="empty-msg">画像付きの投稿がありません</div>';
       return;
     }
-    box.innerHTML = withImg
-      .map(function (p) {
-        return (
-          '<img loading="lazy" decoding="async" src="' +
-          escAttr(p.image_url) +
-          '" onclick="openPostDetail(event,' +
-          (Number(p.id) || 0) +
-          ')" onerror="this.style.opacity=\'.15\'">'
-        );
-      })
-      .join("");
+    box.innerHTML = withImg.map(koeAlbumImgHtml).join("");
+    try {
+      koeSetupAlbumMore(box, uid, r && r.next_max_id);
+    } catch (e) {}
+  }
+  /* 画像付きの投稿だけを取り出し、既に出したものは除く。 */
+  function koeAlbumPick(posts, box) {
+    var seen = box.__koeAlbumSeen || (box.__koeAlbumSeen = {});
+    return (posts || []).filter(function (p) {
+      var id = Number(p && p.id) || 0;
+      if (!p || !p.image_url || (id && seen[id])) return false;
+      if (id) seen[id] = 1;
+      return true;
+    });
+  }
+  function koeAlbumImgHtml(p) {
+    return (
+      '<img loading="lazy" decoding="async" src="' +
+      escAttr(p.image_url) +
+      '" onclick="openPostDetail(event,' +
+      (Number(p.id) || 0) +
+      ')" onerror="this.style.opacity=\'.15\'">'
+    );
+  }
+  /* アルバムの「もっと読む」。画像は投稿の一部なので、続きのページを辿る。 */
+  function koeSetupAlbumMore(box, uid, cursor) {
+    var old = box.querySelector(".koe-posts-more");
+    if (old) old.remove();
+    if (!cursor) return;
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "koe-posts-more";
+    btn.textContent = "もっと読む";
+    btn.onclick = function () {
+      koeLoadMoreAlbum(btn, box, uid, cursor);
+    };
+    box.appendChild(btn);
+  }
+  async function koeLoadMoreAlbum(btn, box, uid, cursor) {
+    if (!btn || btn.__busy) return;
+    btn.__busy = 1;
+    btn.disabled = true;
+    btn.textContent = "読み込み中...";
+    /* 画像の無いページが続いても空振りしないよう、画像が見つかるまで最大5ページ辿る。 */
+    var next = cursor,
+      added = 0,
+      pages = 0;
+    while (next && pages < 5) {
+      pages++;
+      var r = null;
+      try {
+        r = await callApi("get_user_posts", String(uid), String(next));
+      } catch (e) {
+        r = null;
+      }
+      if (!r || !r.ok) {
+        btn.disabled = false;
+        btn.__busy = 0;
+        btn.textContent = "もっと読む(もう一度試す)";
+        return;
+      }
+      var pics = koeAlbumPick(r.posts || [], box);
+      if (pics.length) {
+        btn.insertAdjacentHTML("beforebegin", pics.map(koeAlbumImgHtml).join(""));
+        added += pics.length;
+      }
+      next = r.next_max_id || "";
+      if (added) break; // 何か足せたら一旦止めて、続きはまたボタンで
+    }
+    btn.__busy = 0;
+    koeSetupAlbumMore(box, uid, next);
+    if (!added && !next && !box.querySelector("img")) {
+      box.innerHTML = '<div class="empty-msg">画像付きの投稿がありません</div>';
+    }
   }
 
   /* プロフィール編集の保存前プレビュー。入力しながら、相手からどう見えるかをその場に出す。 */
@@ -23886,16 +25890,25 @@ window.koeOpenExternal = function (url) {
     }
     if (document.getElementById("koeVersionLine")) paintVersion();
   }
+  var __lastAuto = 0;
+  function autoCheck() {
+    var now = Date.now();
+    if (now - __lastAuto < 900000) return; // 自動確認は最短15分間隔
+    __lastAuto = now;
+    try {
+      window.__koeCheckUpdate(false);
+    } catch (e) {}
+  }
   function boot() {
     bindBtns();
-    setTimeout(function () {
-      window.__koeCheckUpdate(false);
-    }, 2500);
+    setTimeout(autoCheck, 2500);
     /* 起動中も1時間ごとに再確認(MIN_VERSION が後から書かれた場合に効かせる) */ setInterval(function () {
-      try {
-        if (!document.hidden) window.__koeCheckUpdate(false);
-      } catch (e) {}
+      if (!document.hidden) autoCheck();
     }, 3600000);
+    /* アプリに戻ってきた瞬間にも確認(閉じている間に出た新版をすぐ知らせる)。15分間隔の制限つき。 */
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) autoCheck();
+    });
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();
@@ -25200,6 +27213,7 @@ try {
         S.rtdbAt = Date.now();
       } else if (res) {
         S.rest = res;
+        window.__koeOfficialRosterAt = Date.now();
       }
       koeRosterRemember(S.rest);
       koeRosterRemember(S.rtdb);
@@ -25232,6 +27246,73 @@ try {
         listeners: fill("listeners"),
         speaker_applicants: fill("speaker_applicants"),
       };
+      /* 枠を開いた人と、自分の役割だけは公式APIの名簿を優先する。
+         通話サーバー側の名簿(RTDB)は枠にいる人なら誰でも書き込めるので、
+         そこだけを信じると、道具を使った人に「自分を聞き専に落とす」「主催者をすり替える」
+         ことができてしまう。 */
+      var rest = S.rest || {};
+      if (Number(rest.owner_user_id || 0)) out.owner_user_id = Number(rest.owner_user_id);
+
+      var me = Number(window.__myUserId || 0);
+      var inList = function (list) {
+        return (list || []).some(function (u) {
+          return Number(u.user_id || u.userId) === me;
+        });
+      };
+      if (me && (rest.speakers || rest.listeners)) {
+        var canSpeakOfficially = inList(rest.speakers) || Number(rest.owner_user_id || 0) === me;
+        var canSpeakHere = inList(out.speakers) || Number(out.owner_user_id || 0) === me;
+        if (canSpeakOfficially && !canSpeakHere) {
+          out.listeners = out.listeners.filter(function (u) {
+            return u.user_id !== me;
+          });
+          out.speakers = out.speakers.concat([
+            { user_id: me, name: window.__myName || "user " + me, icon_url: window.__myIcon || "" },
+          ]);
+          if (!window.__koeRoleGuardLogged) {
+            window.__koeRoleGuardLogged = true;
+            try {
+              callLog(
+                "見張り: 通話サーバーの名簿では自分が聞き専になっていましたが、声とも側では発言者のままなので戻しました",
+              );
+            } catch (e2) {}
+          }
+        }
+      }
+
+      /* 通話サーバー側の名簿にだけ居る人は画面に出さない。
+         そこは枠にいる人なら誰でも書けるので、偽の参加者をいくらでも並べられてしまう。
+         (お試し聞きの人は別の欄で、根拠付きで出している) */
+      var api = window.__koeApiRoster;
+      if (api && api.uids && Date.now() - api.at > 120000 && !window.__koeStaleLogged) {
+        window.__koeStaleLogged = true;
+        try {
+          callLog("見張り: 声とも側の名簿が2分以上届いていません。偽の参加者を見分けられない状態です");
+        } catch (e3) {}
+      }
+      if (api && api.uids && Date.now() - api.at < 120000) {
+        var onlyReal = function (list) {
+          return (list || []).filter(function (u) {
+            return api.uids[Number(u.user_id)] || Number(u.user_id) === Number(out.owner_user_id);
+          });
+        };
+        var before = out.speakers.length + out.listeners.length + out.speaker_applicants.length;
+        out.speakers = onlyReal(out.speakers);
+        out.listeners = onlyReal(out.listeners);
+        out.speaker_applicants = onlyReal(out.speaker_applicants);
+        var after = out.speakers.length + out.listeners.length + out.speaker_applicants.length;
+        if (before > after && !window.__koeGhostLogged) {
+          window.__koeGhostLogged = true;
+          try {
+            callLog("見張り: 声とも側の名簿に居ない参加者が通話サーバー側に " + (before - after) + " 人ぶん書かれていたので、画面には出しません");
+          } catch (e2) {}
+        }
+      }
+
+      /* この名簿がどこから来たのかを残す。
+         これが消えていると、受け取った側が「声とも本体の返事」と取り違えてしまう。 */
+      out.__src = res && res.__src === "rtdb" ? "rtdb" : "rest";
+
       out.speaker_count = out.speakers.length;
       out.listener_count = out.listeners.length;
       return out;
@@ -25250,13 +27331,44 @@ try {
     }
   }
   window.koeIsOwner = koeIsOwner;
+
+  /* この枠で、参加者を動かせる立場かどうか。
+     ・自分が開いた枠なら当然できる
+     ・他人の枠でも、その枠の主から host / moderator の権限をもらっていればできる
+       (声とも本来の役割。名簿の role に出る)
+     権限があるかどうかの最終判断はサーバーが行う。ここは「操作ボタンを出すか」を決めるだけで、
+     もらっていない人が押しても声とも側で断られる(その結果はそのまま知らせる)。 */
+  function koeMyRoomRole() {
+    try {
+      var me = Number(window.__myUserId || 0);
+      if (!me) return "";
+      return String((window.__koeMemberRoles || {})[me] || "").toLowerCase();
+    } catch (e) {
+      return "";
+    }
+  }
+  function koeCanModerate() {
+    try {
+      if (koeIsOwner()) return true;
+      var role = koeMyRoomRole();
+      if (role === "host" || role === "moderator" || role === "owner") return true;
+      // 枠主から KoeTomo+ 上でモデレーターに指名されている場合(操作は枠主が代理実行する)
+      if (window.KoeMod && KoeMod.amMod && KoeMod.amMod()) return true;
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+  window.koeMyRoomRole = koeMyRoomRole;
+  window.koeCanModerate = koeCanModerate;
   if (typeof window.updateCallRoster === "function" && !window.__koeRosterWrap) {
     window.__koeRosterWrap = true;
     var _ucr = window.updateCallRoster;
     window.updateCallRoster = function (res) {
       var m = koeMergeRoster(res);
       try {
-        renderApplicants(koeIsOwner() ? m.speaker_applicants || [] : []);
+        /* 挙手の許可/拒否ボタンは、枠主と権限をもらった人だけに出す */
+        renderApplicants(koeCanModerate() ? m.speaker_applicants || [] : []);
       } catch (e) {}
       return _ucr(m);
     };
@@ -25283,38 +27395,45 @@ try {
     uid = Number(uid);
     if (!uid) return;
     var me = Number(window.__myUserId || 0),
-      owner = koeIsOwner(),
+      canMod = koeCanModerate(),
       role = koeRoleOf(uid),
       nm = koeNameOf(uid);
     var items = [];
-    if (owner && uid !== me) {
-      if (role === "listener")
-        items.push([
-          "発言を依頼する",
-          function () {
-            koeInviteToSpeak(uid, nm);
-          },
-        ]);
-      else if (role === "applicant") {
-        items.push([
-          "発言者にする",
-          function () {
-            doApprove(uid);
-          },
-        ]);
-        items.push([
-          "断る（リスナーに戻す）",
-          function () {
-            doReject(uid);
-          },
-        ]);
-      } else if (role === "speaker")
-        items.push([
-          "リスナーに戻す",
-          function () {
-            doReject(uid);
-          },
-        ]);
+    /* 役割を変える操作は、枠を開いた人と、枠主から権限をもらった人だけが使える。
+       枠主は直接サーバーへ、モデレーターは枠主の端末に依頼して代理実行してもらう。 */
+    var direct = koeIsOwner();
+    var viaMod = !direct && window.KoeMod && KoeMod.amMod();
+    var actPromote = function () {
+      direct ? doApprove(uid) : KoeMod.requestRole(uid, "speaker");
+    };
+    var actDemote = function () {
+      direct ? doReject(uid) : KoeMod.requestRole(uid, "listener");
+    };
+    var actKick = function () {
+      direct ? koeKickUser(uid, nm) : KoeMod.requestKick(uid);
+    };
+    /* モデレーターの操作は「枠主に依頼」なので、そうと分かる言い方にする */
+    var reqSuffix = viaMod ? "（枠主に依頼）" : "";
+    if (canMod && uid !== me) {
+      if (role === "listener") {
+        items.push(["発言者にする" + reqSuffix, actPromote]);
+        if (direct)
+          items.push([
+            "発言を依頼する",
+            function () {
+              koeInviteToSpeak(uid, nm);
+            },
+          ]);
+      } else if (role === "applicant") {
+        items.push(["発言者にする" + reqSuffix, actPromote]);
+        items.push([(viaMod ? "聞き専に戻す" : "断る（聞き専に戻す）") + reqSuffix, actDemote]);
+      } else if (role === "speaker") {
+        items.push(["聞き専に戻す" + reqSuffix, actDemote]);
+      } else {
+        /* 名簿で役割が分からない人(試し聞きなど)にも、ひと通り出しておく */
+        items.push(["発言者にする" + reqSuffix, actPromote]);
+        items.push(["聞き専に戻す" + reqSuffix, actDemote]);
+      }
     }
     if (uid !== me)
       items.push([
@@ -25325,13 +27444,47 @@ try {
           } catch (e) {}
         },
       ]);
-    if (owner && uid !== me)
+    /* 枠主だけ: この人をこの枠のモデレーターにする / 解除する */
+    if (koeIsOwner() && uid !== me && window.KoeMod && KoeMod.isOwnerMod) {
+      var alreadyMod = KoeMod.isOwnerMod(uid);
       items.push([
-        nm + " を退出させる",
-        function () {
-          koeKickUser(uid, nm);
+        alreadyMod ? "モデレーターを解除する" : "モデレーターにする",
+        async function () {
+          if (
+            !alreadyMod &&
+            !(await showConfirmModal(
+              nm + " をモデレーターにしますか？\nこの人は、あなたの代わりにキックや発言者の上げ下げを頼めるようになります。",
+            ))
+          )
+            return;
+          KoeMod.designate(uid, !alreadyMod);
+          try {
+            koeRenderModPanel();
+          } catch (e) {}
         },
       ]);
+    }
+    if (canMod && uid !== me) {
+      /* 自分の枠、またはモデレーターなら、荒らしを枠から追い出せる(モデレーターは枠主に依頼) */
+      items.push([nm + " を退出させる" + reqSuffix, actKick]);
+    } else if (uid !== me) {
+      /* 権限が無い枠では、相手の枠は触らず、自分に届く音だけを断つ・自分の側でブロックする。
+         (人を追放するのは、その枠を開いた人ともらった人の役目) */
+      items.push([
+        "音量を調整する",
+        function () {
+          try {
+            koeShowVolume(uid, nm);
+          } catch (e) {}
+        },
+      ]);
+      items.push([
+        "この人をブロックする",
+        function () {
+          koeBlockUserQuick(uid, nm);
+        },
+      ]);
+    }
     if (!items.length) return;
     var m = document.createElement("div");
     m.className = "modal";
@@ -25340,7 +27493,13 @@ try {
       '<div class="modal-content small"><div class="modal-header"><span>' +
       escapeHtml(nm) +
       '</span><button class="modal-close koe-um-x">✕</button></div>' +
-      '<div class="modal-body" id="koeUmBody"></div></div>';
+      '<div class="modal-body" id="koeUmBody">' +
+      (canMod
+        ? viaMod
+          ? '<p class="card-sub" style="margin:0 0 8px;white-space:normal;line-height:1.5;">あなたはモデレーターです。操作は枠主に依頼され、枠主の端末が実行します（枠主が公式アプリのときは、枠主が手で行います）。</p>'
+          : ""
+        : '<p class="card-sub" style="margin:0 0 8px;white-space:normal;line-height:1.5;">この枠の権限が無いので、枠の役割は変えられません。ここでできるのは、自分に届く音の調整とブロックだけです。（枠主からモデレーター権限をもらうと、他の枠でも操作できます）</p>') +
+      "</div></div>";
     document.body.appendChild(m);
     var close = function () {
       try {
@@ -25372,12 +27531,7 @@ try {
     if (!currentRoomId) return;
     if (!(await showConfirmModal(nm + " さんを枠から退出させますか？"))) return;
     var r = await callApi("room_kick_user", currentRoomId, String(uid));
-    toast(
-      r && r.ok
-        ? nm + " さんを退出させました"
-        : "退出させられませんでした" + (r && (r.message || r.error) ? "：" + (r.message || r.error) : ""),
-      r && r.ok ? undefined : "error",
-    );
+    koeReportRoleResult(r, nm + " さんを退出させました", nm + " さんを退出させられませんでした");
     try {
       refreshRoomStateNow();
     } catch (e) {}
@@ -25392,6 +27546,9 @@ try {
     if (!(await showConfirmModal(nm + " さんに発言を依頼しますか？"))) return;
     var r = await callApi("room_data_send", String(currentRoomId), "3", String(uid));
     if (r && r.ok) {
+      // 自分が出した依頼を覚えておく。覚えのない「承諾」で発言者にしないため。
+      window.__koeInviteSent = window.__koeInviteSent || {};
+      window.__koeInviteSent[uid] = Date.now();
       toast(nm + " さんに発言を依頼しました");
       try {
         callLog("発言を依頼: " + nm);
@@ -25414,12 +27571,50 @@ try {
       var cmd = Number(d.command),
         rid = Number((d.args && (d.args.requestee_id || d.args.requesteeId)) || 0);
       var me = Number(window.__myUserId || 0);
+      // 扱う合図は「発言の依頼(3)・承諾(4)・辞退(5)」だけ。ほかは全部捨てる。
+      if (cmd !== 3 && cmd !== 4 && cmd !== 5) {
+        try {
+          callLog("見張り: 知らない合図が通話サーバーに書かれていました(command=" + cmd + ")。無視します");
+        } catch (e) {}
+        return;
+      }
       if (cmd === 3) {
-        if (rid && rid === me) koeShowInvitePrompt();
+        // 「発言を依頼された」の合図。誰でも書き込める場所なので、立て続けには出さない。
+        if (!rid || rid !== me) return;
+        // すでに発言できる立場なら、依頼が来るはずがない。偽物とみなす。
+        try {
+          var api = window.__koeApiRoster;
+          if (api && api.speakers && api.speakers[me]) {
+            callLog("見張り: すでに発言できるのに「発言を依頼された」という合図が来ました。無視します");
+            return;
+          }
+        } catch (e) {}
+        var lastPrompt = window.__koeInvitePromptAt || 0;
+        if (Date.now() - lastPrompt < 30000) return;
+        window.__koeInvitePromptAt = Date.now();
+        koeShowInvitePrompt();
       } else if (cmd === 4 || cmd === 5) {
         if (!koeIsOwner() || !rid) return;
         var nm = koeNameOf(rid);
         if (cmd === 4) {
+          /* ここは「自分が出した依頼への返事」しか受け付けない。
+             合図の置き場所は枠の参加者なら誰でも書けるので、覚えのない承諾をそのまま
+             発言者にしてしまうと、勝手に発言者に上がられてしまう。 */
+          var sent = (window.__koeInviteSent || {})[rid] || 0;
+          if (!sent || Date.now() - sent > 10 * 60 * 1000) {
+            try {
+              callLog(
+                "見張り: 依頼していない相手から『発言を承諾』が届いたので、発言者にはしませんでした: " + nm,
+                rid,
+              );
+            } catch (e) {}
+            try {
+              toast(nm + " さんから覚えのない『承諾』が届きました。発言者にはしていません", "error");
+            } catch (e) {}
+            return;
+          }
+          delete window.__koeInviteSent[rid];
+          koeNoteApprovedSpeaker(rid);
           toast(nm + " さんが発言を承諾しました");
           try {
             callLog("発言の依頼を承諾: " + nm);
@@ -25430,6 +27625,14 @@ try {
             } catch (e) {}
           });
         } else {
+          var sentNo = (window.__koeInviteSent || {})[rid] || 0;
+          if (!sentNo || Date.now() - sentNo > 10 * 60 * 1000) {
+            try {
+              callLog("見張り: 依頼していない相手から『辞退』が届いたので、知らせません: " + nm, rid);
+            } catch (e) {}
+            return;
+          }
+          delete window.__koeInviteSent[rid];
           toast(nm + " さんに断られました");
           try {
             callLog("発言の依頼を辞退: " + nm);
@@ -25479,6 +27682,7 @@ try {
   }
   async function koeReplyInvite(ok) {
     if (!currentRoomId) return;
+    if (ok) koeMarkMyRoleIntent();
     var me = Number(window.__myUserId || 0);
     if (!me) return;
     var r = await callApi("room_data_send", String(currentRoomId), ok ? "4" : "5", String(me));
@@ -25632,8 +27836,9 @@ try {
       return false;
     }
   }
-  function anyVisible() {
-    var all = document.querySelectorAll(SEL);
+  /* all を渡せば、その場で取り直さない(1回の点検で何度も全体を探し直さないため) */
+  function anyVisible(all) {
+    all = all || document.querySelectorAll(SEL);
     for (var i = 0; i < all.length; i++) {
       if (visible(all[i])) return true;
     }
@@ -25658,16 +27863,20 @@ try {
     el.__koeShown = true;
     lift(el);
   }
-  function onHidden(el) {
+  /* 閉じたのは「さっきまで開いていたもの」だけ。
+     もともと閉じている20個以上のモーダルまで毎回ここを通ると、
+     そのたびに画面全体を探し直すことになり、一覧を描くたびに重くなっていた。 */
+  function onHidden(el, all) {
+    if (!el.__koeShown) return;
     el.__koeShown = false;
-    if (!anyVisible()) next = BASE; /* 全部閉じたら振り出しに戻す(数字が上限に張り付かないように) */
+    if (!anyVisible(all)) next = BASE; /* 全部閉じたら振り出しに戻す(数字が上限に張り付かないように) */
   }
   function scan(changed) {
     var all = document.querySelectorAll(SEL);
     for (var i = 0; i < all.length; i++) {
       var el = all[i];
       if (!visible(el)) {
-        onHidden(el);
+        onHidden(el, all);
         continue;
       }
       if (!el.__koeShown) {
@@ -25678,6 +27887,8 @@ try {
       if (changed && changed.indexOf(el) >= 0 && el.__koeZ !== next) lift(el);
     }
   }
+  var scanQueued = false,
+    pendingChanged = [];
   try {
     var mo = new MutationObserver(function (recs) {
       var need = false,
@@ -25694,7 +27905,19 @@ try {
           if (changed.indexOf(t) < 0) changed.push(t);
         }
       }
-      if (need) scan(changed);
+      /* 一覧の描画などで変化が何度も届くので、次の描画まで1回にまとめる */
+      if (!need) return;
+      pendingChanged = pendingChanged.concat(changed);
+      if (scanQueued) return;
+      scanQueued = true;
+      var run = function () {
+        scanQueued = false;
+        var c = pendingChanged;
+        pendingChanged = [];
+        scan(c);
+      };
+      if (window.requestAnimationFrame) requestAnimationFrame(run);
+      else setTimeout(run, 0);
     });
     mo.observe(document.documentElement, {
       subtree: true,
@@ -25938,4 +28161,1321 @@ try {
     true,
   );
   window.koeCloseSelectSheet = close;
+})();
+
+
+/* ===== 通話中のノイズ抑制パネル =====
+   通話画面の上にあるマイクのボタンから開く。
+   ここで変えた設定は、いま相手へ送っている音にその場で反映される。
+   「反映を確かめる」は 5 秒ぶんを録って、元の音と抑制後を聴き比べるためのもの。 */
+function koeCallNsCut() {
+  return window.__koeNoiseCut || null;
+}
+
+/* 「おまかせ」が入っているか。noisecut.js を読む前でも答えられるようにしておく */
+function koeNsAutoOn() {
+  try {
+    if (window.KoeNoiseCut && KoeNoiseCut.auto) return KoeNoiseCut.auto();
+    return (localStorage.getItem("koe_ns_auto") || "1") === "1";
+  } catch (e) {
+    return true;
+  }
+}
+
+/* 画面に出す効き具合。おまかせの間は自動で決まった値を出す */
+function koeNsShownLevel() {
+  try {
+    if (window.KoeNoiseCut && KoeNoiseCut.effectiveLevel) return KoeNoiseCut.effectiveLevel();
+    var key = koeNsAutoOn() ? "koe_ns_auto_level" : "koe_ns_level";
+    var n = parseInt(localStorage.getItem(key) || localStorage.getItem("koe_ns_level") || "60", 10);
+    return isNaN(n) ? 60 : n;
+  } catch (e) {
+    return 60;
+  }
+}
+
+/* おまかせの入切。切ったときは、いま鳴っている効き具合を自分の値として引き継ぐ
+   (切った瞬間に音が変わって驚かないように) */
+function koeNsSetAuto(on) {
+  try {
+    if (!on) {
+      var cur = koeNsShownLevel();
+      localStorage.setItem("koe_ns_level", String(cur));
+    }
+    if (window.KoeNoiseCut && KoeNoiseCut.setAuto) KoeNoiseCut.setAuto(on);
+    else localStorage.setItem("koe_ns_auto", on ? "1" : "0");
+  } catch (e) {}
+  koeSyncCallNsPanel();
+  koeCallNsApply();
+}
+
+/* 設定ページ側と値をそろえる */
+function koeSyncCallNsPanel() {
+  try {
+    var mode = localStorage.getItem("koe_ns_mode") || "strong";
+    var auto = koeNsAutoOn();
+    var level = String(koeNsShownLevel());
+    var gate = localStorage.getItem("koe_ns_gate") === "1";
+    var m = document.getElementById("callNsMode");
+    var l = document.getElementById("callNsLevel");
+    var g = document.getElementById("callNsGate");
+    var lb = document.getElementById("callNsLevelLabel");
+    var a = document.getElementById("callNsAuto");
+    if (m) m.value = mode;
+    if (l) l.value = level;
+    if (lb) lb.textContent = level + "%" + (auto ? "（おまかせ）" : "");
+    if (g) g.checked = gate;
+    if (a) {
+      a.checked = auto;
+      a.disabled = mode !== "strong";
+    }
+    var opts = document.getElementById("callNsLevel");
+    /* おまかせの間は自分で動かせないようにする(動かしてもすぐ上書きされて分かりにくいため) */
+    if (opts) opts.disabled = mode !== "strong" || auto;
+    if (g) g.disabled = mode !== "strong";
+    var mb = document.getElementById("callNsMeasure");
+    if (mb) mb.disabled = mode !== "strong" || !auto;
+  } catch (e) {}
+}
+
+function koeCallNsApply() {
+  try {
+    if (window.__koeNoiseCut && window.__koeNoiseCut.update) window.__koeNoiseCut.update();
+  } catch (e) {}
+  // 設定ページ側の見た目もそろえる
+  try {
+    var nsSel = document.getElementById("nsModeSel");
+    var nsLv = document.getElementById("nsLevelRange");
+    var nsLvLabel = document.getElementById("nsLevelLabel");
+    var nsGate = document.getElementById("nsGateChk");
+    var mode = localStorage.getItem("koe_ns_mode") || "strong";
+    var auto = koeNsAutoOn();
+    var level = String(koeNsShownLevel());
+    var nsAuto = document.getElementById("nsAutoChk");
+    if (nsSel) nsSel.value = mode;
+    if (nsLv) {
+      nsLv.value = level;
+      nsLv.disabled = auto;
+    }
+    if (nsLvLabel) nsLvLabel.textContent = level + "%" + (auto ? "（おまかせ）" : "");
+    if (nsAuto) nsAuto.checked = auto;
+    if (nsGate) nsGate.checked = localStorage.getItem("koe_ns_gate") === "1";
+  } catch (e) {}
+}
+
+function koeCallNsMeterLoop() {
+  var panel = document.getElementById("callNsPanel");
+  if (!panel || panel.style.display === "none") {
+    window.__koeNsMeterTimer = null;
+    // 開いていない間まで耳に流し続けない
+    try {
+      var cutOff = koeCallNsCut();
+      var selOff = document.getElementById("callNsMonitor");
+      if (cutOff && cutOff.monitor && selOff && selOff.value !== "off") {
+        cutOff.monitor("off");
+        selOff.value = "off";
+      }
+    } catch (e) {}
+    return;
+  }
+  var cut = koeCallNsCut();
+  var bar = function (id, v) {
+    var el = document.getElementById(id);
+    if (el) el.style.width = Math.max(0, Math.min(100, v)) + "%";
+  };
+  var scale = function (rms) {
+    var db = 20 * Math.log10(rms + 1e-9);
+    return ((db + 60) / 60) * 100; // -60dB で 0、0dB で 100
+  };
+  var nums = document.getElementById("callNsNums");
+  if (cut && cut.levels) {
+    var lv = cut.levels();
+    bar("callNsIn", scale(lv.in));
+    bar("callNsOut", scale(lv.out));
+    bar("callNsVad", lv.vad * 100);
+    var diff = 20 * Math.log10((lv.out + 1e-9) / (lv.in + 1e-9));
+    if (nums)
+      nums.textContent =
+        "いまの差 " +
+        (isFinite(diff) ? diff.toFixed(1) : "-") +
+        "dB / 声らしさ " +
+        lv.vad.toFixed(2) +
+        " / 絞り " +
+        (20 * Math.log10(lv.duck + 1e-9)).toFixed(0) +
+        "dB";
+  } else {
+    bar("callNsIn", 0);
+    bar("callNsOut", 0);
+    bar("callNsVad", 0);
+    if (nums) nums.textContent = "強力（推奨）で通話に入ると、ここに出ます";
+  }
+  window.__koeNsMeterTimer = setTimeout(koeCallNsMeterLoop, 100);
+}
+
+function koeInitCallNsPanel() {
+  var toggle = document.getElementById("callNsToggle");
+  if (toggle)
+    toggle.addEventListener("click", function () {
+      toggleCallPanel("callNsPanel", "callNsToggle");
+      koeSyncCallNsPanel();
+      if (!window.__koeNsMeterTimer) koeCallNsMeterLoop();
+    });
+
+  var mode = document.getElementById("callNsMode");
+  if (mode)
+    mode.addEventListener("change", function () {
+      try {
+        localStorage.setItem("koe_ns_mode", mode.value);
+      } catch (e) {}
+      koeSyncCallNsPanel();
+      koeCallNsApply();
+    });
+
+  var level = document.getElementById("callNsLevel");
+  if (level)
+    level.addEventListener("input", function () {
+      try {
+        localStorage.setItem("koe_ns_level", level.value);
+      } catch (e) {}
+      var lb = document.getElementById("callNsLevelLabel");
+      if (lb) lb.textContent = level.value + "%";
+      koeCallNsApply();
+    });
+
+  var gate = document.getElementById("callNsGate");
+  if (gate)
+    gate.addEventListener("change", function () {
+      try {
+        localStorage.setItem("koe_ns_gate", gate.checked ? "1" : "0");
+      } catch (e) {}
+      koeCallNsApply();
+    });
+
+  var nsAuto = document.getElementById("callNsAuto");
+  if (nsAuto)
+    nsAuto.addEventListener("change", function () {
+      koeNsSetAuto(nsAuto.checked);
+    });
+
+  var measure = document.getElementById("callNsMeasure");
+  if (measure)
+    measure.addEventListener("click", function () {
+      var cut = koeCallNsCut();
+      if (!cut || !cut.measure) return void toast("強力（推奨）で通話に入っているときだけ使えます");
+      measure.disabled = true;
+      measure.textContent = "測っています… 3秒そのままで";
+      cut
+        .measure(3, true)
+        .then(function (r) {
+          measure.textContent = "いま測って合わせる";
+          measure.disabled = false;
+          koeSyncCallNsPanel();
+          toast("周りの音 " + Math.round(r.noiseDb) + "dB → 効き具合 " + koeNsShownLevel() + "%");
+          try {
+            callLog("ノイズ抑制(おまかせ): 測り直して " + koeNsShownLevel() + "% にしました");
+          } catch (e) {}
+        })
+        .catch(function () {
+          measure.textContent = "いま測って合わせる";
+          measure.disabled = false;
+          toast("測れませんでした", "error");
+        });
+    });
+
+  var monitor = document.getElementById("callNsMonitor");
+  if (monitor)
+    monitor.addEventListener("change", function () {
+      var cut = koeCallNsCut();
+      if (!cut || !cut.monitor) {
+        monitor.value = "off";
+        return void toast("強力（推奨）で通話に入っているときだけ使えます");
+      }
+      cut.monitor(monitor.value);
+      if (monitor.value !== "off") toast("イヤホンを付けていないとハウリングします");
+    });
+
+  var check = document.getElementById("callNsCheck");
+  if (check)
+    check.addEventListener("click", function () {
+      var cut = koeCallNsCut();
+      if (!cut || !cut.record) return void toast("強力（推奨）で通話に入っているときだけ使えます");
+      check.disabled = true;
+      check.textContent = "録音中… 5秒しゃべってください";
+      cut
+        .record(5)
+        .then(function () {
+          check.disabled = false;
+          check.textContent = "もう一度録る";
+          toast("録れました。下のボタンで聴き比べてください");
+        })
+        .catch(function () {
+          check.disabled = false;
+          check.textContent = "反映を確かめる（5秒録って聴き比べ）";
+        });
+    });
+
+  var playRaw = document.getElementById("callNsPlayRaw");
+  if (playRaw)
+    playRaw.addEventListener("click", function () {
+      var cut = koeCallNsCut();
+      if (cut && cut.hasRecording && cut.hasRecording()) cut.play("raw");
+      else toast("先に「反映を確かめる」で録ってください");
+    });
+
+  var playWet = document.getElementById("callNsPlayWet");
+  if (playWet)
+    playWet.addEventListener("click", function () {
+      var cut = koeCallNsCut();
+      if (cut && cut.hasRecording && cut.hasRecording()) cut.play("wet");
+      else toast("先に「反映を確かめる」で録ってください");
+    });
+
+  koeSyncCallNsPanel();
+}
+
+if (document.readyState === "loading")
+  document.addEventListener("DOMContentLoaded", koeInitCallNsPanel);
+else koeInitCallNsPanel();
+
+
+/* ===== 挙手の自動処理 =====
+   「オーナーの時、挙手を自動で許可する/拒否する」を実際に動かす部分。
+   枠を開いた人のときだけ働き、同じ人に二度は行わない。 */
+function koeAutoHandleApplicants(applicants) {
+  if (!currentRoomId) return;
+  applicants = Array.isArray(applicants) ? applicants : [];
+
+  /* 手を下ろした人は控えから外す。
+     ここは挙手が 0 人のときにも通す必要がある(通さないと控えが残り続け、
+     もう一度手を挙げても二度と処理されない)。 */
+  var done = (window.__koeAutoHandled = window.__koeAutoHandled || {});
+  var nowRaised = {};
+  applicants.forEach(function (a) {
+    var id = Number(a && (a.user_id || a.userId)) || 0;
+    if (id) nowRaised[id] = true;
+  });
+  Object.keys(done).forEach(function (uid) {
+    if (!nowRaised[uid]) delete done[uid];
+  });
+
+  if (!applicants.length) return;
+  var owner = typeof window.koeIsOwner === "function" ? window.koeIsOwner() : false;
+  if (!owner) return;
+  var approve = document.getElementById("autoApproveChk");
+  var reject = document.getElementById("autoRejectChk");
+  var doIt = approve && approve.checked ? "approve" : reject && reject.checked ? "reject" : "";
+  if (!doIt) return;
+  var me = Number(window.__myUserId || 0);
+  // 同じ人への自動処理は、1 つの枠で 3 回までにする(やり取りが延々と続かないように)
+  var times = (window.__koeAutoHandledCount = window.__koeAutoHandledCount || {});
+  applicants.forEach(function (a) {
+    var uid = Number(a && (a.user_id || a.userId)) || 0;
+    if (!uid || uid === me || done[uid]) return;
+    if ((times[uid] || 0) >= 3) return;
+    times[uid] = (times[uid] || 0) + 1;
+    done[uid] = Date.now();
+    var nm = (a && a.name) || "user " + uid;
+    try {
+      callLog("挙手の自動処理: " + nm + " を" + (doIt === "approve" ? "発言者にしました" : "断りました"), uid);
+    } catch (e) {}
+    try {
+      if (doIt === "approve") doApprove(uid);
+      else doReject(uid);
+    } catch (e) {}
+  });
+}
+
+/* ===== 勝手な操作の見張り =====
+   ほかの人の道具(ツール)から、自分の役割を落とされたり、枠を乗っ取られたりしていないかを見る。
+   こちらから止めることはできないので、起きたことをその場で知らせて記録に残す。 */
+function koeWatchUnexpectedChanges(res) {
+  if (!res || res.__src === "rtdb") return; // 公式APIから来た名簿だけを信じる
+  var me = Number(window.__myUserId || 0);
+  if (!me) return;
+
+  var roleOf = function (r) {
+    if (Number(r.owner_user_id || 0) === me) return "owner";
+    var has = function (list) {
+      return (list || []).some(function (u) {
+        return Number(u.user_id || u.userId) === me;
+      });
+    };
+    if (has(r.speakers)) return "speaker";
+    if (has(r.speaker_applicants)) return "applicant";
+    if (has(r.listeners)) return "listener";
+    return "";
+  };
+  var label = { owner: "枠を開いた人", speaker: "発言者", applicant: "挙手中", listener: "聞き専" };
+
+  var role = roleOf(res);
+  var prev = window.__koeMyRolePrev;
+  window.__koeMyRolePrev = role;
+
+  // 自分で操作したときは黙っている(操作の直後 15 秒は自分の意思とみなす)
+  var byMe = Date.now() - (window.__koeMyRoleIntentAt || 0) < 15000;
+
+  if (prev && role && prev !== role && !byMe) {
+    var msg = "自分の役割が " + (label[prev] || prev) + " から " + (label[role] || role) + " に変わりました（自分では操作していません）";
+    try {
+      callLog("見張り: " + msg);
+    } catch (e) {}
+    try {
+      toast(msg, "error");
+    } catch (e) {}
+  }
+
+  var owner = Number(res.owner_user_id || 0);
+  var prevOwner = window.__koeOwnerPrev;
+  window.__koeOwnerPrev = owner;
+  if (prevOwner && owner && prevOwner !== owner) {
+    var known = ((window.__rosterSrc && window.__rosterSrc.names) || {})[owner];
+    var who = (known && known.name) || "user " + owner;
+    try {
+      callLog("見張り: 枠を開いた人が " + who + " に変わりました");
+    } catch (e) {}
+    try {
+      toast("枠の主催者が変わりました: " + who, "error");
+    } catch (e) {}
+  }
+}
+
+/* 自分の意思で役割を変えたときに呼ぶ。見張りが誤って警告しないようにするため。 */
+function koeMarkMyRoleIntent() {
+  window.__koeMyRoleIntentAt = Date.now();
+}
+
+
+/* ===== 自分の枠を勝手に触らせない =====
+   枠を開いた人は、発言者を戻す権限を持っている。
+   そこで「自分が認めていない発言者」を見つけたら、その場で聞き専に戻す。
+
+   認めた人の数え方(誤って戻さないための決まり):
+     - 枠に入った時点ですでに発言者だった人
+     - 手を挙げたのを一度でも見た人(自分が別の端末で許可した場合もここに入る)
+     - 自分の操作(許可・発言の依頼)で発言者にした人
+   これに当てはまらない発言者は、道具で勝手に上がった人とみなす。
+   取り違えたときのために、同じ人へは 3 回までにして、必ずログに残す。 */
+function koeApprovedKey() {
+  return "koe_approved_" + (currentRoomId || 0);
+}
+
+/* 認めた発言者は枠ごとに端末へ残す。
+   通信が切れて入り直したときに、正しい発言者まで戻してしまわないようにするため。 */
+function koeLoadApprovedSpeakers() {
+  var out = {};
+  try {
+    var raw = localStorage.getItem(koeApprovedKey());
+    (JSON.parse(raw || "[]") || []).forEach(function (id) {
+      if (Number(id)) out[Number(id)] = true;
+    });
+  } catch (e) {}
+  window.__koeApprovedSpeakers = out;
+  return out;
+}
+
+function koeNoteApprovedSpeaker(uid) {
+  uid = Number(uid) || 0;
+  if (!uid) return;
+  window.__koeApprovedSpeakers = window.__koeApprovedSpeakers || {};
+  window.__koeApprovedSpeakers[uid] = true;
+  try {
+    localStorage.setItem(koeApprovedKey(), JSON.stringify(Object.keys(window.__koeApprovedSpeakers)));
+    koeTrimApprovedKeys();
+  } catch (e) {}
+}
+
+/* 枠ごとの控えが端末に溜まり続けないよう、古いものから捨てる(直近 30 枠ぶんだけ残す) */
+function koeTrimApprovedKeys() {
+  var keys = [];
+  for (var i = 0; i < localStorage.length; i++) {
+    var k = localStorage.key(i);
+    if (k && k.indexOf("koe_approved_") === 0) keys.push(k);
+  }
+  if (keys.length <= 30) return;
+  keys.sort(function (a, b) {
+    return (Number(a.slice(13)) || 0) - (Number(b.slice(13)) || 0);
+  });
+  keys.slice(0, keys.length - 30).forEach(function (k) {
+    try {
+      localStorage.removeItem(k);
+    } catch (e) {}
+  });
+}
+
+/* 「枠が閉じられた」の合図を確かめる。
+   通話サーバー側の印は枠にいる人なら誰でも書けるので、そのまま従うと
+   道具を使った人に枠を閉じさせられてしまう。声とも本体に聞いてから従う。 */
+/* コメント欄の ON/OFF は通話サーバー側にも書かれるが、そこは誰でも書ける。
+   合図が来たら声とも本体に聞き直し、本体の返事の方を画面に反映する。 */
+/* ログ用に、いま分かっている名前をその場で返す(待たない) */
+function koeNameOfSafe(uid) {
+  try {
+    var n = ((window.__rosterSrc && window.__rosterSrc.names) || {})[Number(uid)];
+    if (n && n.name) return n.name;
+  } catch (e) {}
+  return "user " + uid;
+}
+
+function koeVerifyCommentEnabled(signal) {
+  if (!currentRoomId) return;
+  var last = window.__koeCommentVerifyAt || 0;
+  if (Date.now() - last < 1500) return;
+  window.__koeCommentVerifyAt = Date.now();
+  callApi("refresh_room_state", currentRoomOwnerId, String(currentRoomId))
+    .then(function (res) {
+      if (!res || !res.ok) return;
+      var real = res.comment_enabled;
+      if (real !== true && real !== false) return;
+      if (real !== signal) {
+        try {
+          callLog("見張り: コメント欄の合図(" + (signal ? "ON" : "OFF") + ")は声とも側と違ったので従いません");
+        } catch (e) {}
+      }
+      koeApplyCommentEnabled(real);
+    })
+    .catch(function () {});
+}
+
+function koeVerifyRoomClosed() {
+  if (!currentRoomId) return;
+  callApi("refresh_room_state", currentRoomOwnerId, String(currentRoomId))
+    .then(function (res) {
+      var gone = !res || !res.ok || res.room_id === null || res.room_id === undefined || res.room_id === 0;
+      if (gone) {
+        onRoomClosed();
+        return;
+      }
+      try {
+        callLog("見張り: 「枠が閉じられた」という合図が来ましたが、声とも側ではまだ開いているので従いません");
+      } catch (e) {}
+      try {
+        toast("「枠が閉じられた」という偽の合図を受け取りました。枠はまだ開いています", "error");
+      } catch (e) {}
+    })
+    .catch(function () {});
+}
+
+function koeEnforceOwnRoom(res) {
+  if (!res || res.__src === "rtdb" || !currentRoomId) return;
+  var owner = typeof window.koeIsOwner === "function" ? window.koeIsOwner() : false;
+  if (!owner) return;
+  try {
+    if (!window.KoeGuard || !KoeGuard.settings().revertUnapproved) return;
+  } catch (e) {
+    return;
+  }
+
+  var me = Number(window.__myUserId || 0);
+  var ownerUid = Number(res.owner_user_id || 0);
+  var speakers = (res.speakers || []).map(function (u) {
+    return { id: Number(u.user_id || u.userId) || 0, name: u.name || "" };
+  });
+
+  /* 「手を挙げた人」を無条件に認めると、手を挙げてから自分で発言者に上がる道具を止められない。
+     そのため、自動で許可する設定にしているときだけ、挙手→発言者を正しい流れとみなす。 */
+  window.__koeSeenApplicants = window.__koeSeenApplicants || {};
+  var autoApproveOn = false;
+  try {
+    var ap = document.getElementById("autoApproveChk");
+    autoApproveOn = !!(ap && ap.checked);
+  } catch (e) {}
+  if (autoApproveOn) {
+    (res.speaker_applicants || []).forEach(function (u) {
+      var id = Number(u.user_id || u.userId) || 0;
+      if (id) window.__koeSeenApplicants[id] = true;
+    });
+  }
+
+  if (!window.__koeApprovedSpeakers) koeLoadApprovedSpeakers();
+  var approved = window.__koeApprovedSpeakers || {};
+  var reverted = (window.__koeRevertCount = window.__koeRevertCount || {});
+
+  /* 入った時点ですでに発言者だった人は、そのまま認める。
+     自分が枠を開いたあとに勝手に上がった人を止めるのが目的なので、
+     入る前から発言者だった人まで戻すと、別の端末や公式アプリで許可した人、
+     通信が切れて入り直したときの正しい発言者まで一斉に降格させてしまう
+     (作者から「誤検知が酷い」と言われた原因のひとつ)。
+     誰を認めたかはログに残し、端末にも覚えるので入り直しても同じになる。 */
+  if (!window.__koeSpeakerBaselineDone) {
+    window.__koeSpeakerBaselineDone = true;
+    var baseNames = [];
+    speakers.forEach(function (sp) {
+      if (!sp.id || sp.id === me || sp.id === ownerUid) return;
+      if (approved[sp.id]) return;
+      koeNoteApprovedSpeaker(sp.id);
+      baseNames.push(sp.name || "user " + sp.id);
+    });
+    if (baseNames.length) {
+      try {
+        callLog("見張り: 入った時点の発言者をそのまま認めます — " + baseNames.join("、"));
+      } catch (e) {}
+    }
+    return; // この回は判定しない(控えを作っただけ)
+  }
+
+  speakers.forEach(function (sp) {
+    var uid = sp.id;
+    if (!uid || uid === me || uid === ownerUid) return;
+    if (window.__koeSeenApplicants[uid] || approved[uid]) return;
+    if ((reverted[uid] || 0) >= 3) return;
+    reverted[uid] = (reverted[uid] || 0) + 1;
+
+    var nm = sp.name || "user " + uid;
+    try {
+      callLog("見張り: 認めていない発言者 " + nm + " を見つけたので、聞き専に戻します", uid);
+    } catch (e) {}
+    try {
+      toast(nm + " さんが手続きを踏まずに発言者になっていたので、聞き専に戻しました", "error");
+    } catch (e) {}
+    callApi("reject_speaker", currentRoomId, String(uid))
+      .then(function (r) {
+        try {
+          callLog(
+            "見張り: " + nm + " を聞き専に戻す → " + (r && r.ok ? "成功" : "失敗(HTTP " + ((r && r.status) || "?") + ")"),
+            uid,
+          );
+        } catch (e) {}
+        try {
+          refreshRoomStateNow();
+        } catch (e) {}
+      })
+      .catch(function () {});
+  });
+}
+
+
+/* ===== 枠に招待 =====
+   枠を開いた人だけが使える。フォローしている人の一覧から選んで、枠へ招待する。
+   招待された相手には声とも本体から通知が届く(公式と同じ /api/rooms/{id}/invite を使う)。 */
+async function koeOpenInviteModal() {
+  if (!currentRoomId) return void toast("枠に入っていません", "error");
+  if (typeof window.koeIsOwner === "function" && !window.koeIsOwner())
+    return void toast("枠を開いた人だけが招待できます", "error");
+
+  var m = document.createElement("div");
+  m.className = "modal";
+  m.id = "koeInviteModal2";
+  m.style.display = "flex";
+  m.innerHTML =
+    '<div class="modal-content"><div class="modal-header"><span>枠に招待</span>' +
+    '<button class="modal-close koe-iv2-x">✕</button></div>' +
+    '<div class="modal-body">' +
+    '<input id="koeInviteSearch" type="text" placeholder="名前かIDで探す" style="width:100%;box-sizing:border-box;">' +
+    '<div id="koeInviteList" class="card-list" style="margin-top:8px;max-height:52vh;overflow-y:auto;">読み込み中…</div>' +
+    "</div></div>";
+  document.body.appendChild(m);
+  var close = function () {
+    try {
+      m.remove();
+    } catch (e) {}
+  };
+  m.querySelector(".koe-iv2-x").addEventListener("click", close);
+  m.addEventListener("click", function (e) {
+    if (e.target === m) close();
+  });
+
+  var box = m.querySelector("#koeInviteList");
+  var all = [];
+
+  var draw = function (keyword) {
+    var q = String(keyword || "").trim();
+    var list = !q
+      ? all
+      : all.filter(function (u) {
+          return (
+            String(u.name || "").indexOf(q) >= 0 || String(u.user_id || "").indexOf(q) >= 0
+          );
+        });
+    if (!list.length) {
+      box.innerHTML = '<div class="empty-msg">見つかりませんでした</div>';
+      return;
+    }
+    box.innerHTML = list
+      .slice(0, 200)
+      .map(function (u) {
+        var uid = Number(u.user_id) || 0;
+        return (
+          '<div class="card" style="display:flex;align-items:center;gap:10px;padding:8px;">' +
+          avatarHtml(u.name, u.icon_url) +
+          '<div style="flex:1;min-width:0;"><div class="card-name">' +
+          escapeHtml(koeCleanName(u.name)) +
+          '</div><div class="card-sub">ID:' +
+          uid +
+          "</div></div>" +
+          '<button type="button" class="btn-secondary koe-iv2-go" data-uid="' +
+          uid +
+          '" style="width:auto;padding:4px 14px;">招待</button></div>'
+        );
+      })
+      .join("");
+    box.querySelectorAll(".koe-iv2-go").forEach(function (btn) {
+      btn.addEventListener("click", async function () {
+        var uid = btn.getAttribute("data-uid");
+        btn.disabled = true;
+        btn.textContent = "送信中…";
+        var r = await callApi("room_invite", currentRoomId, String(uid));
+        btn.textContent = r && r.ok ? "招待済み" : "失敗";
+        if (r && r.ok) {
+          try {
+            callLog("枠に招待しました: " + koeNameOfSafe(uid), Number(uid));
+          } catch (e) {}
+        } else {
+          btn.disabled = false;
+          toast("招待できませんでした" + (r && r.status ? "（" + r.status + "）" : ""), "error");
+        }
+      });
+    });
+  };
+
+  /* フォローしている人を 3 ページぶんまとめて取る(公式の一覧と同じ並び) */
+  try {
+    var pages = await Promise.all([
+      callApi("get_followees", null, 1),
+      callApi("get_followees", null, 2),
+      callApi("get_followees", null, 3),
+    ]);
+    pages.forEach(function (r) {
+      if (r && r.ok) all = all.concat(r.users || []);
+    });
+    var seen = {};
+    all = all.filter(function (u) {
+      var id = Number(u.user_id) || 0;
+      if (!id || seen[id]) return false;
+      seen[id] = true;
+      return true;
+    });
+    draw("");
+  } catch (e) {
+    box.innerHTML = '<div class="empty-msg">一覧を取得できませんでした</div>';
+  }
+
+  var input = m.querySelector("#koeInviteSearch");
+  if (input)
+    input.addEventListener("input", function () {
+      draw(input.value);
+    });
+}
+
+/* 招待ボタンは、枠を開いた人のときだけ出す */
+function koeSyncInviteButton() {
+  if (document.hidden) return; // 裏にいる間は動かさない
+  var btn = document.getElementById("callInviteBtn");
+  if (!btn) return;
+  var show = !!currentRoomId && typeof window.koeIsOwner === "function" && window.koeIsOwner();
+  btn.style.display = show ? "" : "none";
+}
+
+(function () {
+  var wire = function () {
+    var btn = document.getElementById("callInviteBtn");
+    if (btn && !btn.__koeBound) {
+      btn.__koeBound = true;
+      btn.addEventListener("click", koeOpenInviteModal);
+    }
+    koeSyncInviteButton();
+  };
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", wire);
+  else wire();
+  setInterval(koeSyncInviteButton, 3000);
+})();
+
+
+/* ===== 「通話に戻る」の帯を常に出す =====
+   枠に入ったままなのに通話画面が閉じていると、戻る手段が無くなることがあった。
+   (最小化ボタン以外の道すじで画面が閉じたときや、浮き玉が消えてしまったとき)
+   枠に居る かつ 通話画面も浮き玉も出ていない ときは、必ずこの帯を出す。 */
+function koeCallScreenOpen() {
+  var ov = document.getElementById("callOverlay");
+  return !!(ov && ov.style.display && ov.style.display !== "none");
+}
+
+function koeInRoomNow() {
+  try {
+    if (typeof currentRoomId !== "undefined" && currentRoomId) return true;
+  } catch (e) {}
+  try {
+    if (typeof skCurrentRoomId !== "undefined" && skCurrentRoomId) return true;
+  } catch (e) {}
+  try {
+    if (typeof skRoom !== "undefined" && skRoom) return true;
+  } catch (e) {}
+  return false;
+}
+
+function koeSyncReturnBanner() {
+  if (document.hidden) return; // 裏にいる間は動かさない(戻ったら次のtickで直る)
+  var banner = document.getElementById("returnToCallBanner");
+  var pcb = document.getElementById("pageCallReturnBanner");
+  var bubble = document.getElementById("callSpeakerBubble");
+  if (!banner && !pcb) return;
+  var bubbleShown = !!(bubble && bubble.style.display && bubble.style.display !== "none");
+  var need = koeInRoomNow() && !koeCallScreenOpen();
+  /* 帯は1本だけ出す。全ページ共通の pageCallReturnBanner を優先し、
+     それが出るときは returnToCallBanner は出さない(以前は両方出て二重になっていた)。 */
+  var pcbShown = !!pcb && need;
+  if (pcb) pcb.style.display = need ? "flex" : "none";
+  // 浮き玉が出ているとき、または上の帯が出ているときは重ねない
+  if (banner) banner.style.display = need && !bubbleShown && !pcbShown ? "flex" : "none";
+}
+
+(function () {
+  var start = function () {
+    // 通話画面を開く・閉じるのどちらでも取りこぼさないよう、定期的に見て合わせる
+    setInterval(koeSyncReturnBanner, 1200);
+    koeSyncReturnBanner();
+  };
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+  else start();
+})();
+
+
+/* ===== 枠の残り時間 =====
+   声とも本体が返す close_at(枠が自動で閉じる予定の時刻)から、残りを出す。
+   時計のボタンを押すと、その残り時間を枠のコメント欄に流せる。 */
+/* 枠が閉じるまでの残り(ミリ秒)。分からない/当てにならないときは -1 を返す。
+
+   終了予定の時刻は文字列で届く。書き方に時差の情報が無い場合、
+   読み取り方によって何時間もずれることがある。
+   枠は長くても数時間なので、ありえない値は「分からない」として扱う。 */
+var KOE_REMAIN_MAX_MS = 12 * 60 * 60 * 1000; // これより先の予定は読み取り違いとみなす
+var KOE_REMAIN_GRACE_MS = 60 * 1000; // 予定を過ぎても1分間は「まもなく終了」と出す
+
+function koeRoomRemainMs() {
+  var at = window.__koeRoomCloseAt || 0;
+  if (!at) return -1; // 予定が分からないとき
+  var ms = at - Date.now();
+  if (ms > KOE_REMAIN_MAX_MS) {
+    if (!window.__koeRemainOddLogged) {
+      window.__koeRemainOddLogged = true;
+      try {
+        callLog("枠の終了予定の時刻が読み取れなかったので、残り時間は出しません");
+      } catch (e) {}
+    }
+    return -1;
+  }
+  if (ms < -KOE_REMAIN_GRACE_MS) return -1; // 予定を大きく過ぎている(閉じない枠)
+  return ms;
+}
+
+/* 残り時間を「1時間5分」「12分」のような読みやすい形にする */
+function koeRemainText(ms) {
+  if (ms <= 0) return "まもなく終了";
+  if (ms < 60000) return Math.max(1, Math.floor(ms / 1000)) + "秒";
+  var min = Math.floor(ms / 60000);
+  var h = Math.floor(min / 60);
+  var m = min % 60;
+  if (h > 0) return h + "時間" + (m > 0 ? m + "分" : "");
+  if (min > 0) return min + "分";
+  return Math.max(1, Math.floor(ms / 1000)) + "秒";
+}
+
+function koeUpdateRemainLabel() {
+  if (document.hidden) return; // 裏にいる間は毎秒動かさない(戻れば次のtickで直る)
+  var el = document.getElementById("callRemain");
+  var btn = document.getElementById("callRemainBtn");
+  if (!el) return;
+  var ms = koeRoomRemainMs();
+  var show = !!currentRoomId && ms >= 0;
+  el.style.display = show ? "" : "none";
+  if (btn) btn.style.display = show ? "" : "none";
+  // 残り時間やモデレーターの表示を出すときは「通話中」を省く(上の行が入りきらなくなるため)
+  var amMod = !!(window.KoeMod && KoeMod.amMod && KoeMod.amMod());
+  var inCall = document.getElementById("callInCallLabel");
+  if (inCall) inCall.style.display = show || amMod ? "none" : "";
+  if (!show) return;
+  el.textContent = "あと" + koeRemainText(ms);
+
+  // 知らせるボタンは、送った直後しばらく押せないようにする
+  if (btn) {
+    var wait = KOE_REMAIN_COOLDOWN_MS - (Date.now() - (window.__koeRemainSentAt || 0));
+    btn.disabled = wait > 0;
+    btn.title =
+      wait > 0
+        ? "次に押せるまで あと " + Math.ceil(wait / 1000) + "秒"
+        : "残り時間をコメント欄に知らせる";
+    btn.style.opacity = wait > 0 ? "0.45" : "";
+    /* 丸の中に、次に押せるまでの秒数を出す */
+    koeRenderRemainBtnFace(btn, wait);
+  }
+  // 残り10分を切ったら色を変えて気づけるようにする
+  el.classList.toggle("is-soon", ms <= 10 * 60 * 1000);
+}
+
+/* 時計ボタンの見た目。押したあと、また押せるようになるまでの秒数を
+   丸の中に出す(59, 58, ... )。押せる状態に戻ったら時計のアイコンへ。 */
+var KOE_REMAIN_CLOCK_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9 2h6"/></svg>';
+
+function koeRenderRemainBtnFace(btn, waitMs) {
+  var text = waitMs > 0 ? String(Math.ceil(waitMs / 1000)) : "";
+  /* 文字が変わらないうちは描き直さない(毎秒 innerHTML を入れ替えない) */
+  if (btn.__koeFaceText === text) return;
+  btn.__koeFaceText = text;
+  if (text) {
+    btn.classList.add("has-text");
+    btn.innerHTML = KOE_REMAIN_CLOCK_SVG + "<span>" + text + "</span>";
+  } else {
+    btn.classList.remove("has-text");
+    btn.innerHTML = KOE_REMAIN_CLOCK_SVG;
+  }
+}
+
+/* 残り時間の知らせは、押しすぎると自分が連投しているように見えるので間隔をあける */
+var KOE_REMAIN_COOLDOWN_MS = 60 * 1000;
+
+async function koeAnnounceRemain() {
+  if (!currentRoomId) return;
+  var btn = document.getElementById("callRemainBtn");
+  var left = KOE_REMAIN_COOLDOWN_MS - (Date.now() - (window.__koeRemainSentAt || 0));
+  if (left > 0) {
+    toast("次に押せるまで あと " + Math.ceil(left / 1000) + "秒");
+    return;
+  }
+  var ms = koeRoomRemainMs();
+  if (ms < 0) return void toast("この枠の終了予定はまだ分かりません");
+
+  window.__koeRemainSentAt = Date.now(); // 返事を待つ間の二度押しも止める
+  if (btn) {
+    btn.disabled = true;
+    koeRenderRemainBtnFace(btn, KOE_REMAIN_COOLDOWN_MS);
+  }
+  var text = ms <= 0 ? "この枠はまもなく終了します" : "この枠はあと " + koeRemainText(ms) + " で終了します";
+  var r = await callApi("send_room_comment", currentRoomId, text);
+  if (r && r.ok) {
+    toast("残り時間を知らせました");
+    try {
+      callLog("残り時間を知らせました: " + text);
+    } catch (e) {}
+  } else {
+    window.__koeRemainSentAt = 0; // 送れていないので、すぐ押し直せるようにする
+    if (btn) btn.disabled = false;
+    toast("コメントを送れませんでした", "error");
+  }
+}
+
+(function () {
+  var start = function () {
+    var btn = document.getElementById("callRemainBtn");
+    if (btn && !btn.__koeBound) {
+      btn.__koeBound = true;
+      btn.addEventListener("click", koeAnnounceRemain);
+    }
+    setInterval(koeUpdateRemainLabel, 1000);
+    koeUpdateRemainLabel();
+  };
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+  else start();
+})();
+
+/* ---- 証明書ピンニングの設定UI(上級者向け。既定=空=無効) ---- */
+(function () {
+  if (window.__koeCertPinInit) return;
+  window.__koeCertPinInit = true;
+  function load() {
+    try {
+      var ta = document.getElementById("certPinsInput");
+      var off = document.getElementById("certPinOffChk");
+      if (!ta || ta.__loaded) return;
+      ta.__loaded = true;
+      if (typeof callApi !== "function") return;
+      callApi("get_cert_pins")
+        .then(function (r) {
+          if (!r || !r.ok) return;
+          if (typeof r.pins === "string") ta.value = r.pins;
+          if (off) off.checked = !!r.off;
+        })
+        .catch(function () {});
+    } catch (e) {}
+  }
+  /* 一度だけ配線する(要素は index.html に静的にあるので起動時で足りる)。
+     現在値の読み込みは、入力欄に触れたときだけ行う(起動時に余計な呼び出しをしない)。 */
+  function bind() {
+    var ta = document.getElementById("certPinsInput");
+    if (ta && !ta.__focusBound) {
+      ta.__focusBound = 1;
+      ta.addEventListener("focus", load);
+    }
+    var b = document.getElementById("certPinsSaveBtn");
+    if (b && !b.__b) {
+      b.__b = 1;
+      b.addEventListener("click", function () {
+        try {
+          var pins = (document.getElementById("certPinsInput") || {}).value || "";
+          var off = !!((document.getElementById("certPinOffChk") || {}).checked);
+          callApi("set_cert_pins", pins.trim(), off).then(function (r) {
+            if (r && r.ok) toast(off ? "ピンニングを緊急停止しました" : pins.trim() ? "証明書ピンを保存しました" : "証明書ピンを無効にしました");
+            else toast("保存に失敗しました", "error");
+          });
+        } catch (e) {
+          toast("保存に失敗しました", "error");
+        }
+      });
+    }
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", bind);
+  else bind();
+})();
+
+/* ---- 「画面が真っ暗で固まる」対策 ----
+   Android の WebView は、アプリが裏に回ってから戻ったときに画面を再描画せず、
+   黒いまま固まって見えることがある(スレッドは生きているが表示だけ死ぬ)。
+   前面に戻った瞬間に軽く再描画を促し、通話でもないのに残っている通話画面を閉じる。 */
+(function () {
+  if (window.__koeResumeFix) return;
+  window.__koeResumeFix = true;
+  function repaintNudge() {
+    try {
+      var b = document.body;
+      if (!b) return;
+      // 透明度をほんの少しだけ変えて戻すと、コンポジタが必ず描き直す
+      b.style.opacity = "0.999";
+      requestAnimationFrame(function () {
+        try {
+          b.style.opacity = "";
+          void b.offsetHeight; // レイアウトを強制的に再計算させる
+        } catch (e) {}
+      });
+    } catch (e) {}
+  }
+  function closeStuckCallOverlay() {
+    try {
+      var co = document.getElementById("callOverlay");
+      if (!co || co.style.display !== "flex") return;
+      var inCall =
+        (typeof skRoom !== "undefined" && skRoom) ||
+        document.body.classList.contains("in-call") ||
+        (typeof currentRoomId !== "undefined" && currentRoomId);
+      if (!inCall && !window.__koeReconnecting) {
+        co.style.display = "none";
+        try {
+          callLog && callLog("通話中でないのに残っていた通話画面を閉じました(復帰時)");
+        } catch (e) {}
+      }
+    } catch (e) {}
+  }
+  function onResume() {
+    repaintNudge();
+    closeStuckCallOverlay();
+    /* 前面に戻ったら、接続が切れていた通話は入り直しをうながす(バナーのタップで実行) */
+    try {
+      if (currentRoomId && window.__koeActiveCall && !window.__koeReconnecting) {
+        var st = window.__koeConnState;
+        if (st === "closed" || st === "disconnected") {
+          koeShowReconnectBanner("接続が切れています。タップして再接続", true);
+        }
+      }
+    } catch (e) {}
+  }
+  document.addEventListener("visibilitychange", function () {
+    try {
+      // 裏にいる間は装飾アニメを止める(裏で回り続けると復帰時に黒くなる端末がある)
+      document.body.classList.toggle("koe-bg-paused", document.hidden);
+    } catch (e) {}
+    if (!document.hidden) onResume();
+  });
+  window.addEventListener("pageshow", onResume);
+  window.addEventListener("focus", onResume);
+})();
+
+/* ---- 起動の保険(画面が出ないまま真っ黒になるのを防ぐ) ----
+   本体の起動処理は "pywebviewready" を受けて動く。ブリッジ側の事故や
+   タイミングでこの合図が来なかった場合、以前は画面が一切出ず真っ黒のままだった。
+   ここでは順に手を打つ:
+     ①4秒たっても起動していなければ、こちらから合図を出す
+     ②それでも7秒時点で画面が1枚も出ていなければ、保存アカウントの有無で
+       メイン画面かログイン画面を強制的に表示する(何も出ないよりは必ずマシ) */
+(function () {
+  if (window.__koeBootGuard) return;
+  window.__koeBootGuard = true;
+
+  function anyScreenShown() {
+    try {
+      var els = document.querySelectorAll(".screen, .login-screen, .main-screen");
+      for (var i = 0; i < els.length; i++) {
+        if (els[i].style.display && els[i].style.display !== "none") return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function log(msg) {
+    try {
+      if (typeof callApi === "function") callApi("js_diag_log", "[BOOTGUARD] " + msg);
+    } catch (e) {}
+  }
+
+  function kick() {
+    if (window.__koeBootRan) return;
+    log("起動処理がまだ動いていないため、合図を出し直します");
+    /* __koeFireReady は「1回だけ」の作りなので、取りこぼし時は直接投げ直す
+       (起動処理側に二重実行よけがあるので投げ直しても安全) */
+    try {
+      window.dispatchEvent(new Event("pywebviewready"));
+    } catch (e) {}
+  }
+
+  function lastResort() {
+    if (anyScreenShown()) return;
+    log("画面が出ていないため、強制的に表示します");
+    try {
+      var hasAcc = false;
+      try {
+        var a = typeof getAccounts === "function" ? getAccounts() : [];
+        hasAcc = !!(a && a.length && a[0] && a[0].token);
+      } catch (e) {}
+      if (hasAcc && typeof koeBootShell === "function" && koeBootShell(getAccounts()[0])) return;
+      if (typeof showScreen === "function") showScreen("loginScreen");
+    } catch (e) {
+      /* showScreen すら失敗したら、せめてロード画面を消して操作できるようにする */
+      try {
+        window.AndroidApi && window.AndroidApi.uiReady && window.AndroidApi.uiReady();
+      } catch (e2) {}
+    }
+  }
+
+  function start() {
+    /* ロード画面はネイティブ側が6秒で必ず消す。その前に画面を出し切る。 */
+    setTimeout(kick, 3000);
+    setTimeout(lastResort, 5000);
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+  else start();
+})();
+
+/* ---- 起動を待たせない / 合図の取りこぼしを拾う ----
+   このファイルは body の末尾で読まれるので、ここまで来た時点で
+     ・DOM は出来上がっている  ・起動処理のリスナーも登録済み
+   の両方が保証される。よってブリッジが使えるなら DOMContentLoaded を待つ必要がなく、
+   すぐ起動してよい(待つと実測で約80ms ぶんロード画面が長引いていた)。
+   また、読み込み方によっては合図がリスナー登録より先に飛ぶことがあり、
+   取りこぼすと画面が出ないままになるので、その場合はここで投げ直す。 */
+try {
+  if (!window.__koeBootRan) {
+    if (window.__koeBridgeReady) {
+      window.__koeReadyFired = true; // ブリッジ側から二重に出させない
+      window.dispatchEvent(new Event("pywebviewready"));
+    } else if (window.__koeReadyFired) {
+      window.dispatchEvent(new Event("pywebviewready")); // 取りこぼしの拾い直し
+    }
+  }
+} catch (e) {}
+
+/* ===== ノイズ抑制の「かんたん設定」 =====
+   初めての人が、かけ方・おまかせ・効き具合・無音化の4つを自分で組み合わせなくても
+   1タップで妥当な設定になるようにする。押すと中の細かい設定に値を入れて、
+   これまでどおりの処理(変更イベント)をそのまま通す。 */
+const KOE_NS_PRESETS = {
+  auto: { mode: "strong", auto: true, gate: false },
+  quiet: { mode: "strong", auto: false, level: 45, gate: false },
+  noisy: { mode: "strong", auto: false, level: 95, gate: true },
+  off: { mode: "off", auto: false, gate: false },
+};
+/* いまの設定がどのかんたん設定に当てはまるか(当てはまらなければ空) */
+function koeNsCurrentPreset() {
+  try {
+    const mode = localStorage.getItem("koe_ns_mode") || "strong";
+    if (mode !== "strong") return "off";
+    const auto = typeof koeNsAutoOn === "function" ? koeNsAutoOn() : false;
+    const gate = localStorage.getItem("koe_ns_gate") === "1";
+    const level = parseInt(localStorage.getItem("koe_ns_level") || "60", 10);
+    if (auto) return gate ? "" : "auto";
+    if (!gate && level <= 55) return "quiet";
+    if (gate && level >= 90) return "noisy";
+    return "";
+  } catch (e) {
+    return "";
+  }
+}
+function koeNsMarkPresets() {
+  try {
+    const cur = koeNsCurrentPreset();
+    document.querySelectorAll(".ns-preset").forEach(function (b) {
+      b.classList.toggle("active", b.getAttribute("data-ns-preset") === cur);
+    });
+  } catch (e) {}
+}
+function koeNsApplyPreset(key) {
+  const pre = KOE_NS_PRESETS[key];
+  if (!pre) return;
+  try {
+    localStorage.setItem("koe_ns_mode", pre.mode);
+    localStorage.setItem("koe_ns_gate", pre.gate ? "1" : "0");
+    if (typeof pre.level === "number") localStorage.setItem("koe_ns_level", String(pre.level));
+    if (typeof koeNsSetAuto === "function") koeNsSetAuto(!!pre.auto);
+  } catch (e) {}
+  /* 画面に出ている細かい設定の見た目も合わせる(値だけ入れ、処理は既存のものを呼ぶ) */
+  const setVal = function (id, v) {
+    const el = document.getElementById(id);
+    if (el && el.value !== String(v)) el.value = String(v);
+  };
+  const setChk = function (id, v) {
+    const el = document.getElementById(id);
+    if (el) el.checked = !!v;
+  };
+  setVal("nsModeSel", pre.mode);
+  setVal("callNsMode", pre.mode);
+  setChk("nsAutoChk", pre.auto);
+  setChk("callNsAuto", pre.auto);
+  setChk("nsGateChk", pre.gate);
+  setChk("callNsGate", pre.gate);
+  if (typeof pre.level === "number") {
+    setVal("nsLevelRange", pre.level);
+    setVal("callNsLevel", pre.level);
+    const l1 = document.getElementById("nsLevelLabel");
+    if (l1) l1.textContent = pre.level + "%";
+    const l2 = document.getElementById("callNsLevelLabel");
+    if (l2) l2.textContent = pre.level + "%";
+  }
+  const opts = document.getElementById("nsStrongOpts");
+  if (opts) opts.style.display = pre.mode === "strong" ? "" : "none";
+  try {
+    if (window.__koeNoiseCut && window.__koeNoiseCut.update) window.__koeNoiseCut.update();
+  } catch (e) {}
+  try {
+    if (window.KoeMicTest && KoeMicTest.isOpen()) KoeMicTest.apply();
+  } catch (e) {}
+  try {
+    if (typeof koeSyncCallNsPanel === "function") koeSyncCallNsPanel();
+  } catch (e) {}
+  koeNsMarkPresets();
+  try {
+    toast(
+      key === "off"
+        ? "ノイズ抑制を使わない設定にしました"
+        : key === "auto"
+          ? "おまかせにしました"
+          : key === "quiet"
+            ? "静かな部屋向けにしました"
+            : "うるさい所向けにしました",
+    );
+  } catch (e) {}
+}
+let koeNsPresetsBound = false;
+function koeNsBindPresets() {
+  if (koeNsPresetsBound) return;
+  koeNsPresetsBound = true;
+  document.addEventListener("click", function (e) {
+    const b = e.target && e.target.closest ? e.target.closest(".ns-preset") : null;
+    if (!b) return;
+    e.preventDefault();
+    koeNsApplyPreset(b.getAttribute("data-ns-preset"));
+  });
+  koeNsMarkPresets();
+}
+
+/* =============================================================================
+   一覧の続きを「下に近づいたら自動で読む」
+   -----------------------------------------------------------------------------
+   これまでは一覧の末尾に「もっと読む」ボタンを置いて、押された時だけ続きを読んでいた。
+   作者の要望で、ボタンを押させずに自動で続くようにする。
+
+   作りの方針:
+     ・読み込みの中身(どのAPIを叩くか・重複をどう除くか・終端の判定)は今までのまま。
+       ここは「ボタンを人の代わりに押す」役だけを持つ。既存の処理には手を入れない。
+     ・対象は末尾に出るボタン全部(プロフィールの投稿・アルバム・タイムライン・枠一覧)。
+     ・見た目は押しボタンをやめて「読み込み中…」の行にする(押しても動くままにしておく)。
+     ・失敗した時は連打にならないよう少し待ち、押せるボタンに戻して人が試せるようにする。
+============================================================================= */
+(function () {
+  if (window.__koeAutoLoad) return;
+  window.__koeAutoLoad = true;
+
+  /* 末尾に出る「続きを読む」系のボタン */
+  var SEL = ".koe-posts-more, #timelineLoadMoreRow button, #roomsMoreBtn";
+  /* 画面の下からこの距離まで近づいたら読み始める */
+  var NEAR_PX = 800;
+  /* 続けて読みに行くまでの最短の間隔(同じページを二重に取りに行かないための保険) */
+  var STEP_WAIT_MS = 1200;
+  /* 失敗したあと、次に自動で試すまでの待ち時間 */
+  var RETRY_WAIT_MS = 5000;
+
+  function isVisible(el) {
+    return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+  }
+
+  /* 押せる状態か(読み込み中・非表示・待ち時間中は押さない) */
+  function ready(el) {
+    if (!el || el.disabled || el.__busy) return false;
+    if (!isVisible(el)) return false;
+    if (el.__koeAutoWait && Date.now() < el.__koeAutoWait) return false;
+    return true;
+  }
+
+  /* 押しボタンではなく「読み込み中」の行として見せる */
+  function dress(el) {
+    if (el.__koeDressed) return;
+    el.__koeDressed = true;
+    el.classList.add("koe-autoload");
+    el.__koeAutoLabel = el.textContent;
+    el.textContent = "読み込み中…";
+  }
+
+  /* 失敗して「もう一度試す」に変わったものは、人が押せる見た目に戻す */
+  function undress(el) {
+    el.__koeDressed = false;
+    el.classList.remove("koe-autoload");
+  }
+
+  /* 続きの読み込みは一度にひとつだけ。
+     タイムラインのように「読み込みのたびにボタンを作り直す」作りだと、
+     ボタン側に付けた印が消えてしまい、同じページを何回も取りに行ってしまうため。 */
+  var busyUntil = 0,
+    waitTimer = 0;
+
+  function tick() {
+    if (Date.now() < busyUntil) {
+      /* 待ち明けに一度だけ見直す(待っている間に何度呼ばれてもタイマーは 1 本) */
+      if (!waitTimer) {
+        waitTimer = setTimeout(function () {
+          waitTimer = 0;
+          schedule();
+        }, busyUntil - Date.now() + 20);
+      }
+      return;
+    }
+    var vh = window.innerHeight || document.documentElement.clientHeight || 0;
+    var all = document.querySelectorAll(SEL);
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (!isVisible(el)) continue;
+      /* 「もう一度試す」に変わっていたら自動では押さず、人が押せる形に戻す */
+      if (/もう一度/.test(el.textContent || "")) {
+        undress(el);
+        continue;
+      }
+      dress(el);
+      if (!ready(el)) continue;
+      var top = el.getBoundingClientRect().top;
+      if (top > vh + NEAR_PX) continue; /* まだ遠い */
+      /* 押したあと失敗して戻ってきた時に連打しないよう、先に待ち時間を入れておく */
+      el.__koeAutoWait = Date.now() + RETRY_WAIT_MS;
+      busyUntil = Date.now() + STEP_WAIT_MS;
+      try {
+        el.click();
+      } catch (e) {}
+      return; /* 1回に1つだけ */
+    }
+  }
+
+  var queued = false;
+  function schedule() {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(function () {
+      queued = false;
+      try {
+        tick();
+      } catch (e) {}
+    });
+  }
+
+  /* 内側で縦にスクロールする箱もあるので、捕捉フェーズで拾う(scroll は上に伝わらない) */
+  document.addEventListener("scroll", schedule, { passive: true, capture: true });
+  window.addEventListener("resize", schedule, { passive: true });
+  /* 一覧が描き直された時にも見に行く(画面が短くて最初から末尾が見えている場合を含む)。
+     DOM の変化は一覧を描くたびに大量に来るが、実際の点検は次の描画までに 1 回へまとめてある。 */
+  try {
+    new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
+  } catch (e) {}
+  setTimeout(schedule, 500);
 })();
