@@ -154,6 +154,9 @@ public class MainActivity extends Activity {
     }
 
     private View splashView;
+    /* スプラッシュのGIFは onDraw で毎フレーム自分を再描画し続ける。消すときにこれを true にして
+       再描画ループを止めないと、透明になった後もUIスレッドを回し続けて画面が固まる。 */
+    private final boolean[] splashGifStop = new boolean[]{false};
     private static final long BOOT_T0 = android.os.SystemClock.elapsedRealtime();
     private long tCreated = 0;
 
@@ -174,40 +177,72 @@ public class MainActivity extends Activity {
             box.setOrientation(LinearLayout.VERTICAL);
             box.setGravity(android.view.Gravity.CENTER);
             box.setBackgroundColor(0xFF111111);
-            // 通話中と同じキャラクターのGIFをロード表示に使う
+            /* ロード表示: マスコットのアニメGIFを出す。
+               Android 9(API28)以降は AnimatedImageDrawable で再生する。これは描画スレッドで
+               アニメーションするので、UIスレッドを回し続けず、ハードウェア描画の WebView とも
+               衝突しない。以前の「Movie を毎フレーム描くソフトウェア層の自作View」は WebView と
+               重なってスプラッシュを消した後に黒く固まっていた(「GIFのあとにフリーズ」)。
+               API28 未満の古い端末だけ、従来の Movie 方式にフォールバックする。 */
             try {
-                java.io.InputStream mis = getAssets().open("mascot_loading.gif");
-                java.io.ByteArrayOutputStream mbo = new java.io.ByteArrayOutputStream();
-                byte[] mbuf = new byte[8192]; int mr;
-                while ((mr = mis.read(mbuf)) != -1) mbo.write(mbuf, 0, mr);
-                mis.close();
-                byte[] mbytes = mbo.toByteArray();
-                final Movie movie = Movie.decodeByteArray(mbytes, 0, mbytes.length);
-                if (movie != null && movie.width() > 0) {
-                    View gif = new View(this) {
-                        long start = 0L;
-                        @Override protected void onDraw(Canvas c) {
-                            long now = SystemClock.uptimeMillis();
-                            if (start == 0L) start = now;
-                            int dur = movie.duration(); if (dur <= 0) dur = 1000;
-                            movie.setTime((int) ((now - start) % dur));
-                            int vw = getWidth(), vh = getHeight();
-                            float sc = Math.min(vw / (float) movie.width(), vh / (float) movie.height());
-                            c.save();
-                            c.translate((vw - movie.width() * sc) / 2f, (vh - movie.height() * sc) / 2f);
-                            c.scale(sc, sc);
-                            movie.draw(c, 0, 0);
-                            c.restore();
-                            postInvalidateOnAnimation();
+                int px = (int) (getResources().getDisplayMetrics().density * 132);
+                int mb = (int) (getResources().getDisplayMetrics().density * 10);
+                LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(px, px);
+                glp.bottomMargin = mb;
+                boolean shown = false;
+                if (Build.VERSION.SDK_INT >= 28) {
+                    /* ビルドの android.jar が古く ImageDecoder/AnimatedImageDrawable を直接参照できないので、
+                       実行時にリフレクションで呼ぶ(端末が API28+ なら必ず存在する)。 */
+                    try {
+                        Class<?> idc = Class.forName("android.graphics.ImageDecoder");
+                        Class<?> srcC = Class.forName("android.graphics.ImageDecoder$Source");
+                        Object src = idc.getMethod("createSource", android.content.res.AssetManager.class, String.class)
+                                .invoke(null, getAssets(), "mascot_loading.gif");
+                        Object d = idc.getMethod("decodeDrawable", srcC).invoke(null, src);
+                        android.widget.ImageView iv = new android.widget.ImageView(this);
+                        iv.setImageDrawable((android.graphics.drawable.Drawable) d);
+                        iv.setLayoutParams(glp);
+                        Class<?> aidC = Class.forName("android.graphics.drawable.AnimatedImageDrawable");
+                        if (aidC.isInstance(d)) {
+                            try { aidC.getMethod("setRepeatCount", int.class).invoke(d, -1); } catch (Throwable t) {} // -1 = REPEAT_INFINITE
+                            aidC.getMethod("start").invoke(d);
                         }
-                    };
-                    // Movie.draw はハードウェアアクセラレーションのCanvasでは描けないためソフトウェア層にする
-                    gif.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
-                    int px = (int) (getResources().getDisplayMetrics().density * 132);
-                    LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(px, px);
-                    glp.bottomMargin = (int) (getResources().getDisplayMetrics().density * 10);
-                    gif.setLayoutParams(glp);
-                    box.addView(gif);
+                        box.addView(iv);
+                        shown = true;
+                    } catch (Throwable ig) {}
+                }
+                if (!shown) {
+                    // 古い端末向けフォールバック: 従来の Movie 方式(停止フラグつき)
+                    java.io.InputStream mis = getAssets().open("mascot_loading.gif");
+                    java.io.ByteArrayOutputStream mbo = new java.io.ByteArrayOutputStream();
+                    byte[] mbuf = new byte[8192]; int mr;
+                    while ((mr = mis.read(mbuf)) != -1) mbo.write(mbuf, 0, mr);
+                    mis.close();
+                    byte[] mbytes = mbo.toByteArray();
+                    final Movie movie = Movie.decodeByteArray(mbytes, 0, mbytes.length);
+                    if (movie != null && movie.width() > 0) {
+                        final boolean[] gifStop = this.splashGifStop;
+                        View gif = new View(this) {
+                            long start = 0L;
+                            @Override protected void onDraw(Canvas c) {
+                                if (gifStop[0]) return;
+                                long now = SystemClock.uptimeMillis();
+                                if (start == 0L) start = now;
+                                int dur = movie.duration(); if (dur <= 0) dur = 1000;
+                                movie.setTime((int) ((now - start) % dur));
+                                int vw = getWidth(), vh = getHeight();
+                                float sc = Math.min(vw / (float) movie.width(), vh / (float) movie.height());
+                                c.save();
+                                c.translate((vw - movie.width() * sc) / 2f, (vh - movie.height() * sc) / 2f);
+                                c.scale(sc, sc);
+                                movie.draw(c, 0, 0);
+                                c.restore();
+                                if (!gifStop[0]) postInvalidateOnAnimation();
+                            }
+                        };
+                        gif.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+                        gif.setLayoutParams(glp);
+                        box.addView(gif);
+                    }
                 }
             } catch (Exception ig) {
             }
@@ -237,23 +272,24 @@ public class MainActivity extends Activity {
             if (v == null) return;
             bootLog("画面表示");
             this.splashView = null;
+            splashGifStop[0] = true; // 旧仕様の名残(静止画化したので実害なし)
             runOnUiThread(new Runnable() {
                 public void run() {
+                    // フェードは使わず、即座に消して確実に取り除く。
+                    try { v.setVisibility(View.GONE); } catch (Exception e) {}
                     try {
-                        v.animate().alpha(0f).setDuration(160).withEndAction(new Runnable() {
-                            public void run() {
-                                try {
-                                    android.view.ViewParent p = v.getParent();
-                                    if (p instanceof android.view.ViewGroup) ((android.view.ViewGroup) p).removeView(v);
-                                } catch (Exception e) {}
-                            }
-                        }).start();
-                    } catch (Exception e) {
-                        try {
-                            android.view.ViewParent p = v.getParent();
-                            if (p instanceof android.view.ViewGroup) ((android.view.ViewGroup) p).removeView(v);
-                        } catch (Exception ig) {}
-                    }
+                        android.view.ViewParent p = v.getParent();
+                        if (p instanceof android.view.ViewGroup) ((android.view.ViewGroup) p).removeView(v);
+                    } catch (Exception e) {}
+                    // WebView を確実に前面へ出して描き直させる(念のためレイアウトも要求)
+                    try {
+                        if (webView != null) {
+                            webView.setVisibility(View.VISIBLE);
+                            webView.bringToFront();
+                            webView.requestLayout();
+                            webView.invalidate();
+                        }
+                    } catch (Exception e) {}
                 }
             });
         } catch (Exception e) {

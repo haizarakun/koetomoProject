@@ -52,6 +52,9 @@ public class KoeSession {
     private final Map<Long, String> decoCache = java.util.Collections.synchronizedMap(new HashMap<Long, String>());
     /** このセッションでデコレーションを確認済みの user_id(名前は端末に永続キャッシュされるので、別途 1 回は取り直す)。 */
     private final java.util.Set<Long> decoChecked = java.util.Collections.synchronizedSet(new java.util.HashSet<Long>());
+    /** このセッションでアイコン画像を取り直した user_id。
+        名前だけ覚えていてアイコンが空のままだと一覧の丸が頭文字のままになるため、1 回だけ取り直す。 */
+    private final java.util.Set<Long> iconChecked = java.util.Collections.synchronizedSet(new java.util.HashSet<Long>());
 
     /**
      * 公式の「装飾」: プロフィール枠(decoration_item_id → /api/decoration_items の image_file_path)と
@@ -720,10 +723,30 @@ public class KoeSession {
         }
     }
 
-    private void appendRoomHistory(String str, String str2, String str3, String str4, String str5) {
+    /**
+     * 枠に入った記録を端末に残す。
+     *
+     * ★端末が突然落ちても残るようにするための決めごと:
+     *   ・記録は「入れた」と分かった直後に書く(名前やアイコンを引きに行く前)。
+     *     以前は名前解決の通信を待ってから書いていたので、その間に落ちると何も残らなかった。
+     *   ・書き込みは commit()(ディスクに書き終わるまで待つ)。apply() は後回しにされるため、
+     *     直後にアプリが強制終了すると消えることがある。
+     *   ・まだ枠に居るあいだは "open":true のままにしておき、退出時に閉じる。
+     *     閉じないまま次回起動したら、最後の生存時刻で閉じる(closeOpenRoomHistory)。
+     *
+     * 戻り値: この記録の通し番号(あとから名前などを足すときに使う)。分からなければ -1。
+     */
+    private long appendRoomHistory(String str, String str2, String str3, String str4, String str5) {
         try {
-            JSONArray loadRoomHistoryArr = loadRoomHistoryArr();
-            JSONObject put = new JSONObject().put("owner_user_id", str).put("room_token", str2).put("joined_at", nowStr());
+            JSONArray hist = loadRoomHistoryArr();
+            long seq = System.currentTimeMillis();
+            JSONObject put = new JSONObject()
+                    .put("owner_user_id", str)
+                    .put("room_token", str2)
+                    .put("joined_at", nowStr())
+                    .put("seq", seq)
+                    .put("open", true)
+                    .put("alive_at", nowStr());
             if (str3 != null && str3.length() > 0) {
                 put.put("owner_name", str3);
             }
@@ -733,11 +756,94 @@ public class KoeSession {
             if (str5 != null && str5.length() > 0) {
                 put.put("room_title", str5);
             }
-            loadRoomHistoryArr.put(put);
-            while (loadRoomHistoryArr.length() > 500) {
-                loadRoomHistoryArr.remove(0);
+            hist.put(put);
+            while (hist.length() > 500) {
+                hist.remove(0);
             }
-            this.prefs.edit().putString("room_history", loadRoomHistoryArr.toString()).apply();
+            saveRoomHistoryNow(hist);
+            return seq;
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    /** 枠の記録をディスクに書き終わるまで待って保存する(突然の終了で消さないため)。 */
+    private void saveRoomHistoryNow(JSONArray hist) {
+        try {
+            this.prefs.edit().putString("room_history", hist.toString()).commit();
+        } catch (Exception e) {
+        }
+    }
+
+    /** 通し番号で記録を探す。見つからなければ null。 */
+    private JSONObject findRoomHistory(JSONArray hist, long seq) {
+        if (seq <= 0) return null;
+        for (int i = hist.length() - 1; i >= 0; i--) {
+            JSONObject o = hist.optJSONObject(i);
+            if (o != null && o.optLong("seq", 0) == seq) return o;
+        }
+        return null;
+    }
+
+    /** あとから分かった名前・アイコン・枠名を、すでに書いた記録に足す。 */
+    private void enrichRoomHistory(long seq, String ownerName, String ownerIconPath, String roomTitle) {
+        if (seq <= 0) return;
+        try {
+            JSONArray hist = loadRoomHistoryArr();
+            JSONObject o = findRoomHistory(hist, seq);
+            if (o == null) return;
+            boolean changed = false;
+            if (ownerName != null && ownerName.length() > 0 && o.optString("owner_name", "").length() == 0) {
+                o.put("owner_name", ownerName);
+                changed = true;
+            }
+            if (ownerIconPath != null && ownerIconPath.length() > 0 && o.optString("owner_icon", "").length() == 0) {
+                o.put("owner_icon", iconUrl(ownerIconPath));
+                changed = true;
+            }
+            if (roomTitle != null && roomTitle.length() > 0 && o.optString("room_title", "").length() == 0) {
+                o.put("room_title", roomTitle);
+                changed = true;
+            }
+            if (changed) saveRoomHistoryNow(hist);
+        } catch (Exception e) {
+        }
+    }
+
+    /** 枠に居るあいだ、時々「まだ居た」時刻を書いておく(落ちたときの滞在時間の目安になる)。 */
+    /** いま入っている枠の記録の通し番号(0=枠に居ない)。 */
+    private long openRoomHistorySeq = 0;
+    private long lastAliveWrite = 0;
+    private void touchRoomHistory(long seq) {
+        if (seq <= 0) return;
+        long now = System.currentTimeMillis();
+        if (now - lastAliveWrite < 30000) return; // 書きすぎない(30秒に1回まで)
+        lastAliveWrite = now;
+        try {
+            JSONArray hist = loadRoomHistoryArr();
+            JSONObject o = findRoomHistory(hist, seq);
+            if (o == null || !o.optBoolean("open", false)) return;
+            o.put("alive_at", nowStr());
+            saveRoomHistoryNow(hist);
+        } catch (Exception e) {
+        }
+    }
+
+    /** 退出した(または次回起動で「開きっぱなし」を見つけた)記録を閉じる。 */
+    private void closeOpenRoomHistory(String reason) {
+        try {
+            JSONArray hist = loadRoomHistoryArr();
+            boolean changed = false;
+            for (int i = hist.length() - 1; i >= 0; i--) {
+                JSONObject o = hist.optJSONObject(i);
+                if (o == null || !o.optBoolean("open", false)) continue;
+                o.put("open", false);
+                o.put("left_at", "leave".equals(reason) ? nowStr() : o.optString("alive_at", o.optString("joined_at", "")));
+                // 退出の合図が来ないまま終わった記録は、あとで見て分かるように印を付ける
+                if (!"leave".equals(reason)) o.put("ended_by", reason);
+                changed = true;
+            }
+            if (changed) saveRoomHistoryNow(hist);
         } catch (Exception e) {
         }
     }
@@ -2523,6 +2629,13 @@ public class KoeSession {
         return okResultStatus(r);
     }
 
+    /** コインや所持ポイントが応答のどこかに入っているか(入っていなければ聞き方を変える) */
+    private static boolean hasCoinFields(JSONObject body) {
+        if (body == null) return false;
+        String t = body.toString();
+        return t.contains("total_free_coin") || t.contains("total_paid_coin") || t.contains("total_point");
+    }
+
     private String getAccountBalance() {
         HashMap hashMap = new HashMap();
         hashMap.put("version", "android_" + APP_VERSION);
@@ -2530,8 +2643,14 @@ public class KoeSession {
         if (authToken != null) {
             hashMap.put("auth_token", authToken);
         }
-        // /api/account/profile はサーバー側で廃止(404)。動作している /api/v3/users/{id} から取得する
-        Resp http2 = request("GET", "/api/v3/users/" + userId(), (Map<String, String>) null, (Map<String, String>) null);
+        // /api/account/profile はサーバー側で廃止(404)。動作している /api/v3/users/{id} から取得する。
+        // プロフィール画面と同時に開かれることが多いので、あちらと同じ形(fields 付き)で聞く。
+        // 同じ問い合わせになるぶん、片方は通信せずに済む。コインと所持ポイントはこの形にも入っている。
+        Resp http2 = request("GET", "/api/v3/users/" + userId(), q1("fields", "core,chat,friend,follow,block"), (Map<String, String>) null);
+        if (http2.status == 200 && http2.body != null && !hasCoinFields(http2.body)) {
+            // 万一この形に入っていなければ、これまでどおり全部を聞き直す
+            http2 = request("GET", "/api/v3/users/" + userId(), (Map<String, String>) null, (Map<String, String>) null);
+        }
         try {
             if (http2.status != 200 || http2.body == null) {
                 return new JSONObject().put("ok", false).put("status", http2.status).toString();
@@ -2820,8 +2939,19 @@ public class KoeSession {
                     }
                 }
             }
-            // user_info が同梱されない形式では、相手の名前とアイコンを名前キャッシュ(/api/v2/users)から補う
-            if (hashMap2.isEmpty() && jSONArray.length() > 0) {
+            // 相手の名前とアイコンを名前キャッシュ(/api/v2/users)から補う。
+            // user_info が同梱されていても、そこにアイコンが入っていない相手がいれば取り直す
+            // (入れないと一覧の丸が頭文字のままになる)。
+            boolean needLookup = hashMap2.isEmpty();
+            if (!needLookup) {
+                for (int i0 = 0; i0 < jSONArray.length() && !needLookup; i0++) {
+                    JSONObject row0 = jSONArray.optJSONObject(i0);
+                    if (row0 == null) continue;
+                    JSONObject ui0 = (JSONObject) hashMap2.get(Long.valueOf(row0.optLong("user_id")));
+                    if (ui0 == null || ui0.optString("profile_picture_file_path", "").length() == 0) needLookup = true;
+                }
+            }
+            if (needLookup && jSONArray.length() > 0) {
                 try { resolveNames(jSONArray, "user_id"); } catch (Exception ignored) {}
             }
             JSONArray jSONArray2 = new JSONArray();
@@ -2836,6 +2966,13 @@ public class KoeSession {
                         String[] cached = this.nameCache.get(Long.valueOf(optLong));
                         if (cached != null && cached.length > 1 && cached[0] != null && cached[0].length() > 0) {
                             jSONObject2 = new JSONObject().put("name", cached[0]).put("profile_picture_file_path", cached[1] == null ? "" : cached[1]);
+                        }
+                    }
+                    // 名前は user_info にあるがアイコンだけ空、という応答があるので画像だけ補う
+                    if (jSONObject2 != null && jSONObject2.optString("profile_picture_file_path", "").length() == 0) {
+                        String[] cachedIcon = this.nameCache.get(Long.valueOf(optLong));
+                        if (cachedIcon != null && cachedIcon.length > 1 && cachedIcon[1] != null && cachedIcon[1].length() > 0) {
+                            jSONObject2.put("profile_picture_file_path", cachedIcon[1]);
                         }
                     }
                     String preview = chatLastMessage(optJSONObject3);
@@ -3294,7 +3431,9 @@ public class KoeSession {
         //   予備: POST api/dive/friends (generateFriendsListRequest)
         try {
             JSONArray fr = relationsArray("friends");
-            if (fr.length() == 0) {
+            // 予備の窓口は、サーバーに無ければ 404 が返る。毎回2往復ぶん叩いても無駄なので、
+            // 一度 404 だったらこのアプリを閉じるまで呼ばない。
+            if (fr.length() == 0 && !diveFriendsGone) {
                 HashMap<String, String> ff = new HashMap<String, String>();
                 String at = authToken();
                 if (at != null) ff.put("auth_token", at);
@@ -3304,7 +3443,9 @@ public class KoeSession {
                     r = http("POST", BASE_URL2 + "/api/dive/friends", (Map<String, String>) null, ff);
                 }
                 if (r.status == 200 && r.body != null) fr = normalizeUserList(r.body);
+                if (r.status == 404) diveFriendsGone = true;
                 dbgLog(nowStr() + "  [FRIENDS] 予備 api/dive/friends HTTP " + r.status + " n=" + fr.length()
+                        + (r.status == 404 ? " (以後は呼ばない)" : "")
                         + (r.status != 200 && r.body != null ? " " + truncate(redactLog(r.body.toString()), 140) : ""));
             }
             for (int i = 0; i < fr.length(); i++) {
@@ -3375,7 +3516,10 @@ public class KoeSession {
             JSONObject u = users.optJSONObject(i);
             if (u != null && u.optBoolean("is_following", false) && u.optBoolean("is_followed", false)) nMutual++;
         }
-        if (nMutual == 0) {
+        // 関係の一覧をすでに取れているなら、そこで数えた結果が答え。
+        // ここで取り直すと、同じ一覧をもう一度(フォロー中・フォロワーの2往復)読みに行くことになる。
+        boolean haveRelations = (fe != null && fol != null);
+        if (nMutual == 0 && !haveRelations) {
             try {
                 JSONArray mu = computeMutualFollows("1");
                 for (int i = 0; i < mu.length(); i++) {
@@ -4902,6 +5046,7 @@ public class KoeSession {
     private static final long API2_AUTH_BAD_MS = 600000;
     private volatile long api2AuthBadUntil = 0;
     private volatile String lastWriteTiming = "";   // 直近の書き込み通信の内訳(投稿の記録用)
+    private volatile boolean diveFriendsGone = false;   // 予備の友達一覧の窓口が無い(404)と分かった
 
     private boolean api2AuthBad() {
         return api2AuthBadUntil > System.currentTimeMillis();
@@ -4988,7 +5133,117 @@ public class KoeSession {
                 || m.contains("connection closed");
     }
 
+    /**
+     * 短い間だけ読み取りの結果を取っておく置き場。
+     *
+     * 画面を開くたびに、同じ相手の情報や自分の情報を数秒のうちに何度も取りに行っていた
+     * (プロフィールを開くと自分の情報が3回、友達一覧では同じ一覧が2回など)。
+     * ここに入れておくと2回目以降は通信せずに返せる。
+     *
+     * 入れるのは「数秒で変わらない情報」だけ(下の CACHEABLE_READS)。
+     * タイムラインや通知は入れない — 更新したのに古いままに見えてしまうため。
+     * 何かを書き込んだ(フォロー・ブロック・設定変更など)ときは、中身をまるごと捨てる。
+     */
+    private static final long READ_CACHE_TTL = 15000;
+    private static final String[] CACHEABLE_READS = {
+            "/api/v3/users/",
+            "/api/v2/users",
+            "/api/my_badges",
+            "/api/room_settings",
+            "/api/receive_tippings",
+            "/api/decoration_items",
+    };
+    private final java.util.HashMap<String, Object[]> readCache = new java.util.HashMap<String, Object[]>();
+
+    // 枠の一覧は中身が動くので、取っておくのはごく短い間だけにする。
+    // 一覧の表示と「いま盛り上がっている枠」が同じページを数秒差で読みに行くのを減らすのが目的。
+    private static final long ROOMS_CACHE_TTL = 5000;
+
+    private static boolean isRoomListRead(String url) {
+        String path = pathOf(url);
+        return "/api/rooms".equals(path);   // /api/rooms/{id} は含めない(枠の中の状態なので常に取り直す)
+    }
+
+    /** 参加しにいく直前の確認(owner_user_id 指定)は、古い一覧で判断すると終わった枠に入ろうとしてしまう。 */
+    private static boolean isJoinLookup(Map<String, String> query) {
+        return query != null && query.containsKey("owner_user_id");
+    }
+
+    private static boolean isCacheableRead(String url) {
+        String path = pathOf(url);
+        if (path == null) return false;
+        if (isRoomListRead(url)) return true;
+        for (String p : CACHEABLE_READS) if (path.startsWith(p)) return true;
+        // /api/v2/users/{id}/followees・followers も対象
+        return path.startsWith("/api/v2/users/") && (path.endsWith("/followees") || path.endsWith("/followers"));
+    }
+
+    private static String readCacheKey(String url, Map<String, String> query) {
+        StringBuilder sb = new StringBuilder(url);
+        if (query != null && !query.isEmpty()) {
+            for (Map.Entry<String, String> e : new java.util.TreeMap<String, String>(query).entrySet()) {
+                // 認証情報は鍵に入れない(同じ利用者なので区別する必要がない)
+                if ("auth_token".equals(e.getKey())) continue;
+                sb.append('\u0000').append(e.getKey()).append('=').append(e.getValue());
+            }
+        }
+        return sb.toString();
+    }
+
+    private Resp readCacheGet(String key) {
+        Object[] hit;
+        long ttl = key.startsWith(BASE_URL + "/api/rooms") || key.startsWith(BASE_URL2 + "/api/rooms")
+                ? ROOMS_CACHE_TTL : READ_CACHE_TTL;
+        synchronized (readCache) {
+            hit = readCache.get(key);
+            if (hit == null) return null;
+            if (System.currentTimeMillis() - ((Long) hit[0]).longValue() > ttl) {
+                readCache.remove(key);
+                return null;
+            }
+        }
+        try {
+            // 取り出すたびに作り直す。呼び出し元が中身を書き換えても、次の人に影響しないようにする。
+            String body = (String) hit[2];
+            Resp r = new Resp(((Integer) hit[1]).intValue(), body == null ? null : new JSONObject(body));
+            r.vsns = ((Integer) hit[3]).intValue();
+            return r;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private void readCachePut(String key, Resp r) {
+        if (r == null || r.status != 200 || r.body == null) return;
+        try {
+            synchronized (readCache) {
+                if (readCache.size() > 120) readCache.clear();   // 増えすぎたら丸ごと捨てる
+                readCache.put(key, new Object[]{Long.valueOf(System.currentTimeMillis()),
+                        Integer.valueOf(r.status), r.body.toString(), Integer.valueOf(r.vsns)});
+            }
+        } catch (Exception ignore) {
+        }
+    }
+
+    private void readCacheClear() {
+        synchronized (readCache) {
+            readCache.clear();
+        }
+    }
+
     private Resp http(String method, String url, Map<String, String> query, Map<String, String> fields, boolean sendAuth) {
+        String cacheKey = null;
+        if ("GET".equals(method) && isCacheableRead(url) && !isJoinLookup(query)) {
+            cacheKey = readCacheKey(url, query);
+            Resp cached = readCacheGet(cacheKey);
+            if (cached != null) {
+                dbgLog(nowStrMs() + "  [通信せず] " + pathOf(url) + " は数秒前に取ったものを使った");
+                return cached;
+            }
+        } else if (!"GET".equals(method)) {
+            // 書き込んだら、取っておいた読み取りは当てにならない
+            readCacheClear();
+        }
         String fastUrl = preferFastHost(method, url);
         long started = System.currentTimeMillis();
         Resp resp = httpRaw(method, fastUrl, query, fields, sendAuth);
@@ -5001,7 +5256,87 @@ public class KoeSession {
             // api2 だけが弾いたときは、元のホスト(server1)でやり直す
             resp = httpRaw(method, url, query, fields, sendAuth);
         }
+        if (cacheKey != null) readCachePut(cacheKey, resp);
         return resp;
+    }
+
+    /* ---- 証明書ピンニング(既定=無効) ----
+       声とも本体(*.meetscom.com)への接続に限り、サーバー証明書の公開鍵(SPKI)の SHA-256 が
+       あらかじめ登録したピンのどれかと一致することを確かめる。中間者攻撃(不正なCA等)対策。
+       ★ピンは信頼できる回線で取得した値を set_cert_pins で入れるまで空=無効。空なら何もしない(通常のTLS)。
+       ★証明書更新でピンが合わなくなるとアプリが通信不能になるため、koe_pin_off で緊急停止できる。
+       取得例: openssl s_client -connect api.meetscom.com:443 </dev/null 2>/dev/null \
+               | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der \
+               | openssl dgst -sha256 -binary | base64 */
+    private static volatile javax.net.ssl.SSLSocketFactory PIN_FACTORY = null;
+
+    private String[] koeCertPins() {
+        try {
+            String s = this.prefs.getString("koe_cert_pins", "");
+            if (s == null) return new String[0];
+            s = s.trim();
+            if (s.length() == 0) return new String[0];
+            java.util.ArrayList<String> out = new java.util.ArrayList<String>();
+            for (String p : s.split(",")) { String t = p.trim(); if (t.length() > 0) out.add(t); }
+            return out.toArray(new String[0]);
+        } catch (Exception e) { return new String[0]; }
+    }
+
+    private void koeApplyPinning(HttpURLConnection conn) {
+        try {
+            if (!(conn instanceof javax.net.ssl.HttpsURLConnection)) return;
+            String host = (conn.getURL() != null) ? conn.getURL().getHost() : "";
+            if (host == null || !host.endsWith("meetscom.com")) return; // 声とも本体だけ対象
+            if (this.prefs.getBoolean("koe_pin_off", false)) return;     // 緊急停止
+            String[] pins = koeCertPins();
+            if (pins.length == 0) return;                                // 未設定=通常のTLS(既定)
+            javax.net.ssl.SSLSocketFactory f = koePinFactory(pins);
+            if (f != null) ((javax.net.ssl.HttpsURLConnection) conn).setSSLSocketFactory(f);
+        } catch (Exception e) {}
+    }
+
+    private javax.net.ssl.SSLSocketFactory koePinFactory(String[] pins) {
+        try {
+            if (PIN_FACTORY != null) return PIN_FACTORY;
+            javax.net.ssl.TrustManagerFactory tmf = javax.net.ssl.TrustManagerFactory.getInstance(
+                    javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm());
+            tmf.init((java.security.KeyStore) null);
+            javax.net.ssl.X509TrustManager baseTmp = null;
+            for (javax.net.ssl.TrustManager tm : tmf.getTrustManagers()) {
+                if (tm instanceof javax.net.ssl.X509TrustManager) { baseTmp = (javax.net.ssl.X509TrustManager) tm; break; }
+            }
+            final javax.net.ssl.X509TrustManager base = baseTmp;
+            final java.util.HashSet<String> pinSet = new java.util.HashSet<String>();
+            for (String p : pins) pinSet.add(p);
+            javax.net.ssl.X509TrustManager pinning = new javax.net.ssl.X509TrustManager() {
+                public void checkClientTrusted(java.security.cert.X509Certificate[] chain, String authType) throws java.security.cert.CertificateException {
+                    if (base != null) base.checkClientTrusted(chain, authType);
+                }
+                public void checkServerTrusted(java.security.cert.X509Certificate[] chain, String authType) throws java.security.cert.CertificateException {
+                    if (base != null) base.checkServerTrusted(chain, authType); // まず通常の検証(有効期限・チェーン)
+                    if (chain == null) throw new java.security.cert.CertificateException("no chain");
+                    for (java.security.cert.X509Certificate c : chain) {
+                        if (pinSet.contains(koeSpki(c))) return; // どれか1つでも一致すればOK
+                    }
+                    throw new java.security.cert.CertificateException("certificate pin mismatch");
+                }
+                public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+                    return base != null ? base.getAcceptedIssuers() : new java.security.cert.X509Certificate[0];
+                }
+            };
+            javax.net.ssl.SSLContext ctx = javax.net.ssl.SSLContext.getInstance("TLS");
+            ctx.init(null, new javax.net.ssl.TrustManager[]{ pinning }, null);
+            PIN_FACTORY = ctx.getSocketFactory();
+            return PIN_FACTORY;
+        } catch (Exception e) { return null; }
+    }
+
+    private static String koeSpki(java.security.cert.X509Certificate c) {
+        try {
+            byte[] spki = c.getPublicKey().getEncoded(); // SubjectPublicKeyInfo(DER)
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            return android.util.Base64.encodeToString(md.digest(spki), android.util.Base64.NO_WRAP);
+        } catch (Exception e) { return ""; }
     }
 
     private Resp httpRaw(String method, String url, Map<String, String> query, Map<String, String> fields, boolean sendAuth) {
@@ -5027,6 +5362,7 @@ public class KoeSession {
             long tOpen = System.currentTimeMillis();
             long tConnected = 0, tSent = 0, tFirstByte = 0;
             conn = (HttpURLConnection) new URL(sb.toString()).openConnection();
+            koeApplyPinning(conn); // 証明書ピンニング(ピン未設定=何もしない)
             // 画像/音声付き投稿(createPostWithImage等)がensureSkywayHost()経由でこのメソッドを
             // 複数回連続で呼ぶ際、旧タイムアウト(8000/20000ms)だと実機ログで20906/20942/20886ms付近の
             // -1失敗(タイムアウト)が連続発生していたため、余裕を持たせて緩和する。
@@ -5225,6 +5561,7 @@ public class KoeSession {
     }
 
     private Resp httpJson(String method, String url, JSONObject bodyObj) {
+      if (!"GET".equals(method)) readCacheClear();   // 書き込んだら取っておいた読み取りは当てにならない
       for (int __attempt = 0; __attempt < 2; __attempt++) {
         HttpURLConnection conn = null;
         boolean bodySent = false;   // httpRaw と同じ意味
@@ -5432,6 +5769,26 @@ public class KoeSession {
         return null;
     }
 
+    /**
+     * 枠に入れなかった理由を、そのまま出しても分からない返事のときに言い換える。
+     * サーバーは「入室できません。」としか出さないので、何をすれば入れるのかが伝わらなかった。
+     */
+    private static String joinRefusedMessage(JSONObject body, String serverText) {
+        if (body == null) return serverText == null ? "" : serverText;
+        int code = body.optInt("code", 0);
+        String title = body.optString("title", "");
+        if (code == 2002 || title.contains("キック")) {
+            return "この枠からキックされているため入れません。主催者が解除するか、枠が作り直されるまで参加できません。";
+        }
+        if (title.contains("ブロック")) {
+            return "この枠の主催者とブロックの関係にあるため入れません。";
+        }
+        if (title.contains("満員") || title.contains("上限")) {
+            return "この枠は満員です。誰かが抜けてからもう一度お試しください。";
+        }
+        return serverText == null ? "" : serverText;
+    }
+
     // 公式 getOwnTalkRoom と同じ GET api2 /api/rooms?owner_user_id=<id>
     private JSONArray roomsByOwner(String ownerId, String tag) {
         HashMap<String, String> q = new HashMap<String, String>();
@@ -5550,9 +5907,11 @@ public class KoeSession {
                     if (joinResp.status == 403 || joinResp.status == 400) {
                         String jb = joinResp.body != null ? joinResp.body.toString() : "";
                         String jm = joinResp.body != null ? joinResp.body.optString("displayable_detail", joinResp.body.optString("detail", joinResp.body.optString("message", ""))) : "";
-                        if (jm.length() > 0) {
+                        String friendly = joinRefusedMessage(joinResp.body, jm);
+                        if (friendly.length() > 0) {
                             return new JSONObject().put("ok", false).put("status", joinResp.status)
-                                    .put("message", jm).put("raw", truncate(jb, 300)).toString();
+                                    .put("error", "join_refused")   // 何度押しても同じなので、画面側は再試行しない
+                                    .put("message", friendly).put("raw", truncate(jb, 300)).toString();
                         }
                     }
                 } catch (Exception e) {
@@ -5650,6 +6009,11 @@ public class KoeSession {
                 }
             }
 
+            // ★ここで先に記録を書く。名前を引きに行くのはそのあと。
+            //   (通信の途中で端末が落ちても「入った」ことだけは必ず残す)
+            long histSeq = appendRoomHistory(ownerIdStr, roomToken, "", "", room.optString("description", room.optString("title", "")));
+            this.openRoomHistorySeq = histSeq;
+
             String ownerName = "";
             String ownerIcon = "";
             try {
@@ -5664,7 +6028,7 @@ public class KoeSession {
                 }
             } catch (Exception e) {
             }
-            appendRoomHistory(ownerIdStr, roomToken, ownerName, ownerIcon, room.optString("description", room.optString("title", "")));
+            enrichRoomHistory(histSeq, ownerName, ownerIcon, room.optString("description", room.optString("title", "")));
 
             if (roomIdLong != 0) {
                 boolean autoRaiseHand = this.prefs.getBoolean("mod_auto_raise_hand", false);
@@ -7106,6 +7470,12 @@ public class KoeSession {
         return e != null && e.length > 0 && e[0] != null && e[0].length() > 0;
     }
 
+    /** 名前キャッシュにアイコン画像の場所まで入っているか。 */
+    private boolean hasIcon(long uid) {
+        String[] e = this.nameCache.get(Long.valueOf(uid));
+        return e != null && e.length > 1 && e[1] != null && e[1].length() > 0;
+    }
+
     /** レスポンス上位の user_info 配列(feed_posts / comments 等が同梱してくる)を名前キャッシュに吸収する */
     private void absorbUserInfo(JSONObject body) {
         if (body == null) return;
@@ -7139,7 +7509,9 @@ public class KoeSession {
             {
                 boolean needName = !hasName(optLong);
                 boolean needDeco = !decoChecked.contains(Long.valueOf(optLong));
-                if (optLong != 0 && (needName || needDeco) && !arrayList.contains(Long.valueOf(optLong))) {
+                // 名前だけ覚えていてアイコンが空の相手は、このセッションで 1 回だけ取り直す
+                boolean needIcon = !hasIcon(optLong) && !iconChecked.contains(Long.valueOf(optLong));
+                if (optLong != 0 && (needName || needDeco || needIcon) && !arrayList.contains(Long.valueOf(optLong))) {
                     arrayList.add(Long.valueOf(optLong));
                 }
             }
@@ -7154,6 +7526,7 @@ public class KoeSession {
             }
             Resp request = request("GET", "/api/v2/users", q1("ids", sb.toString()), (Map<String, String>) null);
             for (int k = 0; k < arrayList.size(); k++) decoChecked.add((Long) arrayList.get(k));
+            for (int k = 0; k < arrayList.size(); k++) iconChecked.add((Long) arrayList.get(k));
             if (request.body != null && (optJSONArray = request.body.optJSONArray("user_info")) != null) {
                 boolean changed = false;
                 for (int i3 = 0; i3 < optJSONArray.length(); i3++) {
@@ -7163,7 +7536,13 @@ public class KoeSession {
                         String nm2 = firstNonEmpty(optJSONObject2.optString("name", ""), optJSONObject2.optString("nickname", ""), optJSONObject2.optString("user_name", ""));
                         // 名前が空のまま覚えると「user 1234567」表示が永久に固定されるので、空は覚えない(あとで個別に取り直す)
                         if (optLong2 != 0 && nm2.length() > 0) {
-                            this.nameCache.put(Long.valueOf(optLong2), new String[]{nm2, optJSONObject2.optString("profile_picture_file_path", "")});
+                            String ic2 = optJSONObject2.optString("profile_picture_file_path", "");
+                            if (ic2.length() == 0) {
+                                // 応答にアイコンが無いときは、前に覚えていたものを消さない
+                                String[] prev = this.nameCache.get(Long.valueOf(optLong2));
+                                if (prev != null && prev.length > 1 && prev[1] != null) ic2 = prev[1];
+                            }
+                            this.nameCache.put(Long.valueOf(optLong2), new String[]{nm2, ic2});
                             rememberDecoration(optLong2, optJSONObject2);
                             changed = true;
                         }
@@ -7192,7 +7571,12 @@ public class KoeSession {
                     if (u == null) u = one.body;
                     String nm = firstNonEmpty(u.optString("name", ""), u.optString("nickname", ""));
                     if (nm.length() == 0) continue;
-                    this.nameCache.put(id, new String[]{nm, u.optString("profile_picture_file_path", "")});
+                    String ic1 = u.optString("profile_picture_file_path", "");
+                    if (ic1.length() == 0) {
+                        String[] prev1 = this.nameCache.get(id);
+                        if (prev1 != null && prev1.length > 1 && prev1[1] != null) ic1 = prev1[1];
+                    }
+                    this.nameCache.put(id, new String[]{nm, ic1});
                     rememberDecoration(id.longValue(), u);
                     extra = true;
                 } catch (Exception ig) {
@@ -7323,6 +7707,8 @@ public class KoeSession {
         if (r.status == 404 || r.status == 405) {
             r = request2("POST", "/api/rooms/" + str + "/leave", (Map<String, String>) null, new HashMap<String, String>());
         }
+        closeOpenRoomHistory("leave"); // 枠の記録に退出時刻を入れて閉じる
+        this.openRoomHistorySeq = 0;
         dbgLog(nowStr() + "  [ROOM] leave " + str + " -> " + r.status + (r.status >= 400 && r.body != null ? " " + truncate(redactLog(r.body.toString()), 200) : ""));
         // 自分が枠主なら退出だけでは枠が残り、次回の枠作成が「作成超過」で弾かれる。
         // 誰も残っていなければ枠自体を閉じる（公式も枠主の終了で DELETE /api/rooms/{id}）。
@@ -9214,6 +9600,39 @@ public class KoeSession {
             return jsonErr("receiver_id不明");
         }
         return cheeringDataResult(httpApi2("GET", "/api/cheering_talk/receiver_users/" + receiverId + "/standby_requests", (Map<String, String>) null, (Map<String, String>) null), "requests");
+    }
+
+    /**
+     * 応援通話の「受け手プロフィール」を作る／直す。
+     * 公式 CheeringTalkApi は本文に ProfileEditRequest(snake_case)を渡す:
+     *   message / profile_picture_file_path / md5 / profile_voice_file_path / cheering_coin_id / status
+     * receiverId が空なら新規作成(POST)、あれば編集(PUT)。
+     * 送られてきた項目だけを本文に入れる(空の項目で既存を消さないため)。
+     */
+    private String saveCheeringReceiver(String receiverId, String bodyJson) {
+        try {
+            JSONObject in = (bodyJson == null || bodyJson.length() == 0) ? new JSONObject() : new JSONObject(bodyJson);
+            String[] keys = new String[]{"message", "profile_picture_file_path", "md5", "profile_voice_file_path", "cheering_coin_id", "status"};
+            JSONObject out = new JSONObject();
+            for (int i = 0; i < keys.length; i++) {
+                if (!in.has(keys[i])) continue;
+                Object v = in.opt(keys[i]);
+                if (v == null || "null".equals(String.valueOf(v))) continue;
+                String sv = String.valueOf(v);
+                if (sv.length() == 0) continue;
+                if ("cheering_coin_id".equals(keys[i])) {
+                    try { out.put(keys[i], Integer.parseInt(sv)); } catch (Exception ex) { out.put(keys[i], sv); }
+                } else {
+                    out.put(keys[i], sv);
+                }
+            }
+            if (out.length() == 0) return jsonErr("変更する項目がありません");
+            boolean create = (receiverId == null || receiverId.length() == 0);
+            String path = create ? "/api/cheering_talk/receiver_users" : "/api/cheering_talk/receiver_users/" + receiverId;
+            return okResult(httpJsonApi2(create ? "POST" : "PUT", path, out));
+        } catch (Exception e) {
+            return errJson(e);
+        }
     }
 
     private String updateCheeringReceiverStatus(String receiverId, String status) {
@@ -11254,6 +11673,30 @@ public class KoeSession {
         return n;
     }
 
+    /* ---- 「フィルター回避」とみなす見えない文字だけを数える ----
+       isInvisibleChar より狭い。絵文字や普通の文章でも自然に出てくる文字は数えない:
+         ZWJ(U+200D)・ZWNJ(U+200C) … 絵文字の連結(👨‍👩‍👧 等)や一部言語の正書法で普通に使う
+         LRM/RLM(U+200E/200F)・異体字セレクタ … 方向指定や絵文字の見た目指定で普通に使う
+       数えるのは、本文に紛れ込ませてNGワード照合を外す目的でしか使われない純粋な詰め物だけ:
+         U+200B(ZWSP)・U+2060〜2064(ワード結合子/不可視演算子)・U+FEFF(BOM)
+         U+00AD(ソフトハイフン)・U+180E・U+061C・双方向制御(U+202A〜202E, U+2066〜2069) */
+    private static boolean isEvasionChar(char c) {
+        return c == '\u00AD' || c == '\u061C' || c == '\u180E'
+                || c == '\u200B'
+                || (c >= '\u202A' && c <= '\u202E')
+                || (c >= '\u2060' && c <= '\u2064')
+                || (c >= '\u2066' && c <= '\u2069')
+                || c == '\uFEFF';
+    }
+
+    /** フィルター回避目的の見えない文字が何個あるか(絵文字などの正当な使用は数えない)。 */
+    static int countEvasion(String s) {
+        if (s == null) return 0;
+        int n = 0;
+        for (int i = 0; i < s.length(); i++) if (isEvasionChar(s.charAt(i))) n++;
+        return n;
+    }
+
     /**
      * 直近の投稿をAPIから取り直して、件数と「目に見えない文字」の混入を数える。
      * 画面(WebView)から渡された値は一切使わないので、表示を書き換えても偽装できない。
@@ -11275,7 +11718,7 @@ public class KoeSession {
                 if (post == null) continue;
                 long t = botParseTime(post.optString("created_at", ""));
                 if (t > 0 && now - t <= windowMs) recent++;
-                int n = countInvisible(firstStr(post, "description", "decodedDescription", "text", "comment", "body"));
+                int n = countEvasion(firstStr(post, "description", "decodedDescription", "text", "comment", "body"));
                 if (n <= 0) continue;
                 hits++;
                 if (n > max) max = n;
@@ -11356,7 +11799,8 @@ public class KoeSession {
             boolean nameHit = nm.matches(R_NAME) && !nm.matches(R_DIGIT);
             String feat = u.isNull("feature") ? "" : u.optString("feature", "");
             boolean near = botKnownNear(uid);
-            boolean knownFeat = botKnownFeature(uid, feat);
+            /* feature は同じアプリ版なら人間も業者も全く同じ文字列になるため、
+               「既知botと同一feature」は業者の証拠にならない。誤検知の主因だったので判定から外す。 */
 
             /* 量産型の 4 特徴(アイコン・交流・自己紹介・年齢確認)のうち幾つ当たるか。
                以前は 4 つ全部が必要で、アイコンか自己紹介を 1 つ付けるだけで抜けられていた。
@@ -11379,7 +11823,7 @@ public class KoeSession {
             boolean zwEvade = (invisHits >= ZW_MIN_POSTS && invisMax >= ZW_MIN_PER_POST);
 
             boolean hard = core >= 4
-                    || (core >= 3 && (nameHit || near || knownFeat || a3bio))
+                    || (core >= 3 && (nameHit || near || a3bio))
                     || (core >= 2 && nameHit) // 「単語+3桁」の名前 + 量産型の特徴 2 つ
                     || (nameHit && nameCluster >= 2) // 同型の名前が ID 近接で複数
                     || zwEvade;
@@ -11397,12 +11841,13 @@ public class KoeSession {
 
             double sc = 0;
             ev.put("name", nm);
-            if (nameHit) { sc += 3; rs.put(N_NAME); }
+            /* 「単語+3桁数字」は人間のよくある名前(たろう123 等)でもあるので配点は控えめにする。
+               単独では申請に至らせず、業者固有の証拠(下記 discriminating)と重なったときだけ効かせる。 */
+            if (nameHit) { sc += 1.5; rs.put(N_NAME); }
             if (hard && noIcon) { sc += 1; }
             if (hard && a3bio) { sc += 2; }
             if (hard && near) { sc += 3; rs.put(N_NEAR); }
             ev.put("feature", feat.length() > 120 ? feat.substring(0, 120) : feat);
-            if (hard && knownFeat) { sc += 3; rs.put(N_FEAT); }
             if (hard && nameCluster >= 2) { sc += 3; rs.put(N_NAMECLUSTER); }
             /* 2 つでも「同型の名前が ID 近接」は十分に不自然なので加点する。
                (以前は 3 つ以上そろわないと加点されず、先に見つけた 1 人目が取りこぼされていた) */
@@ -11415,16 +11860,31 @@ public class KoeSession {
             JSONObject st = u.optJSONObject("settings");
             if (!rm && st != null) rm = truthy(st.opt("random_match_enabled"));
             ev.put("random_match_enabled", rm);
-            if (rm && (a2 || a2near)) { sc += 1.5; rs.put(N_RM); }
+            if (rm && (a2 || a2near)) { sc += 1.0; rs.put(N_RM); }
             String ls = u.optString("login_status_with_unit", "");
             ev.put("login_status", ls);
             if (ls.indexOf(L_ON1) >= 0 || ls.indexOf(L_ON2) >= 0 || ls.indexOf(L_ON3) >= 0) { sc += 0.5; rs.put(N_LOGIN); }
             ev.put("posts_last_hour", recent);
             if (hard && recent >= 5) { sc += 2; rs.put(N_POST + recent + N_POST2); }
 
-            String level = hard ? (sc >= BOT_AUTO_SCORE ? "high" : (sc >= BOT_MARK_SCORE ? "mid" : "")) : "";
+            /* ---- 誤検知対策の要 ----
+               「新規のカジュアル利用者」なら人間でも普通に当たる状況証拠
+               (量産型アイコン・交流0・自己紹介なし・年齢確認なし・単語+3桁の名前・ランダムマッチON・直近ログイン)
+               だけでは自動申請しない。業者に固有の証拠が最低 1 つあるときだけ「申請対象」とする:
+                 near        … 既知業者と ID が連番/同一端末
+                 nameCluster … 同型の名前が ID 近接で複数(量産登録)
+                 zwEvade     … 本文に見えない詰め物を混ぜてフィルター回避(絵文字等の正当な不可視文字は除外済み)
+                 a3bio       … 自己紹介が勧誘・外部誘導
+               証拠が無ければ最大でも「mid(表示のみ・申請しない)」に留める。 */
+            boolean discriminating = near || nameCluster >= 2 || zwEvade || a3bio;
+            ev.put("discriminating", discriminating);
+            boolean report = hard && discriminating && sc >= BOT_AUTO_SCORE;
+            String level = report ? "high" : (hard && sc >= BOT_MARK_SCORE ? "mid" : "");
             ev.put("score", sc).put("level", level).put("checked_at", nowStr()).put("checked_by", "KoeTomo+ auto");
-            if (hard) botRemember(uid, feat);
+            /* 候補として控えるのも業者固有の証拠があるときだけ。
+               以前は hard(=新規カジュアル利用者でも当たる)で控えていたため、
+               近接 ID の無関係な新規利用者どうしが near で誤って反応する連鎖が起きていた。 */
+            if (discriminating) botRemember(uid, feat);
             out.put("hard", hard).put("score", sc).put("level", level).put("reasons", rs).put("ev", ev);
         } catch (Exception e) {
             try { out.put("hard", false).put("score", 0).put("level", "").put("reasons", new JSONArray()).put("ev", new JSONObject()); } catch (Exception ig) {}
@@ -11438,7 +11898,7 @@ public class KoeSession {
     /* 判定の規則を変えたら「確認済み」を一度だけ捨てる。
        そうしないと、前の規則で見送った相手を最長 7 日間もう一度見に行かず、
        規則を厳しくしても手元では何も変わらない。 */
-    private static final int BOT_RULES_VERSION = 2;
+    private static final int BOT_RULES_VERSION = 3;
 
     private void botRulesMigrate() {
         try {
@@ -11558,13 +12018,13 @@ public class KoeSession {
         JSONObject e = ev.optJSONObject("ev") != null ? ev.optJSONObject("ev") : new JSONObject();
         boolean cluster = e.optInt("name_cluster", 0) >= 2;
         boolean zwEvade = e.optInt("invis_hits", 0) >= ZW_MIN_POSTS && e.optInt("invis_max", 0) >= ZW_MIN_PER_POST;
-        boolean nearKnown = false, sameFeat = false;
+        boolean nearKnown = false;
         for (int i = 0; rs != null && i < rs.length(); i++) {
-            String r = rs.optString(i);
-            if (r.equals(N_NEAR)) nearKnown = true;
-            if (r.equals(N_FEAT)) sameFeat = true;
+            if (rs.optString(i).equals(N_NEAR)) nearKnown = true;
         }
-        String confidence = (cluster || nearKnown || sameFeat || zwEvade) && sc >= BOT_AUTO_SCORE ? "confirmed" : "high";
+        /* 「確定」は量産登録の確証があるときだけ。feature 一致は同一アプリ版という意味しかなく
+           人間も一致するため確証から外した(誤検知の主因だった)。 */
+        String confidence = (cluster || nearKnown || zwEvade) && sc >= BOT_AUTO_SCORE ? "confirmed" : "high";
         JSONArray neighbors = new JSONArray();
         try {
             JSONArray a = botPrefArr("bot_namehits");
@@ -11577,7 +12037,7 @@ public class KoeSession {
         e.put("verify", new JSONObject().put("target_uid", uid).put("neighbor_uids", neighbors)
                 .put("checked_at_ms", System.currentTimeMillis())
                 .put("invis_post_ids", e.optJSONArray("invis_post_ids") == null ? new JSONArray() : e.optJSONArray("invis_post_ids"))
-                .put("rules", "core>=4 | core>=3+aux | core>=2+namepattern | namepattern+cluster>=2 | invisible>=2posts&>=3chars"));
+                .put("rules", "auto-report requires score>=6 AND (near|namecluster>=2|invisible>=2posts&>=3chars|solicit-bio); feature-match excluded; invisible-count excludes emoji ZWJ/VS/direction-marks"));
         StringBuilder detail = new StringBuilder("[KoeTomo+ 業者自動判定(自動申請) score=" + sc + (confidence.equals("confirmed") ? " 確定" : "") + "] ");
         for (int i = 0; rs != null && i < rs.length(); i++) { if (i > 0) detail.append("・"); detail.append(rs.optString(i)); }
         JSONObject body = new JSONObject();
@@ -11824,8 +12284,20 @@ public class KoeSession {
         return z;
     }
 
+    /** このプロセスで一度でも「前回の閉じ忘れ」を片付けたか。 */
+    private boolean crashedRoomHistoryFixed = false;
+
     public String dispatch(String str, JSONArray jSONArray) {
         boolean z = true;
+        /* 前回、退出しないまま終わった(電池切れ・強制終了など)枠の記録を閉じる。
+           開いたままにしておくと、枠履歴にいつまでも「通話中」が残ってしまう。 */
+        if (!crashedRoomHistoryFixed) {
+            crashedRoomHistoryFixed = true;
+            try {
+                closeOpenRoomHistory("interrupted");
+            } catch (Exception ig) {
+            }
+        }
         try {
             if (str.equals("is_logged_in")) {
                 JSONObject put = new JSONObject().put("ok", true);
@@ -11839,6 +12311,20 @@ public class KoeSession {
             } else if (str.equals("get_feed_post")) {
                 return getFeedPost(jSONArray.optString(0));
             } else {
+                if (str.equals("set_cert_pins")) {
+                    // 証明書ピンニングの設定。pins は SPKI(SubjectPublicKeyInfo)の SHA-256 を base64 にしたものをカンマ区切り。
+                    // 空にすると無効(既定)。off=true で緊急停止。信頼できる回線で取得した値のみ入れること。
+                    String pins = jSONArray.optString(0, "");
+                    boolean off = jSONArray.optBoolean(1, false);
+                    this.prefs.edit().putString("koe_cert_pins", pins == null ? "" : pins.trim()).putBoolean("koe_pin_off", off).apply();
+                    PIN_FACTORY = null; // 次回接続で作り直す
+                    return new JSONObject().put("ok", true).toString();
+                }
+                if (str.equals("get_cert_pins")) {
+                    return new JSONObject().put("ok", true)
+                            .put("pins", this.prefs.getString("koe_cert_pins", ""))
+                            .put("off", this.prefs.getBoolean("koe_pin_off", false)).toString();
+                }
                 if (str.equals("approve_speaker")) {
                     return changeRole(jSONArray.optString(0), jSONArray.optString(1), "speaker");
                 }
@@ -12359,6 +12845,7 @@ public class KoeSession {
                     return changeRole(jSONArray.optString(0), String.valueOf(userId()), "listener");
                 }
                 if (str.equals("refresh_room_state")) {
+                    touchRoomHistory(this.openRoomHistorySeq); // 落ちたときの滞在時間の目安を残す
                     return refreshRoomState(jSONArray.optString(0, "null"), jSONArray.optString(1, ""));
                 }
                 if (str.equals("reject_speaker")) {
@@ -12649,6 +13136,9 @@ public class KoeSession {
                 }
                 if (str.equals("get_cheering_standby_requests")) {
                     return getCheeringStandbyRequests(jSONArray.optString(0));
+                }
+                if (str.equals("save_cheering_receiver")) {
+                    return saveCheeringReceiver(jSONArray.optString(0, ""), jSONArray.optString(1, ""));
                 }
                 if (str.equals("update_cheering_receiver_status")) {
                     return updateCheeringReceiverStatus(jSONArray.optString(0), jSONArray.optString(1, ""));

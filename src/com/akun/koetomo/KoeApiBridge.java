@@ -15,6 +15,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.CancellationSignal;
 import android.os.Environment;
+import android.net.wifi.WifiManager;
 import android.os.PowerManager;
 import android.os.Vibrator;
 import android.provider.MediaStore;
@@ -838,7 +839,8 @@ public class KoeApiBridge {
                 postXResult("{\"ok\":false,\"message\":\"認証の途中状態が失われました。もう一度お試しください\"}");
                 return;
             }
-            if (xState != null && (state == null || !xState.equals(state))) {
+            // state は必ず照合する(照合を飛ばせる抜け道を作らない)
+            if (xState == null || state == null || !xState.equals(state)) {
                 postXResult("{\"ok\":false,\"message\":\"認証の検証に失敗しました(state不一致)\"}");
                 return;
             }
@@ -1414,6 +1416,10 @@ public class KoeApiBridge {
     private boolean callAudioFocusHeld = false;
     /* 通話中にCPUスリープでSkyWay接続が切れないようにするための部分ウェイクロック(画面は点灯させない) */
     private PowerManager.WakeLock callWakeLock = null;
+    /* 画面を消すとWi-Fiが省電力に入り、通話の音が途切れる・切断される端末があるため、通話中だけ保持する */
+    private WifiManager.WifiLock callWifiLock = null;
+    /* 通話前のスピーカー設定。通話が終わったら元へ戻す(戻さないと他のアプリの音まで受話口から出る) */
+    private boolean speakerWasOn = false;
 
     @JavascriptInterface
     public void startCallAudio() {
@@ -1423,6 +1429,7 @@ public class KoeApiBridge {
             if (audioManager == null) {
                 return;
             }
+            this.speakerWasOn = audioManager.isSpeakerphoneOn();
             audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
             audioManager.setSpeakerphoneOn(true);
             int result = audioManager.requestAudioFocus(this.callFocusListener, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
@@ -1437,6 +1444,18 @@ public class KoeApiBridge {
                 this.callWakeLock = newWakeLock;
                 newWakeLock.setReferenceCounted(false);
                 this.callWakeLock.acquire();
+            }
+        } catch (Exception e) {
+        }
+        try {
+            Context context3 = this.webView.getContext().getApplicationContext();
+            WifiManager wifiManager = (WifiManager) context3.getSystemService("wifi");
+            if (wifiManager != null && this.callWifiLock == null) {
+                /* 3 = WIFI_MODE_FULL_HIGH_PERF(API12以降)。省電力のスリープを止めて遅延を抑える */
+                WifiManager.WifiLock lock = wifiManager.createWifiLock(3, "KoeTomo:CallWifiLock");
+                this.callWifiLock = lock;
+                lock.setReferenceCounted(false);
+                lock.acquire();
             }
         } catch (Exception e) {
         }
@@ -1455,6 +1474,7 @@ public class KoeApiBridge {
                 this.callAudioFocusHeld = false;
             }
             audioManager.setMode(AudioManager.MODE_NORMAL);
+            audioManager.setSpeakerphoneOn(this.speakerWasOn);
         } catch (Exception e) {
         }
         try {
@@ -1462,6 +1482,13 @@ public class KoeApiBridge {
                 this.callWakeLock.release();
             }
             this.callWakeLock = null;
+        } catch (Exception e) {
+        }
+        try {
+            if (this.callWifiLock != null && this.callWifiLock.isHeld()) {
+                this.callWifiLock.release();
+            }
+            this.callWifiLock = null;
         } catch (Exception e) {
         }
     }
