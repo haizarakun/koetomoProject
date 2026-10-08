@@ -44,3 +44,6 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+
+# 公式アプリ由来の難読化済み値を含むため追跡しない
+src/com/akun/koetomo/Secrets.java
