@@ -47,3 +47,6 @@ Thumbs.db
 
 # 公式アプリ由来の難読化済み値を含むため追跡しない
 src/com/akun/koetomo/Secrets.java
+
+# 業者判定のルール本体は公開しない
+src/com/akun/koetomo/BotRules.java
