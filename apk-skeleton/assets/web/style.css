@@ -362,3 +362,116 @@ body.koe-bg-paused *,body.koe-bg-paused *::before,body.koe-bg-paused *::after{an
 /* 続きの自動読み込み中の行(押しボタンには見せない) */
 .koe-autoload{border:0!important;background:0 0!important;color:var(--text-muted,#98a0ab)!important;font-weight:400!important;cursor:default!important;text-align:center;padding:12px 0!important;width:100%;display:block}
 .koe-autoload::before{content:"";display:inline-block;width:12px;height:12px;margin-right:8px;vertical-align:-2px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:koeSpin .8s linear infinite}
+
+/* ===== v1.11 追加 ===== */
+/* 枠中のアイコンをタップしたとき、一覧が作り直されても出現アニメが再生されてチカチカしないようにする */
+.callv2-pcard{animation:none!important}
+/* ボタンを押したときの四角い判定を消し、角丸のやわらかい押し込み表現にそろえる */
+*{-webkit-tap-highlight-color:transparent}
+button,.btn-secondary,.theme-btn,.mini-btn,.callv2-bbtn,.callv2-action,.callv2-icon,.rail-item{outline:none;transition:transform .12s ease,opacity .12s ease,background-color .12s ease}
+button:active,.btn-secondary:active,.theme-btn:active,.mini-btn:active,.callv2-bbtn:active,.callv2-action:active,.callv2-icon:active,.rail-item:active{transform:scale(.96);opacity:.82}
+button:focus,button:focus-visible{outline:none;box-shadow:none}
+/* 上部のログイン中ID/名前は「…」で切らず、幅いっぱいまで使い、足りなければ文字を縮めて収める */
+.header-user{max-width:46vw!important;overflow:hidden;text-overflow:clip!important}
+/* ランダム通話の画面が右にはみ出して横にずれないよう、幅を画面内に収める */
+#koeRandomModal{overflow-x:hidden!important;max-width:100vw!important}
+#koeRandomModal .modal-content,#koeRandomModal .modal-body,#koeRandomModal *{max-width:100%;box-sizing:border-box;word-break:break-word}
+#koeRandomModal textarea,#koeRandomModal input{width:100%}
+
+/* ===== 画面内画面(PiP)の小窓: 通話の参加者表示とミュートだけを大きく見せる ===== */
+body.in-pip #callOverlay{position:fixed!important;inset:0!important;z-index:2147483000}
+body.in-pip #callOverlay .callv2-top,body.in-pip #callOverlay .callv2-actions,body.in-pip #callOverlay .callv2-panel,
+body.in-pip #callOverlay #callChatBox,body.in-pip #callOverlay .callv2-sub,body.in-pip #pageCallReturnBanner,
+body.in-pip .rail,body.in-pip .topbar,body.in-pip #koeBreakdownOverlay{display:none!important}
+body.in-pip #callOverlay .callv2-pcard{width:64px!important}
+
+/* ログイン画面は一番手前の全画面にする。ほかの画面・タブ・モーダルは隠す */
+#loginScreen{position:fixed!important;inset:0;z-index:2147483000;overflow-y:auto}
+body.on-login .rail,body.on-login .topbar,body.on-login .modal,body.on-login #callOverlay,body.on-login #pageCallReturnBanner,body.on-login .koe-call-mini{display:none!important}
+
+/* 応援通話: 自分の受付・着信・状態表示 */
+.cheer-standby{font-size:17px;padding:4px 8px;border-radius:8px;cursor:pointer;opacity:.75;flex:none}
+.cheer-standby:active{background:rgba(255,255,255,.08);opacity:1}
+.cheer-status{display:inline-block;padding:1px 7px;margin-right:6px;border-radius:999px;font-size:11px;font-weight:600;line-height:1.6;vertical-align:1px}
+.cheer-status-on{background:#1f7a3f;color:#fff}
+.cheer-status-mid{background:#6b6f76;color:#fff}
+.cheer-status-off{background:#3a3d42;color:#b9bdc4}
+.cheer-card-unavailable{opacity:.58}
+.cheer-card-unavailable .cheer-standby{opacity:1}
+.cheer-count-line{padding:8px 12px;margin-bottom:8px;border-radius:10px;font-size:12px;background:rgba(255,255,255,.05);color:#c9cdd4}
+.cheer-count-line-none{line-height:1.7}
+.my-receiver-bar{display:flex;align-items:center;gap:10px;margin-top:12px;padding:10px 12px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.04)}
+.my-receiver-info,.rc-status-row>div{flex:1;min-width:0}
+.my-receiver-title{font-size:12px;opacity:.7}
+.my-receiver-state{font-size:14px;font-weight:600;margin-top:2px}
+.cheer-incoming{margin-top:12px;padding:12px;border-radius:12px;border:1px solid #1f7a3f;background:rgba(31,122,63,.14)}
+.cheer-incoming-name{font-size:15px;font-weight:700;margin-bottom:8px}
+.cheer-incoming-btns{display:flex;gap:8px;flex-wrap:wrap}
+
+/* アカウント切替の専用ページ・BAN表示の見切れ対策 */
+.account-page{position:fixed;inset:0;z-index:9000;display:none;flex-direction:column;background:var(--bg,#0e1116);color:var(--text,#fff);}
+.account-page-head{display:flex;align-items:center;gap:12px;padding:14px 16px;font-weight:700;border-bottom:1px solid rgba(255,255,255,.08);}
+.account-page-back{background:none;border:none;color:inherit;font-size:16px;cursor:pointer;padding:4px 8px;}
+.account-page-body{flex:1;overflow-y:auto;padding:12px 16px calc(24px + env(safe-area-inset-bottom));}
+.account-item .account-info{min-width:0;flex:1;}
+.account-item .account-name,.account-item .account-id{white-space:normal;overflow:visible;text-overflow:clip;word-break:break-all;}
+.account-ban{display:inline-block;margin-top:3px;padding:1px 8px;border-radius:10px;background:#c0392b;color:#fff;font-size:12px;font-weight:700;white-space:nowrap;}
+
+/* 応援通話の状態をひと目で分かるように(色つきの札と左の線) */
+.cheer-pill{display:inline-block;padding:2px 9px;border-radius:11px;font-size:12px;font-weight:700;line-height:1.5;}
+.cheer-pill-active{background:#1f9d62;color:#fff;box-shadow:0 0 8px rgba(42,193,122,.55);}
+.cheer-pill-online{background:#d4b21f;color:#1a1a1a;}
+.cheer-pill-offline{background:transparent;color:#8a8f98;border:1px solid #6b7078;}
+.card.cheer-st-active{border-left:5px solid #2ac17a;}
+.card.cheer-st-online{border-left:5px solid #d4b21f;}
+.card.cheer-st-offline{border-left:5px solid #555b63;}
+
+/* 「もっと読む」「次を読む」は見せず、画面の外で自動で先読みする(失敗して止まったときだけ表示) */
+#timelineLoadMoreRow:not(.koe-more-show),.koe-posts-more:not(.koe-more-show),#roomsMoreBtn:not(.koe-more-show){height:1px!important;min-height:0!important;padding:0!important;margin:0!important;overflow:hidden;opacity:0;pointer-events:none;border:0!important;}
+
+/* 応援通話一覧: 名前・状態の文字を見切れさせない */
+#cheeringList .card-body{min-width:0;flex:1 1 auto}
+#cheeringList .card-name,#cheeringList .card-sub{white-space:normal;overflow:visible;text-overflow:clip;word-break:break-word}
+/* 画面が横にずれない */
+html,body{max-width:100vw;overflow-x:hidden;overscroll-behavior-x:none}
+.main-screen,.main-screen>.content,.content{max-width:100%;overflow-x:hidden;touch-action:pan-y}
+
+.koe-trial-btn{border:1px solid rgba(51,183,207,.4);background:rgba(51,183,207,.12);color:var(--accent,#33b7cf);border-radius:10px;padding:2px 8px;font-size:11px}
+.login-saved{margin-bottom:10px}
+
+#koeDbgList,#koeDbgList *{-webkit-user-select:text;user-select:text}
+
+.koe-more-progress{position:fixed;left:50%;bottom:calc(72px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);z-index:60;display:none;min-width:200px;max-width:86vw;padding:8px 14px;border-radius:14px;background:rgba(20,22,28,.92);color:#fff;font-size:12px;box-shadow:0 4px 14px rgba(0,0,0,.4)}
+.koe-more-progress.on{display:block}
+.koe-mp-b{display:block;height:3px;margin-top:6px;border-radius:2px;background:rgba(255,255,255,.15);overflow:hidden}
+.koe-mp-b u{display:block;height:100%;width:0;background:var(--accent,#2AC1C7);transition:width .2s}
+.pd-comment-text,#profileViewComment,.profile-comment,.cheer-msg{white-space:pre-wrap;overflow-wrap:anywhere}
+
+#callSysLog,#callChatLog,#callSysLog *,#callChatLog *{-webkit-user-select:text;user-select:text}
+.koe-room-meta{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center}.koe-room-meta>span{white-space:nowrap}
+
+/* すべて / フォロー中 の切り替えを、つまみが動くスイッチ型にする */
+.koe-seg{display:flex;position:relative;padding:3px;border-radius:999px;background:var(--bg-input,#1e2024);border:1px solid var(--border,#3a3d44);gap:0}
+.koe-seg .chip{flex:1;border:none!important;background:transparent!important;border-radius:999px;margin:0;padding:8px 10px;text-align:center;color:var(--text-muted,#9aa0a6);position:relative;z-index:1;transition:color .2s,background .25s}
+.koe-seg .chip.active{background:var(--accent,#2ac1c7)!important;color:#fff;box-shadow:0 1px 4px rgba(0,0,0,.3)}
+
+.rank-circle{flex:none;width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;background:#6b7280;margin-right:6px}
+.rank-circle.rank-1{background:#e0b200}.rank-circle.rank-2{background:#9aa3ad}.rank-circle.rank-3{background:#b87333}
+
+.koe-eco *,.koe-eco *::before,.koe-eco *::after{animation:none!important;transition:none!important;backdrop-filter:none!important}
+
+body.speak-style-dim .callv2-pav:not(.speaking){opacity:.5;transition:opacity .25s}
+body.speak-style-dim .callv2-pav.speaking{box-shadow:none!important;animation:none!important}
+
+@keyframes speakNeon{0%,to{opacity:1}40%{opacity:.78}55%{opacity:1}}
+body.speak-style-neon .callv2-pav.speaking{animation:1.3s ease-in-out infinite speakNeon!important;box-shadow:0 0 3px 1px rgba(var(--speak-rgb,42,193,199),.9),0 0 14px 4px rgba(var(--speak-rgb,42,193,199),.55)!important;will-change:opacity}
+
+/* 画面内画面(PiP)の小窓: 参加者のアイコンだけを大きく並べる */
+body.in-pip .callv2-top,body.in-pip #callMascot,body.in-pip #callStatus,body.in-pip #callChatPanel,body.in-pip .callv2-actions,body.in-pip .callv2-bottom,body.in-pip #applicantsBox,body.in-pip #callOfferWallBtn{display:none!important}
+body.in-pip .callv2{background:#101216}
+body.in-pip .callv2-grid{grid-template-columns:repeat(auto-fit,minmax(56px,1fr))!important;gap:10px 4px!important;padding:8px 6px!important;align-content:center!important}
+body.in-pip #callOverlay .callv2-pcard{width:auto!important;gap:3px}
+body.in-pip .callv2-pav{width:52px!important;height:52px!important}
+body.in-pip .callv2-pname{font-size:10px!important;max-width:60px!important}
+
+@keyframes koePop{0%{opacity:0;transform:scale(.4) translateY(10px)}to{opacity:1;transform:scale(1) translateY(0)}}

@@ -43,10 +43,15 @@
 
   /** タスクを 1 回実行する。多重実行と例外は内部で吸収する。 */
   function run(task) {
-    if (task.busy) return;
+    /* 応答が返らない通信で busy が残り続けないよう、長く止まったものは解除する */
+    var staleMs = Math.max(task.ms * 10, 30000);
+    if (task.busy && Date.now() - (task.busyAt || 0) < staleMs) return;
     task.busy = true;
+    task.busyAt = Date.now();
+    /* 解除済みの古い実行が後から終わっても、新しい実行の busy を消さない */
+    var token = (task.seq = (task.seq || 0) + 1);
     var done = function () {
-      task.busy = false;
+      if (task.seq === token) task.busy = false;
     };
     try {
       var result = task.fn();

@@ -38,7 +38,10 @@
     }
 
     function applyList(banned) {
-      list = banned || [];
+      /* 遠隔から来るリストは、数字のIDだけを受け付ける */
+      list = (banned || []).filter(function (b) {
+        return b && /^\d{1,12}$/.test(String(b.uid));
+      });
       set = new Set();
       list.forEach(function (b) {
         if (b && b.uid != null) set.add(String(b.uid));
@@ -60,7 +63,7 @@
       try {
         while (attempt < 3) {
           try {
-            r = await call("moderation_banlist", baseUrl, loadEtag() || "");
+            r = await call("moderation_banlist", baseUrl, set.size ? loadEtag() || "" : "");   /* 手元が空なら、前回と同じ(304)でも必ず取り直す */
             if (r && r.ok) {
               if (r.not_modified) {
                 log("最新(304) " + set.size + "件");

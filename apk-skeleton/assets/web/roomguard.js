@@ -24,6 +24,7 @@
   var STORAGE_KEY = "koe_guard";
 
   var DEFAULTS = {
+    guardEnabled: true, // 枠の防御そのもののオン/オフ(オフなら判定も通知もしない)
     spamEnabled: true,
     spamMaxPer10s: 6, // 10 秒間にこの件数以上でスパム
     spamSameText: 3, // 同じ文を 20 秒以内にこの回数以上でスパム(3 文字未満の相づち「w」「草」等は数えない)
@@ -33,6 +34,8 @@
     loudSeconds: 2, // この秒数以上、爆音が続いたら対処
     loudVolume: 20, // 対処後の相手の音量(%)
     loudAction: "none", // none | listener | kick
+    newAcctEnabled: true, // 作りたて・フォロワー0の人は、枠に入った時点でコメントを隠し、聞き専から始める
+    newAcctDays: 3, // 登録からこの日数以内を「新規」とみなす
   };
 
   function loadSettings() {
@@ -70,6 +73,8 @@
   var savedVolume = {}; // uid -> 下げる前の音量(戻す用)
 
   function reset() {
+    checkedJoin = {};
+    roomEpoch++;
     hiddenUsers = {};
     commentTimes = {};
     lastTexts = {};
@@ -150,7 +155,7 @@
   }
 
   function onComments(added) {
-    if (!settings.spamEnabled || !Array.isArray(added) || !added.length) return;
+    if (!settings.guardEnabled || !settings.spamEnabled || !Array.isArray(added) || !added.length) return;
     if (!global.__chatNotifiedInit) return; // 入室直後の最初の取得(過去の履歴)は判定に使わない
     var now = Date.now();
     added.forEach(function (c) {
@@ -207,7 +212,7 @@
   }
 
   function isHidden(uid) {
-    return !!hiddenUsers[Number(uid)];
+    return !!settings.guardEnabled && !!hiddenUsers[Number(uid)];
   }
 
   /* ---- 爆音 ----
@@ -217,21 +222,80 @@
          人の声は子音や息継ぎで必ず途切れるので 85% には届きにくく、流しっぱなしの音は届く */
   var LOUD_RATIO = 0.85;
 
+
+  /* ---- 新規アカウント制限 ----
+     荒らしはIDを作り直して戻ってくるので、「登録から日が浅い」「フォロワーが0」の人は
+     枠に入った時点でコメントを隠し(端末内)、枠主ならリスナーに戻す。人が増えるわけではないので、
+     入室時に1回だけプロフィールを見る。 */
+  /* 公式のユーザー情報には登録日が無い。ユーザー番号は登録順に増え、1日に約150アカウントが作られる。
+     これまでに見た最大の番号から「150 × 日数」の範囲に入る番号は新規とみなす。 */
+  var NEW_ACCOUNTS_PER_DAY = 150;
+  function isNewById(uid, days) {
+    try {
+      var mx = Number(localStorage.getItem("koe_idmax") || 0);
+      if (uid > mx) {
+        var first = mx === 0;   // 基準がまだ無いときは、最初の1人を「新しい」と決めつけない
+        mx = uid;
+        localStorage.setItem("koe_idmax", String(mx));
+        if (first) return false;
+      }
+      return uid >= mx - NEW_ACCOUNTS_PER_DAY * days;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  var checkedJoin = {};
+  var roomEpoch = 0; /* 枠が替わるたびに増やし、古い応答を捨てるための番号 */
+  function noteJoin(uid) {
+    uid = Number(uid);
+    if (!settings.guardEnabled || !settings.newAcctEnabled || !uid || uid === myId() || checkedJoin[uid]) return;
+    checkedJoin[uid] = true;
+    var epoch = roomEpoch;
+    global
+      .callApi("view_user_profile", uid)
+      .then(function (r) {
+        if (epoch !== roomEpoch) return; /* 取得中に別の枠へ移っていたら何もしない */
+        var p = r && r.ok && r.profile;
+        if (!p) return;
+        var why = "";
+        var days = Math.max(1, Number(settings.newAcctDays) || 3);
+        var t = Date.parse(String(p.created_at || "").replace(" ", "T"));
+        if (t && Date.now() - t < days * 86400000) why = "登録から日が浅い";
+        else if (!t && isNewById(uid, days)) why = "ユーザー番号が新しい";
+        else if (typeof p.follower_count === "number" && p.follower_count === 0) why = "フォロワー0";
+        if (!why) return;
+        hiddenUsers[uid] = true;
+        redrawChat();
+        renderPanel();
+        notify(nameOf(uid) + " は新規アカウント(" + why + ")のため、コメントを隠しました", "戻す", function () {
+          unhide(uid);
+        });
+        try {
+          if (typeof global.koeIsOwner === "function" && global.koeIsOwner() && global.currentRoomId) {
+            global.callApi("reject_speaker", global.currentRoomId, String(uid));
+          }
+        } catch (e) {}
+      })
+      .catch(function () {});
+  }
+
   function loudThreshold() {
     var lv = Math.max(1, Math.min(10, Number(settings.loudLevel) || 5));
     return 0.6 - (lv - 1) * 0.04;
   }
 
-  function onLevel(uid, rms, now) {
-    if (!settings.loudEnabled) return;
+  function onLevel(uid, rms, now, clip) {
+    if (!settings.guardEnabled || !settings.loudEnabled) return;
     uid = Number(uid);
     if (!uid || uid === myId() || loudHandled[uid]) return;
     var windowMs = Math.max(1, Number(settings.loudSeconds) || 2) * 1000;
     var frames = (loudFrames[uid] = (loudFrames[uid] || []).filter(function (f) {
       return now - f.t < windowMs;
     }));
-    frames.push({ t: now, loud: rms >= loudThreshold() });
-    if (frames.length < 6 || now - frames[0].t < windowMs * 0.8) return; // 判定に十分な長さが溜まるまで待つ
+    /* 音割れ(波形の振り切れ)が多い音は、しきい値の6割でも爆音とみなす */
+    frames.push({ t: now, loud: rms >= loudThreshold() || (clip > 0.02 && rms >= loudThreshold() * 0.6) });
+    if (frames.length < 3 || now - frames[0].t < windowMs * 0.8) return; /* 画面が裏の時は判定が間引かれるので、3回分あれば足りる */ // 判定に十分な長さが溜まるまで待つ
     var loudCount = frames.filter(function (f) {
       return f.loud;
     }).length;
@@ -399,6 +463,7 @@
     isHidden: isHidden,
     unhide: unhide,
     onLevel: onLevel,
+    noteJoin: noteJoin,
     restoreVolume: restoreVolume,
     reset: reset,
     renderPanel: renderPanel,
@@ -406,5 +471,8 @@
       return settings;
     },
     save: saveSettings,
+    enabled: function () {
+      return !!settings.guardEnabled;
+    },
   };
 })(window);

@@ -11,7 +11,6 @@
 <link rel="preload" as="script" href="banlist-client.js">
 <link rel="preload" as="script" href="sched.js">
 <link rel="preload" as="script" href="roomguard.js">
-<link rel="preload" as="script" href="koemod.js">
 <link rel="preload" as="script" href="app.js">
 </head>
 <body>
@@ -51,6 +50,7 @@
 <div class="login-box">
 <img src="logo.png" class="login-logo-img" alt="KoeTomo+">
 <p class="login-sub">KoeTomo+・非公式クライアント</p>
+<div class="login-saved"><div class="field-label" style="text-align:left;">保存済みのアカウントで入る</div><div id="loginAccountList" class="accounts-list"></div></div>
 <div id="loginError" class="login-error error-text" style="display:none;"></div>
 <div id="loginFields">
 <label>メールアドレス</label>
@@ -217,13 +217,13 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <div id="timelineList" class="card-list"></div>
 </section>
 <section id="page-call" class="page">
-<p class="page-desc">自分の通話ルーム(枠)を開く、または下の一覧から開いているルームに参加します。</p>
 <button id="openNewCallBtn" class="btn-primary join-own-btn"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg> 自分の通話を開く</button>
 <button id="koeRandomBtn" class="btn-secondary join-own-btn" style="margin-top:8px;"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h4l3 10h5"/><path d="M16 5l4 2-4 2"/><path d="M4 17h4l2-6"/><path d="M16 15l4 2-4 2"/></svg> ランダム通話（マッチング）</button>
 <div id="createRoomRow" class="create-room-row" style="display:none; flex-direction:column; gap:8px; align-items:stretch;">
 <input id="createRoomDesc" type="text" placeholder="枠名(ルームの説明)">
 <label class="check-row"><input type="checkbox" id="createRoomPublic" checked> 公開する(誰でも参加OK)</label>
 <label class="check-row"><input type="checkbox" id="createRoomComment" checked> コメント(チャット)を許可</label>
+
 <label class="field-label" style="margin-top:6px;">枠のサイズ</label>
 <div id="roomSizeRow" class="call-tabs" style="margin:2px 0 4px;">
 <button type="button" class="chip room-size-chip active" data-ct="1">大人数</button>
@@ -238,13 +238,13 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <details class="advanced-join">
 <summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1" stroke-linecap="round"/></svg> 挙手の自動処理設定</summary>
 <label class="check-row"><input type="checkbox" id="autoRaiseHandChk"> 参加したら自動で挙手する</label>
-<label class="check-row"><input type="checkbox" id="autoApproveChk"> オーナーの時、挙手を自動で許可する</label>
+<label class="check-row"><input type="checkbox" id="autoApproveChk"> オーナーの時、挙手を自動で許可する</label><label class="check-row"><input type="checkbox" id="autoForceUpChk"> オーナーの時、聞いている人を自動で強制的にあげる</label>
 <label class="check-row"><input type="checkbox" id="autoRejectChk"> オーナーの時、挙手を自動で拒否する</label>
 <button id="saveModerationBtn" class="btn-secondary">設定を保存</button>
 <div id="moderationStatus" class="empty-msg" style="padding:4px 0;"></div>
 </details>
 <div class="section-divider" style="margin-top:14px;"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg> 開いているルーム一覧(タップで参加)</div>
-<div class="call-tabs" style="margin-bottom:8px;">
+<div class="call-tabs koe-seg" style="margin-bottom:8px;">
 <button class="chip room-feed-chip active" data-feed="all">すべて</button>
 <button class="chip room-feed-chip" data-feed="following">フォロー中</button>
 </div>
@@ -278,7 +278,7 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <button id="communitySearchBtn" class="btn-secondary">検索</button>
 </div>
 <div id="communityCategories" class="community-cats"></div>
-<details class="advanced-join" style="margin-bottom:10px;">
+<details class="advanced-join" open style="margin-bottom:10px;">
 <summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg> コミュニティを作成</summary>
 <div class="create-community-form">
 <input id="newCommunityName" type="text" placeholder="コミュニティ名">
@@ -313,12 +313,12 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 </div>
 <div id="rankingOptions" style="display:none;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
 <select id="rankingRating" style="flex:1;min-width:120px;padding:7px;border-radius:8px;background:var(--bg-input,#1c1c1c);color:var(--text-normal,#dbdee1);border:1px solid var(--border);">
-<option value="1">かわいい声</option>
-<option value="2">きれいな声</option>
+<option value="1">カワボ</option>
+<option value="2">美声</option>
 <option value="3">面白い</option>
-<option value="4">かっこいい声</option>
-<option value="5">癒される</option>
-<option value="6">頼りになる</option>
+<option value="4">イケボ</option>
+<option value="5">癒やし</option>
+<option value="6">助かる</option>
 </select>
 <select id="rankingFilter" style="flex:1;min-width:100px;padding:7px;border-radius:8px;background:var(--bg-input,#1c1c1c);color:var(--text-normal,#dbdee1);border:1px solid var(--border);">
 <option value="1">週間</option>
@@ -327,6 +327,8 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 </select>
 </div>
 <div id="cheeringList" class="card-list"></div>
+<div id="myReceiverBar" class="my-receiver-bar" style="display:none;"><div class="my-receiver-info"><div class="my-receiver-title">自分の受付</div><div id="myReceiverState" class="my-receiver-state">確認中...</div></div><button id="myReceiverToggle" class="btn-primary" style="width:auto;">受付を開始</button></div>
+<div id="cheeringIncoming" class="cheer-incoming" style="display:none;"></div>
 <div class="section-divider" style="margin-top:16px;">履歴</div>
 <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
 <button id="cheeringHistoryBtn" class="btn-secondary" style="width:auto;">通話履歴を見る</button>
@@ -359,10 +361,12 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <option value="active">受付中（待機）</option>
 <option value="inactive">受付を止める</option>
 </select>
-<label class="field-label" style="margin-top:8px;">プロフィール画像のファイル名（上級者向け・任意）</label>
-<input id="receiverPicInput" type="text" placeholder="例）images/xxxx.png" style="width:100%;box-sizing:border-box;">
-<label class="field-label" style="margin-top:8px;">プロフィール音声のファイル名（上級者向け・任意）</label>
-<input id="receiverVoiceInput" type="text" placeholder="例）voices/xxxx.m4a" style="width:100%;box-sizing:border-box;">
+<label class="field-label" style="margin-top:8px;">プロフィール画像</label>
+<input id="receiverPicInput" type="hidden">
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><button id="receiverPicPickBtn" type="button" class="btn-secondary" style="width:auto;">画像を選ぶ</button><span id="receiverPicName" class="card-sub">未設定</span></div>
+<label class="field-label" style="margin-top:8px;">プロフィール音声</label>
+<input id="receiverVoiceInput" type="hidden">
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><button id="receiverVoicePickBtn" type="button" class="btn-secondary" style="width:auto;">音声ファイルを選ぶ</button><span id="receiverVoiceName" class="card-sub">未設定</span></div>
 <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
 <button id="receiverProfileLoadBtn" class="btn-secondary" style="width:auto;">いまの内容を読み込む</button>
 <button id="receiverProfileSaveBtn" class="btn-primary" style="width:auto;">保存する</button>
@@ -441,8 +445,8 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <button type="button" id="profileBirthdayChangeBtn" class="btn-secondary" style="width:auto;padding:3px 10px;font-size:12px;">変更する</button>
 </div>
 <div id="profileBirthdayFieldWrap">
-<label class="field-label">誕生日(YYYYMMDD形式。例: 19900101。未設定の場合は初回のみ入力必須)</label>
-<input id="profileBirthdayInput" type="text" placeholder="例: 19900101">
+<label class="field-label">誕生日(カレンダーから選べます)</label>
+<input id="profileBirthdayInput" type="date" min="1900-01-01">
 </div>
 <button id="profileSaveBtn" class="btn-primary">プロフィールを保存</button>
 
@@ -468,28 +472,12 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <summary style="font-weight:700;"> 通話・履歴・録音</summary>
 <div class="koe-cat-body" style="padding-left:2px;">
 <details class="mypage-section" id="callLogSection">
-<summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 9h8M8 13h5" stroke-linecap="round"/><circle cx="17" cy="14" r="1.2" fill="currentColor" stroke="none"/></svg> 通話ログ(参加者・発言時間・記録)</summary>
+<summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 9h8M8 13h5" stroke-linecap="round"/><circle cx="17" cy="14" r="1.2" fill="currentColor" stroke="none"/></svg> 通話ログ・枠参加履歴</summary>
 <p class="page-desc" style="margin-top:6px;">参加したグループ通話の参加者・最多発言者・滞在時間・昇降格ログを記録します(この端末に保存)。</p>
 <div id="callLogList" class="card-list"></div>
-</details>
-<details class="mypage-section">
-<summary><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="12" width="4" height="8" rx="1"/><rect x="10" y="7" width="4" height="13" rx="1"/><rect x="16" y="4" width="4" height="16" rx="1"/></svg> 活動ダッシュボード</summary>
-<p class="page-desc">枠参加履歴を可視化した「草」です。色が濃いほどその日たくさん通話に参加しています。</p>
-<div class="heatmap-wrap">
-<div id="heatmapGrid" class="heatmap-grid"></div>
-</div>
-<div id="heatmapTotal" class="card-sub" style="text-align:center; margin-top:4px;"></div>
-<div id="heatmapStats" class="heatmap-stats"></div>
-</details>
-<details class="mypage-section" id="koeDiscoverSection">
-<summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg> ユーザーを探す</summary>
-<div class="talk-src-row" style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0;">
-<button type="button" class="theme-btn koe-disc-chip active" data-disc="hima" style="width:auto;">ひま</button>
-<button type="button" class="theme-btn koe-disc-chip" data-disc="recommended" style="width:auto;">おすすめ</button>
-<button type="button" class="theme-btn koe-disc-chip" data-disc="birthday" style="width:auto;">今日誕生日</button>
-<button type="button" class="theme-btn koe-disc-chip" data-disc="requests" style="width:auto;">フォロー申請</button>
-</div>
-<div id="koeDiscoverList" class="card-list"></div>
+<div class="settings-subhead"> 枠参加履歴</div>
+<button id="refreshHistoryBtn" class="btn-secondary">最新の状態に更新</button>
+<div id="historyList" class="card-list"></div>
 </details>
 <details class="mypage-section" id="koeEnqueteSection">
 <summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 5h6M5 8h14v12H5zM9 12h6M9 16h4"/></svg> 運営アンケート</summary>
@@ -555,11 +543,6 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <p class="page-desc">一度表示した投稿があとで削除されていた場合、表示したときの内容をこの端末に残します（投稿を開いたときに削除を判定）。</p>
 <div style="display:flex;gap:8px;margin:6px 0;"><button type="button" class="theme-btn" id="koeDeletedClearBtn" style="width:auto;opacity:.7;">記録を消す</button></div>
 <div id="koeDeletedPostsBox" class="card-list"></div>
-</details>
-<details class="mypage-section">
-<summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/></svg> 枠参加履歴</summary>
-<button id="refreshHistoryBtn" class="btn-secondary">最新の状態に更新</button>
-<div id="historyList" class="card-list"></div>
 </details>
 <details class="mypage-section" id="secRoomSettings">
 <summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg> 枠のデフォルト設定</summary>
@@ -706,17 +689,7 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 </div>
 </details>
 <h3 class="settings-group-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1" stroke-linecap="round"/></svg> クライアント設定(このアプリ)</h3>
-<details class="mypage-section">
-<summary><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="8" r="4"/><path d="M4 20a8 8 0 0 1 16 0 1 1 0 0 1-1 1H5a1 1 0 0 1-1-1Z"/></svg> アカウント切替</summary>
-<div id="accountsList" class="accounts-list" style="margin-top:8px;"></div>
-<button id="addAccountBtn" class="btn-secondary" style="margin-top:8px;">＋ 別のアカウントでログイン</button>
-<label class="field-label" style="margin-top:12px;">ログインが切れた時の動作</label>
-<select id="logoutActionSelect">
-<option value="select">保存アカウントから選び直す</option>
-<option value="login">ログイン画面へ進む</option>
-</select>
-<p class="page-desc" style="margin-top:6px;">他の端末でログインすると、この端末は自動ログアウトされます(乗っ取り対策)。切れた時の挙動を選べます。</p>
-</details>
+<div style="display:none;"><div id="accountsList" class="accounts-list"></div><button id="addAccountBtn" class="btn-secondary" type="button"></button></div>
 <details class="mypage-section">
 <summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a9 9 0 1 0 0 18c1 0 1.5-.8 1.5-1.5 0-1.3-1-1.5-1-2.5 0-.8.7-1.5 1.5-1.5H16a5 5 0 0 0 5-5c0-4.4-4-7-9-7Z"/><circle cx="7.5" cy="11" r="1"/><circle cx="12" cy="7.5" r="1"/><circle cx="16" cy="11" r="1"/></svg> テーマ・表示設定</summary>
 <div id="accentRow" class="accent-row" style="margin-top:10px;">
@@ -764,6 +737,9 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;"><button id="soundTestBtn" class="theme-btn" style="width:auto;">効果音をテスト</button><button id="soundTestAllBtn" class="theme-btn" style="width:auto;">全種類を鳴らす</button></div>
 <hr style="border:none;border-top:1px solid var(--border,#2a2d34);margin:12px 0;">
 <div class="settings-subhead"> 表示</div>
+<label class="field-label" style="margin-top:8px;">タイムライン: 一度に読み込むページ数</label>
+<select id="tlPagesSel"><option value="1">1ページ（標準）</option><option value="2">2ページ</option><option value="3">3ページ</option><option value="5">5ページ</option><option value="10">10ページ</option></select>
+<label class="field-label" style="margin-top:8px;">省電力モード(発熱・電池消費を抑える)</label><select id="ecoSel" onchange="koeSetEco(this.value)"><option value="auto">自動(電池20%以下で有効)</option><option value="on">常にON</option><option value="off">OFF</option></select>
 <label class="check-row"><input type="checkbox" id="animChk" checked> アニメーション</label>
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" id="relTimeChk" checked> 時刻を「◯分前」で表示</label>
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" id="newPostChk" checked> 新着投稿を自動チェック</label>
@@ -792,26 +768,11 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" id="bgNotifyChk"> アプリを閉じている間もAndroidの通知で知らせる</label>
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" id="autoDelRegChk"> 自分の投稿が規制対象になったら自動で削除して通知する</label>
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" id="voiceContinuousChk"> 音声投稿を連続再生する</label>
-<div class="settings-subhead"> 枠の防御（荒らし・なりすまし対策）</div>
-<p class="card-sub" style="margin:4px 0 8px;">判定はこの端末の中で行います。キック・リスナーに戻すは、自分が枠を開いた人のときだけ実行します。</p>
-<div class="guard-group">
-<div class="guard-group-title">見つけたときの動き</div>
-<div style="display:flex;gap:8px;align-items:center;margin:4px 0 0 24px;"><span class="card-sub" style="flex:1;">コメントで見つけたら</span><select data-guard="spamAction" style="width:auto;"><option value="none">そのまま</option><option value="listener">リスナーに戻す</option><option value="kick">キックする</option></select></div><div style="display:flex;gap:8px;align-items:center;margin:4px 0 0 24px;"><span class="card-sub" style="flex:1;">音が大きい人は</span><select data-guard="loudAction" style="width:auto;"><option value="none">そのまま</option><option value="listener">リスナーに戻す</option><option value="kick">キックする</option></select></div><label class="check-row" style="margin-top:8px;"><input type="checkbox" data-guard="escalate"> 繰り返す人は対処を強める（隠す→リスナー→キック）</label><p class="callv2-note" style="margin:4px 0 0 24px;">入れていると、1回目は自分の端末の中だけ（非表示・音量down）で様子を見ます。取り違えでいきなりキックしないための設定です。切ると1回目から上の対処を行います。</p><label class="check-row" style="margin-top:6px;"><input type="checkbox" data-guard="notifyChat"> 見つけたら枠のコメント欄に知らせる（自分の枠のみ）</label><label class="field-label" style="margin-top:10px;">他人の枠では（キックできないため）</label>
-<select data-guard="guestAction" style="width:100%;"><option value="volume">音量を下げる</option><option value="silence">声を受け取らない</option><option value="block">声を受け取らない＋ブロック</option></select>
-</div>
-<details class="guard-group">
-<summary class="guard-group-title">何を見つけるか</summary>
-<label class="check-row" style="margin-top:6px;"><input type="checkbox" data-guard="spamEnabled"> コメントの連投・繰り返し</label><div style="display:flex;gap:8px;align-items:center;margin:4px 0 0 24px;"><span class="card-sub" style="flex:1;">10秒に</span><select data-guard="spamMaxPer10s" style="width:auto;"><option value="4">4件</option><option value="6">6件</option><option value="8">8件</option><option value="12">12件</option></select></div><div style="display:flex;gap:8px;align-items:center;margin:4px 0 0 24px;"><span class="card-sub" style="flex:1;">同じ文を</span><select data-guard="spamSameText" style="width:auto;"><option value="2">2回</option><option value="3">3回</option><option value="4">4回</option><option value="6">6回</option></select></div><div style="display:flex;gap:8px;align-items:center;margin:4px 0 0 24px;"><span class="card-sub" style="flex:1;">長文とみなす</span><select data-guard="longComment" style="width:auto;"><option value="0">見ない</option><option value="200">200文字</option><option value="300">300文字</option><option value="500">500文字</option></select></div><label class="field-label" style="margin-top:8px;">NGワード（改行か読点で区切る）</label>
-<textarea data-guard="ngWords" rows="2" style="width:100%;box-sizing:border-box;" placeholder="例）宣伝URL、荒らし文句"></textarea>
-<label class="check-row" style="margin-top:8px;"><input type="checkbox" data-guard="loudEnabled"> 大きすぎる音</label><div style="display:flex;gap:8px;align-items:center;margin:4px 0 0 24px;"><span class="card-sub" style="flex:1;">感度</span><input type="range" data-guard="loudLevel" min="1" max="10" step="1" style="flex:2;"></div><div style="display:flex;gap:8px;align-items:center;margin:4px 0 0 24px;"><span class="card-sub" style="flex:1;">この秒数つづいたら</span><select data-guard="loudSeconds" style="width:auto;"><option value="1">1秒</option><option value="2">2秒</option><option value="4">4秒</option></select><select data-guard="loudVolume" style="width:auto;"><option value="0">0%</option><option value="10">10%</option><option value="20">20%</option><option value="40">40%</option></select><span class="card-sub">に</span></div><label class="check-row" style="margin-top:8px;"><input type="checkbox" data-guard="joinFlood"> 入り直しの繰り返し</label><div style="display:flex;gap:8px;align-items:center;margin:4px 0 0 24px;"><span class="card-sub" style="flex:1;">3分に</span><select data-guard="joinFloodCount" style="width:auto;"><option value="3">3回</option><option value="4">4回</option><option value="6">6回</option><option value="8">8回</option></select></div><label class="check-row" style="margin-top:6px;"><input type="checkbox" data-guard="handFlood"> 挙手の連打</label><div style="display:flex;gap:8px;align-items:center;margin:4px 0 0 24px;"><span class="card-sub" style="flex:1;">1分に</span><select data-guard="handFloodCount" style="width:auto;"><option value="3">3回</option><option value="4">4回</option><option value="6">6回</option><option value="8">8回</option></select></div></details>
-<details class="guard-group">
-<summary class="guard-group-title">なりすまし・乗っ取りを防ぐ</summary>
-<label class="check-row" style="margin-top:6px;"><input type="checkbox" data-guard="revertUnapproved"> 承認していない発言者は元に戻す（自分の枠）</label><label class="check-row" style="margin-top:6px;"><input type="checkbox" data-guard="protectRoomSettings"> 枠名・コメント欄を勝手に変えられたら戻す</label><label class="check-row" style="margin-top:6px;"><input type="checkbox" data-guard="strangerComment"> 枠に居ない人のコメントを弾く</label><label class="check-row" style="margin-top:6px;"><input type="checkbox" data-guard="fakeSelfComment"> 自分の名前を騙ったコメントを弾く</label><p class="card-sub" data-guard-ownernote style="margin:8px 0 0 24px;display:none;">キック・リスナーに戻すは、枠を開いた人だけが使えます。</p>
-<p class="card-sub" style="margin:8px 0 0 24px;">別の端末から自分でコメントすると、いちばん下の項目は誤検知します。枠を出ると判定はリセットされます。</p>
-</details>
-
+<div class="settings-subhead"> チャット</div>
+<label class="check-row"><input type="checkbox" id="koeNoReadChk"> 既読をつけない（相手のメッセージを開いても既読にしません）</label>
 <div class="settings-subhead"> 通話・発話</div>
-<label class="field-label" style="margin-top:10px;">ノイズ抑制（自分のマイク）</label>
+<label class="check-row"><input type="checkbox" class="koe-keep-screen-chk"> 通話中は画面を暗くしない（常に点灯）</label>
+<div style="display:none;"><!-- ノイズ抑制は廃止(非表示) --><label class="field-label" style="margin-top:10px;">ノイズ抑制（自分のマイク）</label>
 <p class="page-desc" style="margin:0 0 6px;white-space:normal;">まわりの音を消して、自分の声だけを相手に届けます。迷ったら「おまかせ」を選ぶだけで大丈夫です。</p>
 <div class="ns-presets" id="nsPresetsSettings"><button type="button" class="ns-preset" data-ns-preset="auto">おまかせ<small>ふだんはこれ</small></button><button type="button" class="ns-preset" data-ns-preset="quiet">静かな部屋<small>ひかえめに消す</small></button><button type="button" class="ns-preset" data-ns-preset="noisy">うるさい所<small>しっかり消す</small></button><button type="button" class="ns-preset" data-ns-preset="off">使わない<small>端末まかせ</small></button></div>
 <details class="ns-advanced"><summary>くわしく設定する</summary>
@@ -831,7 +792,7 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" id="nsGateChk"> 話していない間は完全に無音にする</label>
 <p class="page-desc" style="margin-top:4px;white-space:normal;">息づかいや衣ずれも消えます。声を出し始めるとすぐ戻ります。</p>
 </div>
-</details>
+</details></div>
 <button id="micTestBtn" class="theme-btn" style="margin-top:10px;">マイクを試す（聴き比べ）</button>
 <div id="micTestPanel" style="display:none;margin-top:10px;padding:10px;border:1px solid var(--border,#2a2d34);border-radius:10px;">
 <div id="micTestState" class="card-sub">止まっています</div>
@@ -859,6 +820,11 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <div id="speakSensLabel" class="card-sub" style="text-align:center;">標準</div>
 <label class="field-label" style="margin-top:10px;">発話インジケータの色</label>
 <input id="speakColorInput" type="color" value="#2AC1C7" style="width:100%;height:40px;border:1px solid var(--border,#2a2d34);border-radius:8px;background:transparent;cursor:pointer;">
+<label class="field-label" style="margin-top:10px;">発話インジケータの形</label>
+<select id="speakStyleSel" style="width:100%;">
+<option value="neon">ネオンがゆらぐ</option>
+<option value="dim">話していない人を暗くする</option>
+</select>
 <label class="field-label" style="margin-top:10px;">光る強さ</label>
 <select id="speakGlowSel" style="width:100%;">
 <option value="soft">弱め</option>
@@ -919,6 +885,7 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">
 <button id="banlistConsentBtn" class="btn-primary" style="width:auto;">自動ブロックの設定</button>
 <button id="banlistViewBtn" class="btn-secondary" style="width:auto;">BANリストを見る</button>
+<button id="banlistCleanBtn" class="btn-secondary" style="width:auto;" onclick="koeCleanGone(true)">削除済みアカウントを整理</button>
 <button id="banlistAppealBtn" class="btn-secondary" style="width:auto;">BANの異議申し立て</button>
 </div>
 <div id="banlistStatus" class="card-sub" style="margin-top:8px;opacity:.85;">共有BANリストと自動連携中</div>
@@ -946,7 +913,26 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 </div>
 </details>
 <details class="mypage-section">
+<summary><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="12" width="4" height="8" rx="1"/><rect x="10" y="7" width="4" height="13" rx="1"/><rect x="16" y="4" width="4" height="16" rx="1"/></svg> 活動ダッシュボード</summary>
+<p class="page-desc">枠参加履歴を可視化した「草」です。色が濃いほどその日たくさん通話に参加しています。</p>
+<div class="heatmap-wrap">
+<div id="heatmapGrid" class="heatmap-grid"></div>
+</div>
+<div id="heatmapTotal" class="card-sub" style="text-align:center; margin-top:4px;"></div>
+<div id="heatmapStats" class="heatmap-stats"></div>
+</details>
+<details class="mypage-section">
 <summary><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 2" stroke-linecap="round"/></svg> アカウント操作</summary>
+<label class="field-label" style="margin-top:12px;">ログインが切れた時の動作</label>
+<select id="logoutActionSelect">
+<option value="select">保存アカウントから選び直す</option>
+<option value="login">ログイン画面へ進む</option>
+</select>
+<p class="page-desc" style="margin-top:6px;">他の端末でログインすると、この端末は自動ログアウトされます(乗っ取り対策)。切れた時の挙動を選べます。</p>
+<div class="settings-subhead"> アカウント移行</div>
+<p class="page-desc">旧アカウントで書き出し→新アカウントで取り込むと、前のアカウントで友達だった人に友達申請、フォロー中だった人にフォローを自動で送ります。</p>
+<button class="btn-secondary" type="button" onclick="koeOpenMigrate()">フォロー・友達の移行を開く</button>
+
 <button id="koeResetStatusBtn" class="btn-secondary" style="width:auto;">ステータスをリセット</button>
 <button id="koeOpenAllTippings" class="btn-secondary" style="width:auto;margin-top:6px;">投げ銭をすべて開封</button>
 <label class="field-label" style="color:var(--danger,#f23f43);margin-top:12px;">危険な操作(取り消せません)</label>
@@ -1095,7 +1081,7 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 </div>
 <div id="cheeringRatingModal" class="modal" style="display:none;">
 <div class="modal-content small">
-<div class="modal-header"><span>通話の評価</span><button class="modal-close" onclick="window.__koeCloseCheerRating&&window.__koeCloseCheerRating()">✕</button></div>
+<div class="modal-header"><span>応援通話の評価</span><button class="modal-close" onclick="window.__koeCloseCheerRating&&window.__koeCloseCheerRating()">✕</button></div>
 <div class="modal-body">
 <p class="page-desc" id="cheeringRatingWho">相手との通話はどうでしたか?</p>
 <div id="cheeringRatingStars" class="cheer-stars" style="font-size:36px;text-align:center;margin:10px 0;letter-spacing:2px;"></div>
@@ -1103,7 +1089,7 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 </div>
 <div class="modal-footer">
 <button class="btn-secondary" onclick="window.__koeCloseCheerRating&&window.__koeCloseCheerRating()">スキップ</button>
-<button id="cheeringRatingSubmit" class="btn-primary">評価を送信</button>
+<button id="cheeringRatingSubmit" class="btn-primary">送信</button>
 </div>
 </div>
 </div>
@@ -1257,7 +1243,7 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <button id="userSearchModalClose" class="modal-close">✕</button>
 </div>
 <div style="padding:10px 12px 0;display:flex;gap:8px;">
-<input id="userSearchModalInput" type="text" placeholder="名前で検索" style="flex:1;">
+<input id="userSearchModalInput" type="text" placeholder="ID番号 または 通話記録の名前" style="flex:1;">
 <button id="userSearchModalBtn" class="btn-secondary" style="width:auto;">検索</button>
 </div>
 <div id="userSearchModalResults" class="card-list" style="padding:12px;overflow-y:auto;"></div>
@@ -1383,12 +1369,12 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <span class="callv2-globe"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm6.9 6h-2.6a12 12 0 0 0-1.3-3.3A8 8 0 0 1 18.9 8ZM12 4c.8 1 1.5 2.4 1.9 4h-3.8C10.5 6.4 11.2 5 12 4ZM4.3 14a8 8 0 0 1 0-4h3a17 17 0 0 0 0 4Zm.8 2h2.6a12 12 0 0 0 1.3 3.3A8 8 0 0 1 5.1 16Zm2.6-8H5.1a8 8 0 0 1 3.9-3.3A12 12 0 0 0 7.7 8ZM12 20c-.8-1-1.5-2.4-1.9-4h3.8c-.4 1.6-1.1 3-1.9 4Zm2.3-6H9.7a15 15 0 0 1 0-4h4.6a15 15 0 0 1 0 4Zm.7 5.3a12 12 0 0 0 1.3-3.3h2.6a8 8 0 0 1-3.9 3.3ZM16.7 14a17 17 0 0 0 0-4h3a8 8 0 0 1 0 4Z"/></svg></span>
 <div class="callv2-titles">
 <div class="callv2-title" id="callRoomName">通話</div>
-<div class="callv2-sub"><span id="callTimer">00:00</span> ・ <span id="callMemberCount">0</span>人<span id="callInCallLabel"> 通話中</span><span id="callRemain" class="callv2-remain" style="display:none;"></span><span id="callModBadge" class="callv2-modbadge" style="display:none;">🛡 モデレーター</span></div>
+<div class="callv2-sub"><span id="callTimer">0:00</span> ・ <span id="callMemberCount" style="cursor:pointer;text-decoration:underline dotted;" onclick="koeShowMemberBreakdown()">0</span>人<span id="callInCallLabel"> 通話中</span><span id="callRemain" class="callv2-remain" style="display:none;"></span></div>
 </div>
 </div>
 <div class="callv2-topbtns">
 <button id="callGuardToggle" class="callv2-icon" title="枠の防御（スパム・爆音）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.6-3 8.4-7 10-4-1.6-7-5.4-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg><span id="callGuardBadge" class="callv2-badge" style="display:none;">0</span></button>
-<button id="callNsToggle" class="callv2-icon" title="ノイズ抑制（マイク）"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><rect x="11" y="18" width="2" height="3.4" rx="1"/></svg></button>
+<button id="callNsToggle" class="callv2-icon" style="display:none !important;" title="ノイズ抑制（マイク）"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><rect x="11" y="18" width="2" height="3.4" rx="1"/></svg></button>
 <button id="callSettingsToggle" class="callv2-icon" title="設定"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1" stroke-linecap="round"/></svg></button>
 <button id="callMinimizeBtn" class="callv2-icon" title="最小化して枠に留まる"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
 <button id="callCloseBtn" class="callv2-icon" style="display:none;">✕</button>
@@ -1429,6 +1415,7 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 </div>
 <div id="callGuardPanel" class="callv2-panel" style="display:none;">
 <label class="field-label">枠の防御 — いま対処している人</label>
+<label class="check-row" style="margin-top:6px;"><input type="checkbox" data-guard="guardEnabled"> 枠の防御を使う（オフにすると判定・通知を全部止めます）</label>
 <div id="callGuardList"></div>
 <button id="callGuardCheck" class="btn-secondary" style="width:100%;margin-top:8px;">いま効いているか調べる</button>
 <pre id="callGuardCheckOut" class="callv2-note" style="display:none;white-space:pre-wrap;margin-top:6px;"></pre>
@@ -1441,6 +1428,7 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <summary class="guard-group-title">何を見つけるか</summary>
 <label class="check-row" style="margin-top:6px;"><input type="checkbox" data-guard="spamEnabled"> コメントの連投・繰り返し</label><div style="display:flex;gap:6px;align-items:center;margin:4px 0 0 24px;"><span class="callv2-note" style="flex:1;margin:0;">10秒に</span><select data-guard="spamMaxPer10s" style="width:auto;"><option value="4">4件</option><option value="6">6件</option><option value="8">8件</option><option value="12">12件</option></select></div><div style="display:flex;gap:6px;align-items:center;margin:4px 0 0 24px;"><span class="callv2-note" style="flex:1;margin:0;">同じ文を</span><select data-guard="spamSameText" style="width:auto;"><option value="2">2回</option><option value="3">3回</option><option value="4">4回</option><option value="6">6回</option></select></div><div style="display:flex;gap:6px;align-items:center;margin:4px 0 0 24px;"><span class="callv2-note" style="flex:1;margin:0;">長文とみなす</span><select data-guard="longComment" style="width:auto;"><option value="0">見ない</option><option value="200">200文字</option><option value="300">300文字</option><option value="500">500文字</option></select></div><label class="field-label" style="margin-top:8px;">NGワード（改行か読点で区切る）</label>
 <textarea data-guard="ngWords" rows="2" style="width:100%;box-sizing:border-box;" placeholder="例）宣伝URL、荒らし文句"></textarea>
+<label class="check-row" style="margin-top:8px;"><input type="checkbox" data-guard="newAcctEnabled"> 新規アカウント・フォロワー0の人はコメントを隠し、聞き専から始める</label><div style="display:flex;gap:6px;align-items:center;margin:4px 0 0 24px;"><span class="callv2-note" style="flex:1;margin:0;">新規とみなす期間</span><select data-guard="newAcctDays" style="width:auto;"><option value="1">1日以内</option><option value="3">3日以内</option><option value="7">7日以内</option><option value="14">14日以内</option></select></div>
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" data-guard="loudEnabled"> 大きすぎる音</label><div style="display:flex;gap:6px;align-items:center;margin:4px 0 0 24px;"><span class="callv2-note" style="flex:1;margin:0;">感度</span><input type="range" data-guard="loudLevel" min="1" max="10" step="1" style="flex:2;"></div><div style="display:flex;gap:6px;align-items:center;margin:4px 0 0 24px;"><span class="callv2-note" style="flex:1;margin:0;">この秒数つづいたら</span><select data-guard="loudSeconds" style="width:auto;"><option value="1">1秒</option><option value="2">2秒</option><option value="4">4秒</option></select><select data-guard="loudVolume" style="width:auto;"><option value="0">0%</option><option value="10">10%</option><option value="20">20%</option><option value="40">40%</option></select><span class="callv2-note" style="margin:0;">に</span></div><label class="check-row" style="margin-top:8px;"><input type="checkbox" data-guard="joinFlood"> 入り直しの繰り返し</label><div style="display:flex;gap:6px;align-items:center;margin:4px 0 0 24px;"><span class="callv2-note" style="flex:1;margin:0;">3分に</span><select data-guard="joinFloodCount" style="width:auto;"><option value="3">3回</option><option value="4">4回</option><option value="6">6回</option><option value="8">8回</option></select></div><label class="check-row" style="margin-top:6px;"><input type="checkbox" data-guard="handFlood"> 挙手の連打</label><div style="display:flex;gap:6px;align-items:center;margin:4px 0 0 24px;"><span class="callv2-note" style="flex:1;margin:0;">1分に</span><select data-guard="handFloodCount" style="width:auto;"><option value="3">3回</option><option value="4">4回</option><option value="6">6回</option><option value="8">8回</option></select></div></details>
 <details class="guard-group">
 <summary class="guard-group-title">なりすまし・乗っ取りを防ぐ</summary>
@@ -1517,10 +1505,11 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <button id="callCloseRoomBtn" class="btn-danger" style="display:none; margin-top:8px;">ルーム終了</button>
 <button id="callCommentToggleBtn" class="btn-secondary" style="margin-top:8px;">コメント欄 ON/OFF切替</button>
 </div>
-<div id="callAutoRow" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border,rgba(255,255,255,.08));"><label class="field-label">挙手の自動処理</label><label class="check-row"><input type="checkbox" id="callAutoRaiseChk"> 入ったら自動で挙手する</label><label class="check-row"><input type="checkbox" id="callAutoApproveChk"> オーナーの時、挙手を自動で許可する</label><label class="check-row"><input type="checkbox" id="callAutoRejectChk"> オーナーの時、挙手を自動で拒否する</label><p class="callv2-note">通話ページの設定と同じものです。ここで変えるとすぐ効きます。</p></div><div id="callModRow" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border,rgba(255,255,255,.08));display:none;"><label class="field-label">モデレーター（この枠だけ・枠主のみ）</label><p class="callv2-note" style="margin:0 0 6px;">参加者をタップして「モデレーターにする」で任命できます。任命した人は、あなたの代わりにキックや発言者の上げ下げを頼めます。</p><div id="callModList"></div><label class="check-row" style="margin-top:8px;"><input type="checkbox" id="callModAutoChk"> モデレーターのキックを確認なしで自動実行する</label><p class="callv2-note">オフのときは、モデレーターが操作するたびにあなたに確認が出ます（なりすまし依頼への保険）。信頼できる相手だけオンにしてください。</p></div><div id="callAskModRow" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border,rgba(255,255,255,.08));display:none;"><label class="field-label">モデレーター</label><button id="callAskModBtn" class="btn-secondary" style="width:100%;">枠主にモデレーターをお願いする</button><p class="callv2-note">枠主が承認すると、あなたも枠主の代わりにキックなどを頼めるようになります（枠主がKoeTomo+のときだけ）。</p></div><details class="call-collapse" style="margin-top:8px;"><summary>ログ</summary><div id="callLog" class="inspect-result" style="height:100px;"></div></details>
+<label class="check-row" style="margin-top:10px;"><input type="checkbox" class="koe-keep-screen-chk"> 通話中は画面を暗くしない</label>
+<label class="check-row" style="margin-top:6px;"><input type="checkbox" class="koe-appleft-chk"> アプリを離れた人を自動でコメント（枠主のみ）</label>
+<div id="callAutoRow" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border,rgba(255,255,255,.08));"><label class="field-label">挙手の自動処理</label><label class="check-row"><input type="checkbox" id="callAutoRaiseChk"> 入ったら自動で挙手する</label><label class="check-row"><input type="checkbox" id="callAutoApproveChk"> オーナーの時、挙手を自動で許可する</label><label class="check-row"><input type="checkbox" id="callAutoForceUpChk"> オーナーの時、聞いている人を自動で強制的にあげる</label><label class="check-row"><input type="checkbox" id="callAutoRejectChk"> オーナーの時、挙手を自動で拒否する</label><p class="callv2-note">通話ページの設定と同じものです。ここで変えるとすぐ効きます。</p></div><details class="call-collapse" style="margin-top:8px;"><summary>ログ</summary><div id="callLogTools" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:4px 0;"><button type="button" id="callLogCopyBtn" class="btn-secondary" style="width:auto;padding:3px 12px;font-size:12px;">ログをコピー</button><label class="check-row" style="margin:0;font-size:12px;"><input type="checkbox" class="koe-appleft-chk"> アプリを離れた人を自動コメント</label></div><div id="callLog" class="inspect-result" style="height:100px;"></div></details>
 </div>
 <div class="callv2-actions">
-<button id="callRaiseHandBtn" class="callv2-raise" style="display:none;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11V6a1.5 1.5 0 0 1 3 0v4m0 0V4.5a1.5 1.5 0 0 1 3 0V10m0 0V6a1.5 1.5 0 0 1 3 0v6m0-2a1.5 1.5 0 0 1 3 0v4a6 6 0 0 1-6 6h-1a6 6 0 0 1-5.4-3.4L4.5 13a1.6 1.6 0 0 1 2.8-1.5"/></svg><span>手を挙げる</span></button>
 <button id="callRemainBtn" class="callv2-action" title="残り時間をコメント欄に知らせる" style="display:none;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9 2h6"/></svg></button>
 <button id="callInviteBtn" class="callv2-action" title="枠に招待" style="display:none;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M16 19v-1a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v1"/><circle cx="9.5" cy="7" r="3.5"/><path d="M19 8v6M22 11h-6"/></svg></button>
 <button id="callChatToggle" class="callv2-action" title="枠にコメント"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8A2.5 2.5 0 0 1 17.5 16H9l-4 3.6a.8.8 0 0 1-1.3-.6V5.5Z"/></svg></button>
@@ -1537,7 +1526,6 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <script src="banlist-client.js"></script>
 <script src="sched.js"></script>
 <script src="roomguard.js"></script>
-<script src="koemod.js"></script>
 <script src="app.js"></script>
-</body>
+<script>try{document.getElementById("ecoSel").value=localStorage.getItem("koe_eco")||"auto"}catch(e){}</script></body>
 </html>
