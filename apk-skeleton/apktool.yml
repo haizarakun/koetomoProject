@@ -1,0 +1,24 @@
+version: 2.9.3
+apkFileName: KoeTomoPlus_v1.09.apk
+isFrameworkApk: false
+usesFramework:
+  ids:
+  - 1
+  tag: null
+sdkInfo:
+  minSdkVersion: 21
+  targetSdkVersion: 33
+packageInfo:
+  forcedPackageId: 127
+  renameManifestPackage: null
+versionInfo:
+  versionCode: '111'
+  versionName: '1.11'
+resourcesAreCompressed: false
+sharedLibrary: false
+sparseResources: false
+unknownFiles:
+  NOTICE.txt: 8
+doNotCompress:
+- resources.arsc
+- png
