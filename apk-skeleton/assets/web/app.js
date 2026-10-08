@@ -9831,14 +9831,10 @@ function koeProfileDetailHtml(p) {
   }
 }
 
-/* ===== 業者(量産)アカウント判定 =====
-   必須条件A: ①アイコン名が16文字の英数字ランダム ②フォロー/フォロワー/友達/いいねが全て0
-              ③自己紹介なし ④年齢確認なし  → 4つ揃わないと業者扱いしない
-   加点条件B: 名前が「単語+3桁数字」/既知botとID連番/同一feature/ランダムマッチON/直近1時間に5件以上投稿/直近ログイン
-   ここでの表示は目安。実際の申請時はネイティブ側がAPIから取り直して同じ規則で判定する(偽造不可)。
+/* ===== 業者アカウントの判定 =====
+   判定の中身はすべてネイティブ側にある。ここは結果を受け取って表示するだけ。
    ブロックは共有BANリストで管理者が承認したあとにだけ行う。 */
-/* 業者判定のルールはネイティブ側にある(app.js に置くと APK を展開しただけで
-   回避方法が読めてしまうため)。ここは直近の判定結果を保持するだけ。 */
+/* 直近の判定結果を保持するだけ。 */
 var __koeSpamVerdict = {};
 function koeSpamScore(u) {
   try {
@@ -9897,9 +9893,7 @@ function koeSpamEnabled() {
 }
 
 /* ===== 業者アカウントの自動申請 =====
-   一覧では情報が少ないので、ここでは「怪しい手掛かり」があるかだけ見て、あとはネイティブ側に渡す。
-   ネイティブ側が API から取り直して必須条件A＋加点Bで判定し、条件を満たしたときだけ共有BANリストへ申請する。
-   画面側の値は判定に使われないので、WebViewを書き換えても偽造できない。ブロックは一切しない。 */
+   判定と申請はネイティブ側が行う。ブロックは一切しない。 */
 var KOE_BL_URL = "https://redredfast.com";
 function koeBotAutoOn() {
   try {
@@ -9912,11 +9906,17 @@ function koeBotAutoOn() {
 function koeBotHint(u) {
   try {
     if (!u) return false;
-    /* ここは「ネイティブに見てもらう価値があるか」の粗い足切りだけ。本判定はネイティブ側。 */
-    var z = function (k) {
-      return u[k] !== undefined && u[k] !== null && Number(u[k]) === 0;
-    };
-    return z("follower_count") && z("followee_count");
+    var a = window.AndroidApi;
+    if (!a || !a.botHint) return false;
+    return !!a.botHint(
+      JSON.stringify({
+        name: u.name,
+        icon_url: u.icon_url,
+        profile_picture_file_path: u.profile_picture_file_path,
+        follower_count: u.follower_count,
+        followee_count: u.followee_count,
+      }),
+    );
   } catch (e) {
     return false;
   }
@@ -9992,31 +9992,24 @@ try {
   });
 } catch (e) {}
 /* ===== 画面に表示されない文字 =====
-   幅が 0 で見えない文字。文字列を突き合わせる前に取り除く。
-   絵文字の異体字セレクタ(U+FE0E / U+FE0F)は正当な使い方なので数えない。 */
+   幅が 0 で見えない文字。文字列を突き合わせる前に取り除く。 */
 var KOE_INVISIBLE = /[\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
 function koeStripInvisible(s) {
   return String(s == null ? "" : s).replace(KOE_INVISIBLE, "");
 }
-function koeCountInvisible(s) {
-  var m = String(s == null ? "" : s).match(KOE_INVISIBLE);
-  return m ? m.length : 0;
-}
-var KOE_INVISIBLE_MANY = 3,
-  KOE_INVISIBLE_SURE = 8;
 var __koeInvisHits = {};
 var KOE_INVISIBLE_REASON = "本文に見えない文字が多数混ざっている";
 function koeNoteInvisible(p) {
   try {
-    var n = koeCountInvisible(p && p.text);
-    if (n < KOE_INVISIBLE_MANY) return false;
+    var a = window.AndroidApi;
+    var lv = a && a.botInvisLevel ? a.botInvisLevel(String((p && p.text) || "")) : 0;
+    if (lv < 1) return false;
     var uid = String((p && (p.user_id || p.id)) || "");
     if (!uid || uid === "0") return false;
     if (typeof myUserId !== "undefined" && Number(uid) === Number(myUserId)) return false;
-    var rec = __koeInvisHits[uid] || (__koeInvisHits[uid] = { posts: [], max: 0 });
+    var rec = __koeInvisHits[uid] || (__koeInvisHits[uid] = { posts: [] });
     if (p.id != null && rec.posts.indexOf(p.id) < 0 && rec.posts.length < 10) rec.posts.push(p.id);
-    if (n > rec.max) rec.max = n;
-    if (n < KOE_INVISIBLE_SURE && rec.posts.length < 2) return false;
+    if (lv < 2 && rec.posts.length < 2) return false;
     // 画面側の判定は表示のきっかけにするだけで、申請の可否はネイティブ側が決める
     __koeSpamVerdict[uid] = { level: "high", hard: true, reasons: [KOE_INVISIBLE_REASON] };
     koeBotQueue(uid);
@@ -10058,19 +10051,6 @@ function koeIsListedBiz(uid) {
     return false;
   }
 }
-/* カード表示だけで使える軽い業者ヒント(名前＝単語+3桁数字、または自動生成アイコン名)。確定ではない。 */
-function koeBizNameHint(u) {
-  try {
-    if (!u) return false;
-    var nm = String(u.name || "");
-    if (/^[^\s]{1,20}[0-9]{3}$/.test(nm) && !/^[0-9]+$/.test(nm)) return true;
-    var ic = String(u.icon_url || u.profile_picture_file_path || "");
-    var fn = ic.split("?")[0].split("/").pop() || "";
-    return /^[A-Za-z0-9]{16}\.(png|jpe?g|webp)$/i.test(fn);
-  } catch (e) {
-    return false;
-  }
-}
 function koeSpamTag(u, compact) {
   try {
     if (!koeSpamEnabled()) return "";
@@ -10086,8 +10066,8 @@ function koeSpamTag(u, compact) {
       );
     }
     var r = koeSpamScore(u);
-    /* ② 名前・アイコンだけで分かる軽いヒント(カード表示用)。確定ではないので「業者?」 */
-    if (!r.level && (koeBotHint(u) || koeBizNameHint(u))) {
+    /* ② 軽いヒント(カード表示用)。確定ではないので「業者?」 */
+    if (!r.level && koeBotHint(u)) {
       r = { level: "mid", reasons: ["名前・アイコンの傾向"], score: 0 };
       try {
         if (uid) koeBotQueue(uid);

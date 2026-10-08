@@ -865,11 +865,11 @@ LINE/FacebookのSDKは公式アプリの署名に紐づくため、このアプ�
 <details class="mypage-section">
 <summary><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M4 3l16 16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg> フィルター</summary>
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" id="spamMarkChk" checked> 業者っぽいアカウントに「⚠ 業者?」マークを表示</label>
-<p class="page-desc" style="margin-top:4px;">判定は量産型アイコン名・「単語＋3桁数字」の名前・フォロー0などの特徴からの推定です。マークをタップすると理由が出て、業者垢だと確認できたら「BANリストに申請する」で共有BANリストに申請できます（承認制）。</p>
+<p class="page-desc" style="margin-top:4px;">判定はアカウントの特徴からの推定です。マークをタップすると理由が出て、業者垢だと確認できたら「BANリストに申請する」で共有BANリストに申請できます（承認制）。</p>
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" id="spamHideChk" checked> 業者と判定したアカウントの投稿・枠を表示しない</label>
 <p class="page-desc" style="margin-top:4px;white-space:normal;">共有BANリストに載っている相手と、判定「高」の相手の投稿・主催する枠を一覧から消します（プロフィールは ID から開けます）。</p>
 <label class="check-row" style="margin-top:8px;"><input type="checkbox" id="botAutoChk" checked> 業者アカウントを見つけたら自動でBANリストに申請</label>
-<p class="page-desc" style="margin-top:4px;white-space:normal;">量産型アイコン名・交流0・自己紹介なし・年齢確認なしといった特徴が重なり、さらに「単語＋3桁数字」の名前・既知botとのID連番・同一端末などの補強がある相手を、見つけ次第自動で申請します。判定と証拠はアプリが公式APIから取り直して作り、サーバー側でも同じ規則で再検証するので、申請内容の偽造はできません。<b>自動で申請するだけで、ブロックはしません</b>（ブロックは管理者が承認してから）。同じ相手は1回だけ、暴走防止のため 8秒間隔・1時間30件・1日150件までです。</p>
+<p class="page-desc" style="margin-top:4px;white-space:normal;">明らかな業者と判断した相手を、見つけ次第自動で申請します。判定と証拠はアプリが公式APIから取り直して作り、サーバー側でも同じ規則で再検証するので、申請内容の偽造はできません。<b>自動で申請するだけで、ブロックはしません</b>（ブロックは管理者が承認してから）。同じ相手は1回だけ、暴走防止のため 8秒間隔・1時間30件・1日150件までです。</p>
 <label class="field-label" style="margin-top:8px;">NGワード(1行に1つ。含む投稿を非表示)</label>
 <textarea id="ngWordsInput" rows="4" placeholder="例:&#10;宣伝&#10;スパム" style="width:100%;resize:vertical;"></textarea>
 <label class="field-label" style="margin-top:10px;">ミュート中のユーザー</label>
