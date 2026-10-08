@@ -1,6 +1,8 @@
 package com.akun.koetomo;
 
 import android.app.Activity;
+import android.app.PendingIntent;
+import android.content.Context;
 import android.content.Intent;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.Movie;
@@ -36,6 +38,16 @@ public class MainActivity extends Activity {
     /* access modifiers changed from: private */
     public TextView overlayLabel = null;
     public boolean pipWanted = false;
+    /* 通知・小窓のボタンから届く操作に付ける合言葉。他のアプリが同じ名前の通知を送って通話を切るのを防ぐ */
+    private static volatile String CALL_TOKEN = null;
+    static synchronized String callActionToken() {
+        if (CALL_TOKEN == null) CALL_TOKEN = java.util.UUID.randomUUID().toString();
+        return CALL_TOKEN;
+    }
+    public volatile boolean uiForeground = true; /* アプリが前面にある間は重ね表示を出さない */
+    public String overlayIconUrl = "";
+    public android.graphics.drawable.BitmapDrawable overlayIconBd = null;
+    public int micState = 0; /* 0=オン 1=ミュート 2=聞き専 */
     /* access modifiers changed from: private */
     public View speakerOverlayView = null;
     /* access modifiers changed from: private */
@@ -67,18 +79,29 @@ public class MainActivity extends Activity {
         }
     }
 
+    /* 画面に出ている重ね表示(この画面が作り直されても残っているものを含めて1つだけ) */
+    private static View sLiveOverlay = null;
+    private static WindowManager sLiveOverlayWm = null;
+
+    private static void removeOverlayView(View v) {
+        if (v == null) return;
+        try {
+            WindowManager wm = (sLiveOverlay == v && sLiveOverlayWm != null) ? sLiveOverlayWm : null;
+            if (wm != null) wm.removeViewImmediate(v);
+        } catch (Exception e) {
+        }
+        if (sLiveOverlay == v) { sLiveOverlay = null; sLiveOverlayWm = null; }
+    }
+
     public void hideSpeakerOverlay() {
         runOnUiThread(new Runnable() {
             public void run() {
-                try {
-                    if (MainActivity.this.speakerOverlayView != null) {
-                        ((WindowManager) MainActivity.this.getSystemService("window")).removeView(MainActivity.this.speakerOverlayView);
-                        View unused = MainActivity.this.speakerOverlayView = null;
-                        TextView unused2 = MainActivity.this.overlayAvatar = null;
-                        TextView unused3 = MainActivity.this.overlayLabel = null;
-                    }
-                } catch (Exception e) {
-                }
+                View v = MainActivity.this.speakerOverlayView;
+                // 取り外しに失敗しても参照は必ず空にする(残ると、次から「表示済み」と誤解して二度と出なくなる)
+                MainActivity.this.speakerOverlayView = null;
+                MainActivity.this.overlayAvatar = null;
+                MainActivity.this.overlayLabel = null;
+                removeOverlayView(v);
             }
         });
     }
@@ -308,6 +331,7 @@ public class MainActivity extends Activity {
 
     public void onCreate(Bundle bundle) {
         super.onCreate(bundle);
+        registerCallActionReceiver();
         if (!integrityOk()) {
             showTampered();
             return;
@@ -322,6 +346,14 @@ public class MainActivity extends Activity {
             }
             if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != 0) {
                 arrayList.add("android.permission.POST_NOTIFICATIONS");
+            }
+            // Bluetooth のヘッドセットで通話するために必要(Android 12 以降)
+            if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission("android.permission.BLUETOOTH_CONNECT") != 0) {
+                arrayList.add("android.permission.BLUETOOTH_CONNECT");
+            }
+            // Android 6〜9 は画像・音声の保存に保存領域の許可が要る(10 以降は不要)
+            if (Build.VERSION.SDK_INT <= 28 && checkSelfPermission("android.permission.WRITE_EXTERNAL_STORAGE") != 0) {
+                arrayList.add("android.permission.WRITE_EXTERNAL_STORAGE");
             }
             if (!arrayList.isEmpty()) {
                 requestPermissions((String[]) arrayList.toArray(new String[0]), 1);
@@ -352,7 +384,7 @@ public class MainActivity extends Activity {
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
-        settings.setAllowFileAccess(true);
+        settings.setAllowFileAccess(false);   // file:///android_asset の読み込みには影響しない
         // セキュリティ強化: ローカルHTMLから任意ファイル読み取り/ユニバーサル(クロスオリジン)アクセスを禁止し、
         // フォーム/パスワードの自動保存や位置情報も無効化する。
         try {
@@ -618,6 +650,7 @@ public class MainActivity extends Activity {
 
     /* access modifiers changed from: protected */
     public void onDestroy() {
+        try { if (callActionReceiver != null) { unregisterReceiver(callActionReceiver); callActionReceiver = null; } } catch (Throwable ig) {}
         try { stopBgNotifPoller(); } catch (Exception e) {}
         // アプリを閉じたときに、自分が開いたままの枠を閉じる（残ると次回の枠作成が拒否される）
         try {
@@ -626,11 +659,20 @@ public class MainActivity extends Activity {
             }
         } catch (Exception e) {}
         try {
-            if (this.speakerOverlayView != null) {
-                ((WindowManager) getSystemService("window")).removeView(this.speakerOverlayView);
-                this.speakerOverlayView = null;
-            }
+            View ov = this.speakerOverlayView;
+            this.speakerOverlayView = null;
+            removeOverlayView(ov);
+            removeOverlayView(sLiveOverlay);
         } catch (Exception e) {}
+        try {
+            // 通話を終える形で閉じるなら、通話中の常駐通知も残さない
+            if (isFinishing()) stopService(new Intent(this, CallForegroundService.class));
+        } catch (Exception e) {}
+        try {
+            // 通話中に閉じても、ロックや通話モードを残さない
+            if (isFinishing() && this.apiBridge != null && this.apiBridge.isCallAudioActive()) this.apiBridge.stopCallAudio();
+            if (isFinishing() && this.apiBridge != null) this.apiBridge.stopReceiverBeat();
+        } catch (Throwable ig) {}
         try {
             if (this.webView != null && isFinishing()) {
                 this.webView.loadUrl("about:blank");
@@ -641,8 +683,35 @@ public class MainActivity extends Activity {
     }
 
     /* access modifiers changed from: protected */
+    /* 通話中に本当に裏へ回ったとき、設定が「他のアプリの上に表示」なら丸いアイコンを出す。
+       設定は画面側(localStorage)にあるので、画面側へ聞いてから出す。 */
+    private void showOverlayIfWanted() {
+        try {
+            if (this.webView == null) return;
+            if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) return;
+            this.webView.evaluateJavascript(
+                "(function(){try{return (localStorage.getItem('koe_callmini')||'bubble')+'|'+String(window.__lastSpeakerName||'通話中').split('|~|').join('')+'|~|'+(window.__lastSpeakerIcon||'');}catch(e){return 'bubble|';}})()",
+                new android.webkit.ValueCallback<String>() {
+                    public void onReceiveValue(String v) {
+                        try {
+                            if (v == null) return;
+                            String t = new org.json.JSONArray("[" + v + "]").getString(0); // evaluateJavascript はJSON形式の文字列で返すので、正しく読み戻す
+                            if (!t.startsWith("overlay|")) return;
+                            String name = t.substring(8);
+                            showSpeakerOverlay(name.length() == 0 ? "通話中" : name);
+                            if (webView != null) webView.evaluateJavascript("window.__overlayActive=true", null);
+                        } catch (Throwable ig) {
+                        }
+                    }
+                });
+        } catch (Throwable ig) {
+        }
+    }
+
     public void onResume() {
         super.onResume();
+        uiForeground = true;
+        try { hideSpeakerOverlay(); } catch (Throwable ig) {} /* アプリを開いている間は重ね表示を出さない */
         stopBgNotifPoller();
         try { KoeNotifyService.stop(getApplicationContext()); } catch (Exception ig) {}
         if (this.webView != null) {
@@ -669,7 +738,7 @@ public class MainActivity extends Activity {
                     int n = 0;
                     int idle = 0; // 新着なしが続くほど間隔を広げる(バックグラウンド発熱・電池対策)
                     while (bgNotifRunning) {
-                        long wait = n == 0 ? 6000 : (idle < 3 ? 20000 : (idle < 10 ? 45000 : 90000));
+                        long wait = n == 0 ? 6000 : (idle < 3 ? 20000 : (idle < 10 ? 45000 : (idle < 30 ? 90000 : 300000)));
                         try {
                             Thread.sleep(wait);
                         } catch (InterruptedException e) {
@@ -690,7 +759,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void stopBgNotifPoller() {
+    void stopBgNotifPoller() {
         bgNotifRunning = false;
         try {
             if (bgNotifThread != null) bgNotifThread.interrupt();
@@ -728,14 +797,18 @@ public class MainActivity extends Activity {
             if (bridge == null || bridge.session == null || !bridge.session.hasAuthToken()) return false; // 未ログイン時は取得しない
             // まず未読数(軽い 1 リクエスト)だけ見る。前回から増えていなければ一覧(重い: 通知+ユーザー名解決)は取らない。
             android.content.SharedPreferences spc = getSharedPreferences("koe_bgnotif", 0);
+            int pendingCnt = -1;   // 一覧の取得に成功してから記録する(失敗した回の新着を取りこぼさないため)
             try {
                 String cres = bridge.session.dispatch("get_unread_notif_count", new org.json.JSONArray());
                 org.json.JSONObject co = cres == null ? null : new org.json.JSONObject(cres);
                 if (co != null && co.optBoolean("ok")) {
                     int cnt = co.optInt("count", -1);
                     int prev = spc.getInt("last_cnt", -1);
-                    spc.edit().putInt("last_cnt", cnt).apply();
-                    if (cnt >= 0 && prev >= 0 && cnt <= prev) return false;
+                    if (cnt >= 0 && prev >= 0 && cnt <= prev) {
+                        spc.edit().putInt("last_cnt", cnt).apply();
+                        return false;
+                    }
+                    pendingCnt = cnt;
                 }
             } catch (Throwable t) {
             }
@@ -745,6 +818,7 @@ public class MainActivity extends Activity {
             if (!o.optBoolean("ok")) return false;
             org.json.JSONArray arr = o.optJSONArray("notifications");
             if (arr == null) return false;
+            if (pendingCnt >= 0) spc.edit().putInt("last_cnt", pendingCnt).apply();
             android.content.SharedPreferences sp = getSharedPreferences("koe_bgnotif", 0);
             long last = sp.getLong("last_ts", -1);
             long newest = 0;
@@ -779,6 +853,7 @@ public class MainActivity extends Activity {
                 bridge.showKoetomoNotification("声とも+", "ほか " + (fresh.size() - shown) + " 件の新しい通知");
             }
         } catch (Exception e) {
+            return false;   // 通信できなかった回は「変化なし」と同じ扱いにせず、間隔を戻さない
         }
         return true;
     }
@@ -790,18 +865,53 @@ public class MainActivity extends Activity {
             this.webView.onPause();
             this.webView.pauseTimers();
         }
-        // 通知の裏側ポーリングは 1 系統だけ動かす(以前は Activity 内スレッドと常駐サービスの両方が回り、
-        // 同じ通知一覧を 2 重に取っていた)。通話中は常駐サービスを起こさず Activity 側で軽く見る。
-        if (this.inCall) {
-            startBgNotifPoller();
-        } else {
-            try { KoeNotifyService.start(getApplicationContext()); } catch (Exception ig) {}
-        }
         // 画面を離れたタイミングで一時ファイル(画像キャッシュ)が上限を超えていたら古い順に捨てる
         try {
             final android.content.Context c = getApplicationContext();
             new Thread(new Runnable() { public void run() { KoeApiBridge.trimCache(c, KoeApiBridge.CACHE_LIMIT_BYTES); } }).start();
         } catch (Exception e) {}
+    }
+
+    /* 裏側の通知ポーリングは「本当に裏に回った」onStop で起こす。
+       onPause は画面内画面(PiP)への切り替え・ダイアログ・権限確認でも呼ばれるため、
+       そこで起こすと、PiP に入った瞬間に常駐通知が出入りしたり二重にポーリングしていた。 */
+    protected void onStop() {
+        super.onStop();
+        uiForeground = false;
+        // 通知の裏側ポーリングは 1 系統だけ動かす。通話中は常駐サービスを起こさず Activity 側で軽く見る。
+        if (this.inCall) {
+            startBgNotifPoller();
+            showOverlayIfWanted();
+        } else {
+            try { KoeNotifyService.start(getApplicationContext()); } catch (Exception ig) {}
+        }
+    }
+
+    /* 画面内画面(PiP)に入った/出たことを画面側(JS)へ知らせる。
+       画面側はこれを受けて、PiP の小窓では通話画面だけを大きく見せ、戻ったら元の表示にする。
+       (API24以降で呼ばれる。API23のandroid.jarにはsuperのメソッドが無いので super は呼ばない) */
+    public void onPictureInPictureModeChanged(boolean isInPip, android.content.res.Configuration newConfig) {
+        final boolean inPip = isInPip;
+        try {
+            if (this.webView != null) {
+                this.webView.post(new Runnable() {
+                    public void run() {
+                        try {
+                            if (webView != null) {
+                                // PiP 中も通話の画面更新・音声処理を止めない
+                                if (inPip) {
+                                    webView.onResume();
+                                    webView.resumeTimers();
+                                }
+                                webView.evaluateJavascript("window.koeOnPip&&window.koeOnPip(" + inPip + ")", null);
+                            }
+                        } catch (Exception ig) {
+                        }
+                    }
+                });
+            }
+        } catch (Exception ig) {
+        }
     }
 
     public void onTrimMemory(int level) {
@@ -901,15 +1011,131 @@ public class MainActivity extends Activity {
         }
     }
 
-    public void showSpeakerOverlay(final String str) {
+    private String overlayFailedUrl = "";
+    private long overlayFailedAt = 0;
+
+    /* 「名前|~|アイコンURL」を分けて、名前だけ返す。アイコンは別スレッドで読み込んで丸く表示する。
+       読み込むのは公式の画像配信元(https)だけ。大きすぎる画像は読まない。 */
+    private String splitOverlayPayload(String payload) {
+        String name = payload == null ? "" : payload;
+        String icon = "";
+        int k = name.indexOf("|~|");
+        if (k >= 0) {
+            icon = name.substring(k + 3);
+            name = name.substring(0, k);
+        }
+        final String url = icon;
+        boolean allowed = url.length() > 0 && ImageThumbCache.isAllowedHostPublic(url);
+        boolean recentlyFailed = url.equals(overlayFailedUrl) && System.currentTimeMillis() - overlayFailedAt < 60000;
+        if (allowed && !recentlyFailed && !uiForeground && !url.equals(overlayIconUrl)) {
+            overlayIconUrl = url;
+            overlayIconBd = null;
+            new Thread(new Runnable() {
+                public void run() {
+                    java.net.HttpURLConnection c = null;
+                    java.io.InputStream in = null;
+                    android.graphics.Bitmap src = null;
+                    try {
+                        c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+                        c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android) KoeTomoPlus");
+                        c.setConnectTimeout(6000);
+                        c.setInstanceFollowRedirects(false);
+                        c.setReadTimeout(8000);
+                        in = c.getInputStream();
+                        // 最大 4MB まで読む
+                        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+                        byte[] buf = new byte[8192];
+                        int n, total = 0;
+                        while ((n = in.read(buf)) > 0) {
+                            total += n;
+                            if (total > 4 * 1024 * 1024) throw new Exception("画像が大きすぎます");
+                            bos.write(buf, 0, n);
+                        }
+                        byte[] data = bos.toByteArray();
+                        android.graphics.BitmapFactory.Options bo = new android.graphics.BitmapFactory.Options();
+                        bo.inJustDecodeBounds = true;
+                        android.graphics.BitmapFactory.decodeByteArray(data, 0, data.length, bo);
+                        int sample = 1;
+                        while (bo.outWidth / sample > 512 && bo.outHeight / sample > 512) sample *= 2;
+                        bo.inJustDecodeBounds = false;
+                        bo.inSampleSize = sample;
+                        src = android.graphics.BitmapFactory.decodeByteArray(data, 0, data.length, bo);
+                        if (src == null) throw new Exception("画像をデコードできません");
+                        final int size = (int) (60 * getResources().getDisplayMetrics().density);
+                        android.graphics.Bitmap out = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888);
+                        android.graphics.Canvas cv = new android.graphics.Canvas(out);
+                        android.graphics.Paint pt = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+                        cv.drawCircle(size / 2f, size / 2f, size / 2f, pt);
+                        pt.setXfermode(new android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.SRC_IN));
+                        int side = Math.min(src.getWidth(), src.getHeight());
+                        android.graphics.Rect from = new android.graphics.Rect((src.getWidth() - side) / 2, (src.getHeight() - side) / 2, (src.getWidth() + side) / 2, (src.getHeight() + side) / 2);
+                        cv.drawBitmap(src, from, new android.graphics.Rect(0, 0, size, size), pt);
+                        final android.graphics.drawable.BitmapDrawable bd = new android.graphics.drawable.BitmapDrawable(getResources(), out);
+                        runOnUiThread(new Runnable() {
+                            public void run() {
+                                // 読み込み中に別の人へ替わっていたら捨てる
+                                if (!url.equals(overlayIconUrl)) return;
+                                overlayIconBd = bd;
+                                if (overlayAvatar != null) {
+                                    overlayAvatar.setText("");
+                                    overlayAvatar.setBackground(bd);
+                                }
+                            }
+                        });
+                    } catch (Throwable ig) {
+                        overlayFailedUrl = url;
+                        overlayFailedAt = System.currentTimeMillis();
+                        if (url.equals(overlayIconUrl)) overlayIconUrl = "";
+                        final String why = (ig.getClass().getSimpleName() + " " + String.valueOf(ig.getMessage())).replace("'", " ").replace("\\", " ");
+                        final String host = (url.length() > 40 ? url.substring(0, 40) : url).replace("'", "").replace("\\", "");
+                        runOnUiThread(new Runnable() {
+                            public void run() {
+                                try { if (webView != null) webView.evaluateJavascript("window.koeOverlayIconFail&&window.koeOverlayIconFail('" + why + " / " + host + "')", null); } catch (Throwable x) {}
+                            }
+                        });
+                    } finally {
+                        try { if (in != null) in.close(); } catch (Throwable x) {}
+                        try { if (c != null) c.disconnect(); } catch (Throwable x) {}
+                        if (src != null) src.recycle();
+                    }
+                }
+            }).start();
+        } else if (url.length() == 0) {
+            overlayIconUrl = "";
+            overlayIconBd = null;
+            final String nm = name;
+            runOnUiThread(new Runnable() {
+                public void run() {
+                    try {
+                        if (overlayAvatar != null) {
+                            // アイコンが無い人は、丸い色地に頭文字へ戻す(前の人の画像を残さない)
+                            android.graphics.drawable.GradientDrawable gd = new android.graphics.drawable.GradientDrawable();
+                            gd.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+                            gd.setColor(-13975097);
+                            gd.setStroke((int) (3.0f * getResources().getDisplayMetrics().density), -1);
+                            overlayAvatar.setBackground(gd);
+                            overlayAvatar.setText(ovInitial(nm));
+                        }
+                    } catch (Throwable ig) {
+                    }
+                }
+            });
+        }
+        return name;
+    }
+
+    public void showSpeakerOverlay(final String payload) {
+        if (uiForeground) return; /* アプリを開いている間は出さない(裏に回ったときに出る) */
+        final String str = splitOverlayPayload(payload);
         runOnUiThread(new Runnable() {
             public void run() {
                 try {
+                    if (uiForeground) return; // 待っている間にアプリが前面に戻ったら出さない
                     if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(MainActivity.this)) {
                         return;
                     }
                     if (MainActivity.this.speakerOverlayView != null) {
-                        if (MainActivity.this.overlayAvatar != null) {
+                        if (MainActivity.this.overlayAvatar != null && MainActivity.this.overlayIconUrl.length() == 0) {
                             MainActivity.this.overlayAvatar.setText(MainActivity.this.ovInitial(str));
                         }
                         if (MainActivity.this.overlayLabel != null) {
@@ -990,9 +1216,21 @@ public class MainActivity extends Activity {
                             }
                         }
                     });
-                    View unused3 = MainActivity.this.speakerOverlayView = linearLayout;
+                    removeOverlayView(sLiveOverlay);   // 古いものが残っていたら先に外す(二重表示の防止)
                     windowManager.addView(linearLayout, layoutParams2);
+                    // 追加に成功してから「表示済み」にする(失敗した時に表示済み扱いで残らないように)
+                    MainActivity.this.speakerOverlayView = linearLayout;
+                    sLiveOverlay = linearLayout;
+                    sLiveOverlayWm = windowManager;
+                    // 画像が先に読み込み終わっていた場合は、作った直後に反映する
+                    if (MainActivity.this.overlayIconBd != null && MainActivity.this.overlayIconUrl.length() > 0 && MainActivity.this.overlayAvatar != null) {
+                        MainActivity.this.overlayAvatar.setText("");
+                        MainActivity.this.overlayAvatar.setBackground(MainActivity.this.overlayIconBd);
+                    }
                 } catch (Exception e) {
+                    MainActivity.this.speakerOverlayView = null;
+                    MainActivity.this.overlayAvatar = null;
+                    MainActivity.this.overlayLabel = null;
                 }
             }
         });
@@ -1002,29 +1240,105 @@ public class MainActivity extends Activity {
      * API26+ (PictureInPictureParams) はこのビルド環境のandroid.jarがAPI23までしか無いため
      * リフレクション経由で呼び出す(端末が実際にAPI26+ならフレームワークに実クラスが存在する)。
      */
+    /* 小窓(PiP)の下に出す操作ボタン(ミュート/退出)つきの設定を作る */
+    private Object buildPipParams() throws Exception {
+        Class<?> paramsCls = Class.forName("android.app.PictureInPictureParams");
+        Class<?> builderCls = Class.forName("android.app.PictureInPictureParams$Builder");
+        Object builder = builderCls.getConstructor(new Class[0]).newInstance(new Object[0]);
+        try {
+            builderCls.getMethod("setAspectRatio", Rational.class).invoke(builder, new Rational(1, 1));
+        } catch (Exception e) {
+        }
+        try {
+            java.util.ArrayList<Object> actions = new java.util.ArrayList<Object>();
+            if (micState != 2) actions.add(pipAction(1, micState == 1 ? "ミュート解除" : "ミュート", "CALL_MUTE", 1));
+            actions.add(pipAction(2, "退出", "CALL_LEAVE", 2));
+            builderCls.getMethod("setActions", java.util.List.class).invoke(builder, actions);
+        } catch (Throwable e) {
+        }
+        return builderCls.getMethod("build", new Class[0]).invoke(builder, new Object[0]);
+    }
+
+    private Object pipAction(int req, String title, String act, int kind) throws Exception {
+        Intent in = new Intent("com.akun.koetomo." + act);
+        in.setPackage(getPackageName());
+        in.putExtra("t", callActionToken());
+        PendingIntent pi = PendingIntent.getBroadcast(this, 10 + req, in, Build.VERSION.SDK_INT >= 23 ? 67108864 | 134217728 : 0);
+        int res = kind == 1 ? (micState == 1 ? android.R.drawable.ic_lock_silent_mode : android.R.drawable.ic_btn_speak_now) : android.R.drawable.ic_menu_close_clear_cancel;
+        Class<?> iconCls = Class.forName("android.graphics.drawable.Icon");
+        Object icon = iconCls.getMethod("createWithResource", Context.class, int.class).invoke(null, this, res);
+        Class<?> raCls = Class.forName("android.app.RemoteAction");
+        return raCls.getConstructor(iconCls, CharSequence.class, CharSequence.class, PendingIntent.class).newInstance(icon, title, title, pi);
+    }
+
     public void tryEnterPip() {
         try {
             if (Build.VERSION.SDK_INT >= 26) {
+                Object params = buildPipParams();
                 Class<?> paramsCls = Class.forName("android.app.PictureInPictureParams");
-                Class<?> builderCls = Class.forName("android.app.PictureInPictureParams$Builder");
-                Object builder = builderCls.getConstructor(new Class[0]).newInstance(new Object[0]);
-                try {
-                    builderCls.getMethod("setAspectRatio", Rational.class).invoke(builder, new Rational(2, 3));
-                } catch (Exception e) {
-                }
-                Object params = builderCls.getMethod("build", new Class[0]).invoke(builder, new Object[0]);
                 Activity.class.getMethod("enterPictureInPictureMode", paramsCls).invoke(this, params);
             }
         } catch (Exception e2) {
         }
     }
 
-    public void updateSpeakerOverlay(final String str) {
+    /* マイクの状態が変わったら、通知と小窓のボタンを書き換える */
+    public void onMicStateChanged(final int st) {
+        this.micState = st;
+        runOnUiThread(new Runnable() {
+            public void run() {
+                try { CallForegroundService.refresh(MainActivity.this, st); } catch (Throwable ig) {}
+                try {
+                    if (Build.VERSION.SDK_INT >= 26 && (Boolean) Activity.class.getMethod("isInPictureInPictureMode").invoke(MainActivity.this)) {
+                        Object params = buildPipParams();
+                        Class<?> paramsCls = Class.forName("android.app.PictureInPictureParams");
+                        Activity.class.getMethod("setPictureInPictureParams", paramsCls).invoke(MainActivity.this, params);
+                    }
+                } catch (Throwable ig) {}
+            }
+        });
+    }
+
+    /* 通知・小窓のボタンから届く操作 */
+    private android.content.BroadcastReceiver callActionReceiver = null;
+    private void registerCallActionReceiver() {
+        try {
+            if (callActionReceiver != null) return;
+            callActionReceiver = new android.content.BroadcastReceiver() {
+                public void onReceive(Context c, Intent i) {
+                    try {
+                        String a = i.getAction();
+                        if (webView == null || a == null) return;
+                        if (!callActionToken().equals(i.getStringExtra("t"))) return; // 合言葉が合わない送信元は無視
+                        if (a.endsWith("CALL_MUTE")) webView.evaluateJavascript("window.koeNativeMute&&window.koeNativeMute()", null);
+                        else if (a.endsWith("CALL_LEAVE")) webView.evaluateJavascript("window.koeNativeLeave&&window.koeNativeLeave()", null);
+                    } catch (Throwable ig) {
+                    }
+                }
+            };
+            android.content.IntentFilter f = new android.content.IntentFilter();
+            f.addAction("com.akun.koetomo.CALL_MUTE");
+            f.addAction("com.akun.koetomo.CALL_LEAVE");
+            if (Build.VERSION.SDK_INT >= 33) {
+                // RECEIVER_NOT_EXPORTED = 4
+                Context.class.getMethod("registerReceiver", android.content.BroadcastReceiver.class, android.content.IntentFilter.class, int.class).invoke(this, callActionReceiver, f, 4);
+            } else {
+                registerReceiver(callActionReceiver, f);
+            }
+        } catch (Throwable ig) {
+            callActionReceiver = null;
+        }
+    }
+
+    public void updateSpeakerOverlay(final String payload) {
+        final String str = splitOverlayPayload(payload);
         runOnUiThread(new Runnable() {
             public void run() {
                 try {
                     if (MainActivity.this.overlayAvatar != null) {
-                        MainActivity.this.overlayAvatar.setText(MainActivity.this.ovInitial(str));
+                        if (MainActivity.this.overlayIconUrl.length() == 0) {
+                            MainActivity.this.overlayAvatar.setText(MainActivity.this.ovInitial(str));
+                        }
                     }
                     if (MainActivity.this.overlayLabel != null) {
                         MainActivity.this.overlayLabel.setText(str);

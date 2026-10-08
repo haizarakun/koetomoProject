@@ -27,12 +27,20 @@ final class SecureStore {
 
     static boolean supported() { return Build.VERSION.SDK_INT >= 23; }
 
-    private synchronized SecretKey key() throws Exception {
+    private static final Object KEY_LOCK = new Object();
+    private static volatile SecretKey cachedKey = null;   // Keystore への問い合わせは重いので、鍵ハンドルを使い回す
+
+    private SecretKey key() throws Exception {
+        SecretKey hit = cachedKey;
+        if (hit != null) return hit;
+        synchronized (KEY_LOCK) {
+        if (cachedKey != null) return cachedKey;
         KeyStore ks = KeyStore.getInstance(KS);
         ks.load(null);
         KeyStore.Entry e = ks.getEntry(ALIAS, null);
         if (e instanceof KeyStore.SecretKeyEntry) {
-            return ((KeyStore.SecretKeyEntry) e).getSecretKey();
+            cachedKey = ((KeyStore.SecretKeyEntry) e).getSecretKey();
+            return cachedKey;
         }
         // android.security.keystore.KeyGenParameterSpec は API 23 の android.jar に含まれる
         android.security.keystore.KeyGenParameterSpec spec = new android.security.keystore.KeyGenParameterSpec.Builder(
@@ -44,7 +52,9 @@ final class SecureStore {
                 .build();
         KeyGenerator kg = KeyGenerator.getInstance("AES", KS);
         kg.init(spec);
-        return kg.generateKey();
+        cachedKey = kg.generateKey();
+        return cachedKey;
+        }
     }
 
     /** 平文 → "enc1:" + base64(iv(12) || ciphertext+tag) */

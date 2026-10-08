@@ -29,6 +29,7 @@ public class KoeNotifyService extends Service {
     static final String PREF = "koe_bgnotif";
 
     private static volatile boolean running = false;
+    private static volatile int workerGen = 0;   // 開始のたびに進める。古いワーカーが残っても自分で抜ける
     private Thread worker = null;
 
     public IBinder onBind(Intent intent) {
@@ -70,6 +71,10 @@ public class KoeNotifyService extends Service {
     }
 
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent == null && !enabled(this)) {   // OSに再起動された時、通知オフの設定を無視しない
+            stopSelf();
+            return 2;
+        }
         try {
             startForeground(NOTI_ID, buildOngoing());
         } catch (Exception e) {
@@ -79,6 +84,7 @@ public class KoeNotifyService extends Service {
         }
         if (!running) {
             running = true;
+            final int myGen = ++workerGen;
             // 前面で既読にした分が残らないよう、開始時に未読数の基準はリセット(初回の確認で取り直す)
             try { getSharedPreferences(PREF, 0).edit().remove("last_cnt").apply(); } catch (Exception ig) {}
             worker = new Thread(new Runnable() {
@@ -92,15 +98,19 @@ public class KoeNotifyService extends Service {
                     }
                     int n = 0;
                     int idle = 0; // 新着が無かった連続回数(多いほど間隔を広げて電池と通信を節約)
-                    while (running) {
-                        long wait = n == 0 ? 5000 : (idle < 6 ? 30000 : (idle < 20 ? 60000 : 120000));
+                    while (running && myGen == workerGen) {
+                        long wait = n == 0 ? 5000 : (idle < 6 ? 30000 : (idle < 20 ? 60000 : (idle < 60 ? 120000 : 300000)));
                         try {
                             Thread.sleep(wait);
                         } catch (InterruptedException e) {
                             return;
                         }
-                        if (!running) return;
+                        if (!running || myGen != workerGen) return;
                         n++;
+                        // 未ログインなら常駐する意味が無いので止める(通知欄の「確認中」表示を残さない)
+                        try {
+                            if (!session.hasAuthToken()) { stopSelf(); return; }
+                        } catch (Throwable ig) {}
                         try {
                             if (pollOnce(app, session)) idle = 0; else idle++;
                         } catch (Throwable t) {
@@ -166,6 +176,7 @@ public class KoeNotifyService extends Service {
         try {
             if (session == null || !session.hasAuthToken()) return false;
             SharedPreferences sp0 = c.getSharedPreferences(PREF, 0);
+            int pendingCnt = -1;   // 一覧の取得に成功してから記録する(失敗した回の新着を取りこぼさないため)
             try {
                 String cr = session.dispatch("get_unread_notif_count", new org.json.JSONArray());
                 if (cr != null) {
@@ -173,9 +184,12 @@ public class KoeNotifyService extends Service {
                     int cnt = co.optInt("count", co.optInt("unread_count", -1));
                     if (co.optBoolean("ok", true) && cnt >= 0) {
                         int lastCnt = sp0.getInt("last_cnt", -1);
-                        sp0.edit().putInt("last_cnt", cnt).apply();
                         // 未読数が増えていない = 新着なし。一覧(重い: ユーザー名解決つき)は取らない
-                        if (lastCnt >= 0 && cnt <= lastCnt) return false;
+                        if (lastCnt >= 0 && cnt <= lastCnt) {
+                            sp0.edit().putInt("last_cnt", cnt).apply();
+                            return false;
+                        }
+                        pendingCnt = cnt;
                     }
                 }
             } catch (Exception ig) {
@@ -186,6 +200,7 @@ public class KoeNotifyService extends Service {
             if (!o.optBoolean("ok")) return false;
             org.json.JSONArray arr = o.optJSONArray("notifications");
             if (arr == null) return false;
+            if (pendingCnt >= 0) sp0.edit().putInt("last_cnt", pendingCnt).apply();
             SharedPreferences sp = c.getSharedPreferences(PREF, 0);
             long last = sp.getLong("last_ts", -1);
             long newest = 0;

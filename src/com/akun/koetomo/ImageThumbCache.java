@@ -60,6 +60,11 @@ public final class ImageThumbCache {
         return url != null && url.startsWith("https://") && url.contains(QUERY_KEY + "=") && isAllowedHost(url);
     }
 
+    /** 画像の読み込み・保存に使ってよいホストか(https のみ、公式の画像配信元に限る) */
+    public static boolean isAllowedHostPublic(String url) {
+        return url != null && url.toLowerCase(java.util.Locale.ROOT).startsWith("https://") && isAllowedHost(url);
+    }
+
     private static boolean isAllowedHost(String url) {
         try {
             String host = new URL(url).getHost();
@@ -217,14 +222,19 @@ public final class ImageThumbCache {
     }
 
     private static void writeFile(File f, byte[] bytes) throws Exception {
-        File tmp = new File(f.getPath() + ".tmp");
-        FileOutputStream out = new FileOutputStream(tmp);
+        File tmp = File.createTempFile("t", ".tmp", f.getParentFile());   // 同時書き込みで混ざらないよう一意な名前
+        boolean done = false;
         try {
-            out.write(bytes);
+            FileOutputStream out = new FileOutputStream(tmp);
+            try {
+                out.write(bytes);
+            } finally {
+                out.close();
+            }
+            done = tmp.renameTo(f);
         } finally {
-            out.close();
+            if (!done) tmp.delete();
         }
-        if (!tmp.renameTo(f)) tmp.delete();
     }
 
     private static byte[] readAll(InputStream in) throws Exception {

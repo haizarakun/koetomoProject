@@ -43,7 +43,7 @@ public class KoeApiBridge {
     /* access modifiers changed from: private */
     public final WebView webView;
     /* access modifiers changed from: private */
-    public final ExecutorService apiExecutor = Executors.newCachedThreadPool(new ThreadFactory() {
+    public final ExecutorService apiExecutor = newBoundedPool(new ThreadFactory() {
         public Thread newThread(Runnable runnable) {
             Thread t = new Thread(runnable, "koe-api");
             t.setPriority(Thread.NORM_PRIORITY);
@@ -52,13 +52,27 @@ public class KoeApiBridge {
         }
     });
 
+    /** 同時に走る API 呼び出しの数に上限を付ける(JS が大量に投げてもスレッドが増え続けない) */
+    private static ExecutorService newBoundedPool(ThreadFactory factory) {
+        java.util.concurrent.ThreadPoolExecutor pool = new java.util.concurrent.ThreadPoolExecutor(
+                32, 32, 30L, java.util.concurrent.TimeUnit.SECONDS,
+                new java.util.concurrent.LinkedBlockingQueue<Runnable>(), factory);
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
+    }
+
     public KoeApiBridge(WebView webView2, KoeSession koeSession) {
         this.webView = webView2;
         this.session = koeSession;
     }
 
     /* access modifiers changed from: private */
+    private long bioDoneAt = 0;
     public void resolveBio(boolean z, String str) {
+        // 「PINを使う」ボタンのあとにフレームワークからもエラー通知が来て二重に呼ばれるので、短時間の2回目は捨てる
+        long nowMs = System.currentTimeMillis();
+        if (nowMs - bioDoneAt < 700) return;
+        bioDoneAt = nowMs;
         final String str2 = "window.__onBiometricResult && window.__onBiometricResult(" + (z ? "true" : "false") + ",'" + str + "')";
         this.webView.post(new Runnable() {
             public void run() {
@@ -353,6 +367,9 @@ public class KoeApiBridge {
         try {
             if (f == null || !f.exists()) return;
             if (f.isFile()) { out.add(f); return; }
+            // WebView が使っている HTTP / コードキャッシュは削らない(再取得と再コンパイルで遅くなる)
+            String dn = f.getName();
+            if (dn.equals("WebView") || dn.equals("Code Cache") || dn.equals("GPUCache")) return;
             java.io.File[] fs = f.listFiles();
             for (int i = 0; fs != null && i < fs.length; i++) collectFiles(fs[i], out);
         } catch (Exception e) {}
@@ -381,6 +398,9 @@ public class KoeApiBridge {
     private void deleteDir(java.io.File f, boolean self) {
         try {
             if (f == null || !f.exists()) return;
+            // WebView が使用中の HTTP/コードキャッシュは触らない(消すのは webView.clearCache に任せる)
+            String dn = f.getName();
+            if (self && (dn.equals("WebView") || dn.equals("Code Cache") || dn.equals("GPUCache"))) return;
             if (f.isDirectory()) {
                 java.io.File[] fs = f.listFiles();
                 for (int i = 0; fs != null && i < fs.length; i++) deleteDir(fs[i], true);
@@ -551,47 +571,49 @@ public class KoeApiBridge {
      * getMainExecutor(API26+)のシンボルを直接参照できないため、リフレクションで呼び出す。
      * 実機がAPI28+であればフレームワークに実クラスが存在するので動作は変わらない。
      */
+    /* 指紋・顔認証。BiometricPrompt の AuthenticationCallback は抽象クラスなので、
+       リフレクション+Proxyでは作れない(実機で必ず失敗していた)。直接サブクラスにする。
+       ビルド用の型だけは /tmp/bld/stubcls に置いてあり、APKには含まれない。 */
     @JavascriptInterface
     public void authBiometric() {
         final Context context = this.webView.getContext();
         if (Build.VERSION.SDK_INT < 28 || !(context instanceof Activity)) {
             resolveBio(false, "unsupported");
-        } else {
-            ((Activity) context).runOnUiThread(new Runnable() {
-                public void run() {
-                    try {
-                        Object mainExecutor = Context.class.getMethod("getMainExecutor", new Class[0]).invoke(context, new Object[0]);
-                        Class<?> execCls = Class.forName("java.util.concurrent.Executor");
-                        Class<?> promptCls = Class.forName("android.hardware.biometrics.BiometricPrompt");
-                        Class<?> builderCls = Class.forName("android.hardware.biometrics.BiometricPrompt$Builder");
-                        Class<?> callbackCls = Class.forName("android.hardware.biometrics.BiometricPrompt$AuthenticationCallback");
-                        Object builder = builderCls.getConstructor(Context.class).newInstance(context);
-                        builderCls.getMethod("setTitle", CharSequence.class).invoke(builder, "ロック解除");
-                        builderCls.getMethod("setSubtitle", CharSequence.class).invoke(builder, "指紋または顔認証で解除します");
-                        builderCls.getMethod("setNegativeButton", CharSequence.class, execCls, DialogInterface.OnClickListener.class).invoke(builder, "PINを使う", mainExecutor, new DialogInterface.OnClickListener() {
-                            public void onClick(DialogInterface dialogInterface, int i) {
-                                KoeApiBridge.this.resolveBio(false, "cancel");
-                            }
-                        });
-                        Object prompt = builderCls.getMethod("build", new Class[0]).invoke(builder, new Object[0]);
-                        Object callbackProxy = java.lang.reflect.Proxy.newProxyInstance(callbackCls.getClassLoader(), new Class[]{callbackCls}, new java.lang.reflect.InvocationHandler() {
-                            public Object invoke(Object proxy, java.lang.reflect.Method method, Object[] args) {
-                                String name = method.getName();
-                                if ("onAuthenticationError".equals(name)) {
-                                    KoeApiBridge.this.resolveBio(false, "error");
-                                } else if ("onAuthenticationSucceeded".equals(name)) {
-                                    KoeApiBridge.this.resolveBio(true, "ok");
-                                }
-                                return null;
-                            }
-                        });
-                        promptCls.getMethod("authenticate", CancellationSignal.class, execCls, callbackCls).invoke(prompt, new CancellationSignal(), mainExecutor, callbackProxy);
-                    } catch (Exception e) {
-                        KoeApiBridge.this.resolveBio(false, "exc");
-                    }
-                }
-            });
+            return;
         }
+        ((Activity) context).runOnUiThread(new Runnable() {
+            public void run() {
+                try {
+                    java.util.concurrent.Executor mainExecutor = new java.util.concurrent.Executor() {
+                        private final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+                        public void execute(Runnable r) { h.post(r); }
+                    };
+                    android.hardware.biometrics.BiometricPrompt.Builder builder = new android.hardware.biometrics.BiometricPrompt.Builder(context);
+                    builder.setTitle("ロック解除");
+                    builder.setSubtitle("指紋または顔認証で解除します");
+                    builder.setNegativeButton("PINを使う", mainExecutor, new DialogInterface.OnClickListener() {
+                        public void onClick(DialogInterface dialogInterface, int i) {
+                            KoeApiBridge.this.resolveBio(false, "cancel");
+                        }
+                    });
+                    if (Build.VERSION.SDK_INT >= 30) {
+                        // 顔認証は「弱い」区分の端末が多いので、弱い区分も許可する(0xFF = BIOMETRIC_WEAK)
+                        try { builder.getClass().getMethod("setAllowedAuthenticators", int.class).invoke(builder, 0xFF); } catch (Exception ig) {}
+                    }
+                    android.hardware.biometrics.BiometricPrompt prompt = builder.build();
+                    prompt.authenticate(new CancellationSignal(), mainExecutor, new android.hardware.biometrics.BiometricPrompt.AuthenticationCallback() {
+                        public void onAuthenticationError(int code, CharSequence msg) {
+                            KoeApiBridge.this.resolveBio(false, "error");
+                        }
+                        public void onAuthenticationSucceeded(android.hardware.biometrics.BiometricPrompt.AuthenticationResult r) {
+                            KoeApiBridge.this.resolveBio(true, "ok");
+                        }
+                    });
+                } catch (Throwable e) {
+                    KoeApiBridge.this.resolveBio(false, "exc");
+                }
+            }
+        });
     }
 
     @JavascriptInterface
@@ -604,7 +626,12 @@ public class KoeApiBridge {
             if (biometricManager == null) {
                 return false;
             }
-            Object result = biometricManager.getClass().getMethod("canAuthenticate", new Class[0]).invoke(biometricManager, new Object[0]);
+            Object result;
+            if (Build.VERSION.SDK_INT >= 30) {
+                result = biometricManager.getClass().getMethod("canAuthenticate", int.class).invoke(biometricManager, 0xFF);
+            } else {
+                result = biometricManager.getClass().getMethod("canAuthenticate", new Class[0]).invoke(biometricManager, new Object[0]);
+            }
             return result instanceof Integer && ((Integer) result).intValue() == 0;
         } catch (Exception e) {
             return false;
@@ -773,8 +800,9 @@ public class KoeApiBridge {
     private static String X_CLIENT_ID() { return Secrets.xClientId(); }
     private static final String X_REDIRECT_URI = "koetomoplus://xauth";
     private static final String X_SCOPE = "users.read tweet.read";
-    private static String xCodeVerifier = null;
-    private static String xState = null;
+    private static volatile String xCodeVerifier = null;
+    private static volatile boolean xStateMatched = false;   // stateが合った時だけ途中状態を消す(他アプリの偽コールバック対策)
+    private static volatile String xState = null;
 
     private static String b64url(byte[] b) {
         return Base64.encodeToString(b, Base64.NO_WRAP | Base64.NO_PADDING | Base64.URL_SAFE);
@@ -844,6 +872,7 @@ public class KoeApiBridge {
                 postXResult("{\"ok\":false,\"message\":\"認証の検証に失敗しました(state不一致)\"}");
                 return;
             }
+            xStateMatched = true;
             String form = "code=" + java.net.URLEncoder.encode(code, "UTF-8")
                     + "&grant_type=authorization_code"
                     + "&client_id=" + java.net.URLEncoder.encode(X_CLIENT_ID(), "UTF-8")
@@ -895,8 +924,11 @@ public class KoeApiBridge {
         } catch (Exception e) {
             postXResult("{\"ok\":false,\"message\":\"Xログイン処理でエラー: " + jsEsc(String.valueOf(e)) + "\"}");
         } finally {
-            xCodeVerifier = null;
-            xState = null;
+            if (xStateMatched) {
+                xCodeVerifier = null;
+                xState = null;
+                xStateMatched = false;
+            }
         }
     }
 
@@ -1094,18 +1126,30 @@ public class KoeApiBridge {
                     if (uri != null) t.label = isImage ? "Pictures/KoeTomo" : "Music/KoeTomo";
                 }
                 if (uri == null) return null;
-                OutputStream os = c.getContentResolver().openOutputStream(uri);
-                os.write(data);
-                os.flush();
-                os.close();
+                OutputStream os = null;
+                boolean written = false;
+                try {
+                    os = c.getContentResolver().openOutputStream(uri);
+                    if (os == null) return null;
+                    os.write(data);
+                    os.flush();
+                    written = true;
+                } finally {
+                    try { if (os != null) os.close(); } catch (Exception ig) {}
+                    // 書けなかった時に空のファイルが残らないよう、登録を取り消す
+                    if (!written) { try { c.getContentResolver().delete(uri, null, null); } catch (Exception ig) {} }
+                }
                 return t.label;
             }
             t.dir.mkdirs();
             File f = new File(t.dir, name);
             FileOutputStream fo = new FileOutputStream(f);
-            fo.write(data);
-            fo.flush();
-            fo.close();
+            try {
+                fo.write(data);
+                fo.flush();
+            } finally {
+                fo.close();
+            }
             try {
                 c.sendBroadcast(new Intent("android.intent.action.MEDIA_SCANNER_SCAN_FILE", Uri.fromFile(f)));
             } catch (Exception ig) {
@@ -1118,15 +1162,17 @@ public class KoeApiBridge {
 
     @JavascriptInterface
     public void saveAudio(final String str) {
-        if (str == null || !str.toLowerCase().startsWith("https://")) { toastOnJs("保存元URLが不正です"); return; }
+        if (str == null || !str.toLowerCase().startsWith("https://") || !ImageThumbCache.isAllowedHostPublic(str)) { toastOnJs("保存元URLが不正です"); return; }
         if (!isHttpUrl(str)) { return; }
         new Thread(new Runnable() {
             public void run() {
                 try {
                     HttpURLConnection httpURLConnection = (HttpURLConnection) new URL(str).openConnection();
+                    httpURLConnection.setInstanceFollowRedirects(false);   // 許可ホスト以外へ飛ばされないように
                     httpURLConnection.setConnectTimeout(15000);
                     httpURLConnection.setReadTimeout(30000);
                     httpURLConnection.connect();
+                    if (httpURLConnection.getResponseCode() != 200) throw new java.io.IOException("http " + httpURLConnection.getResponseCode());
                     InputStream inputStream = httpURLConnection.getInputStream();
                     ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
                     byte[] bArr = new byte[8192];
@@ -1135,6 +1181,7 @@ public class KoeApiBridge {
                         if (read <= 0) {
                             break;
                         }
+                        if (byteArrayOutputStream.size() + read > 32 * 1024 * 1024) throw new java.io.IOException("too large");
                         byteArrayOutputStream.write(bArr, 0, read);
                     }
                     inputStream.close();
@@ -1163,7 +1210,7 @@ public class KoeApiBridge {
                     }
                     KoeApiBridge.this.toastOnJs("音声を保存しました → " + where);
                     KoeApiBridge.this.showDownloadNotification("音声を保存しました", str4 + "\n保存先: 内部ストレージ/" + where);
-                } catch (Exception e) {
+                } catch (Throwable e) {   // OutOfMemoryError でもスレッドごと落とさず、失敗として知らせる
                     KoeApiBridge.this.toastOnJs("保存に失敗しました");
                 }
             }
@@ -1180,6 +1227,10 @@ public class KoeApiBridge {
                     if (raw.startsWith("data:") && indexOf >= 0) {
                         raw = raw.substring(indexOf + 1);
                     }
+                    if (raw.length() > 44 * 1024 * 1024) {
+                        toastOnJs("ファイルが大きすぎて保存できません");
+                        return;
+                    }   // saveAudio と同じ 32MB 相当の上限
                     byte[] decode = Base64.decode(raw, 0);
                     Context context = KoeApiBridge.this.webView.getContext();
                     String lowerCase = (str2 == null || str2.length() == 0) ? "mp3" : str2.toLowerCase();
@@ -1193,7 +1244,7 @@ public class KoeApiBridge {
                     }
                     KoeApiBridge.this.toastOnJs("音声を保存しました → " + where);
                     KoeApiBridge.this.showDownloadNotification("音声を保存しました", str3 + "\n保存先: 内部ストレージ/" + where);
-                } catch (Exception e) {
+                } catch (Throwable e) {   // OutOfMemoryError でもスレッドごと落とさず、失敗として知らせる
                     KoeApiBridge.this.toastOnJs("保存に失敗しました");
                 }
             }
@@ -1240,15 +1291,17 @@ public class KoeApiBridge {
      */
     @JavascriptInterface
     public void saveImage(final String str, final String fmt) {
-        if (str == null || !str.toLowerCase().startsWith("https://")) { toastOnJs("保存元URLが不正です"); return; }
+        if (str == null || !str.toLowerCase().startsWith("https://") || !ImageThumbCache.isAllowedHostPublic(str)) { toastOnJs("保存元URLが不正です"); return; }
         if (!isHttpUrl(str)) { return; }
         new Thread(new Runnable() {
             public void run() {
                 try {
                     HttpURLConnection httpURLConnection = (HttpURLConnection) new URL(str).openConnection();
+                    httpURLConnection.setInstanceFollowRedirects(false);   // 許可ホスト以外へ飛ばされないように
                     httpURLConnection.setConnectTimeout(15000);
                     httpURLConnection.setReadTimeout(20000);
                     httpURLConnection.connect();
+                    if (httpURLConnection.getResponseCode() != 200) throw new java.io.IOException("http " + httpURLConnection.getResponseCode());
                     InputStream inputStream = httpURLConnection.getInputStream();
                     ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
                     byte[] bArr = new byte[8192];
@@ -1257,6 +1310,7 @@ public class KoeApiBridge {
                         if (read <= 0) {
                             break;
                         }
+                        if (byteArrayOutputStream.size() + read > 32 * 1024 * 1024) throw new java.io.IOException("too large");
                         byteArrayOutputStream.write(bArr, 0, read);
                     }
                     inputStream.close();
@@ -1284,7 +1338,7 @@ public class KoeApiBridge {
                     }
                     KoeApiBridge.this.toastOnJs("画像を保存しました (" + ext.toUpperCase() + ") → " + where);
                     KoeApiBridge.this.showDownloadNotification("画像を保存しました", name + "\n保存先: 内部ストレージ/" + where);
-                } catch (Exception e) {
+                } catch (Throwable e) {   // OutOfMemoryError でもスレッドごと落とさず、失敗として知らせる
                     KoeApiBridge.this.toastOnJs("保存に失敗しました");
                 }
             }
@@ -1325,6 +1379,43 @@ public class KoeApiBridge {
         }
     }
 
+    /* 応援通話の受け手: 画面が止まっている間(アプリが裏)も、3分ごとに受付状態を送り直して
+       サーバー側で勝手にオフラインにならないようにする。state が空なら止める。 */
+    private volatile String beatRid = "";
+    private volatile String beatState = "";
+    private Thread beatThread = null;
+
+    /** 画面を閉じる時に、受付中の定期通知(オンライン表示)を止める */
+    public synchronized void stopReceiverBeat() {
+        beatRid = "";
+        beatState = "";
+        if (beatThread != null) beatThread.interrupt();
+    }
+
+    @JavascriptInterface
+    public synchronized void setReceiverBeat(String rid, String state) {
+        beatRid = rid == null ? "" : rid;
+        beatState = state == null ? "" : state;
+        if (beatRid.length() == 0 || beatState.length() == 0) return;
+        if (beatThread != null && beatThread.isAlive()) return;
+        beatThread = new Thread(new Runnable() {
+            public void run() {
+                while (beatRid.length() > 0 && beatState.length() > 0) {
+                    for (int i = 0; i < 180 && beatRid.length() > 0 && beatState.length() > 0; i++) {
+                        try { Thread.sleep(1000); } catch (InterruptedException e) { return; }
+                    }
+                    if (beatRid.length() == 0 || beatState.length() == 0) break;
+                    try {
+                        session.dispatch("update_cheering_receiver_status", new JSONArray().put(beatRid).put(beatState));
+                    } catch (Throwable ig) {
+                    }
+                }
+            }
+        });
+        beatThread.setDaemon(true);
+        beatThread.start();
+    }
+
     @JavascriptInterface
     public void setInCall(boolean z) {
         try {
@@ -1337,7 +1428,14 @@ public class KoeApiBridge {
             }
             Intent intent = new Intent(context, CallForegroundService.class);
             if (!z) {
+                CallForegroundService.lastMic = 0;
                 context.stopService(intent);
+                // 裏で通話が終わった時は、通知の確認を常駐サービスへ引き継ぐ(でないと次に開くまで通知が来ない)
+                if (context instanceof MainActivity && !((MainActivity) context).uiForeground) {
+                    try { KoeNotifyService.start(context.getApplicationContext()); } catch (Exception ig) {}
+                    // Android 12 以降は裏からの常駐サービス起動が拒否されることがあるので、その場合に備えて Activity 側の確認を残す
+                    if (Build.VERSION.SDK_INT < 31) ((MainActivity) context).stopBgNotifPoller();
+                }
             } else if (Build.VERSION.SDK_INT >= 26) {
                 try {
                     Context.class.getMethod("startForegroundService", Intent.class).invoke(context, intent);
@@ -1351,6 +1449,18 @@ public class KoeApiBridge {
         }
     }
 
+    /* マイクの状態(0=オン 1=ミュート 2=聞き専)。通知の表示と小窓のボタンを合わせる */
+    @JavascriptInterface
+    public void setCallState(int st) {
+        try {
+            Context context = this.webView.getContext();
+            if (context instanceof MainActivity) {
+                ((MainActivity) context).onMicStateChanged(st);
+            }
+        } catch (Exception e) {
+        }
+    }
+
     @JavascriptInterface
     public void setPipEnabled(boolean z) {
         try {
@@ -1359,6 +1469,40 @@ public class KoeApiBridge {
                 ((MainActivity) context).pipWanted = z;
             }
         } catch (Exception e) {
+        }
+    }
+
+    @JavascriptInterface
+    public boolean copyText(final String text) {
+        try {
+            final Context c = this.webView.getContext();
+            final boolean[] ok = new boolean[1];
+            final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+            new android.os.Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
+                public void run() {
+                    try {
+                        android.content.ClipboardManager cm = (android.content.ClipboardManager) c.getSystemService("clipboard");
+                        android.content.ClipData cd = android.content.ClipData.newPlainText("KoeTomo+ log", text == null ? "" : text);
+                        try {
+                            if (Build.VERSION.SDK_INT >= 33) {
+                                // 他のアプリのクリップボード表示に内容を出さない(EXTRA_IS_SENSITIVE)
+                                android.os.PersistableBundle pb = new android.os.PersistableBundle();
+                                pb.putBoolean("android.content.extra.IS_SENSITIVE", true);
+                                cd.getDescription().getClass().getMethod("setExtras", android.os.PersistableBundle.class).invoke(cd.getDescription(), pb);
+                            }
+                        } catch (Throwable ig2) {
+                        }
+                        cm.setPrimaryClip(cd);
+                        ok[0] = true;
+                    } catch (Throwable ig) {
+                    }
+                    latch.countDown();
+                }
+            });
+            latch.await(2, java.util.concurrent.TimeUnit.SECONDS);
+            return ok[0];
+        } catch (Throwable e) {
+            return false;
         }
     }
 
@@ -1421,6 +1565,145 @@ public class KoeApiBridge {
     /* 通話前のスピーカー設定。通話が終わったら元へ戻す(戻さないと他のアプリの音まで受話口から出る) */
     private boolean speakerWasOn = false;
 
+    /* 通話中に画面を暗くしない(常時点灯)かどうかを切り替える。設定で選べるようにするための口。 */
+    @JavascriptInterface
+    public void setKeepScreenOn(final boolean on) {
+        try {
+            Context context = this.webView.getContext();
+            if (!(context instanceof Activity)) return;
+            final Activity act = (Activity) context;
+            act.runOnUiThread(new Runnable() {
+                public void run() {
+                    try {
+                        // WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON = 128
+                        if (on) act.getWindow().addFlags(128);
+                        else act.getWindow().clearFlags(128);
+                    } catch (Exception ig) {
+                    }
+                }
+            });
+        } catch (Exception ig) {
+        }
+    }
+
+    /* ---- 通話の音の出口(スピーカー/有線/USB/Bluetooth など全部に対応) ----
+       API23の android.jar には後から増えた定数が無いので、種類の番号は数値で書く。 */
+    private static final int DEV_WIRED_HEADSET = 3;
+    private static final int DEV_WIRED_HEADPHONES = 4;
+    private static final int DEV_BLUETOOTH_SCO = 7;
+    private static final int DEV_BLUETOOTH_A2DP = 8;
+    private static final int DEV_USB_DEVICE = 11;
+    private static final int DEV_USB_ACCESSORY = 12;
+    private static final int DEV_USB_HEADSET = 22;
+    private static final int DEV_HEARING_AID = 23;
+    private static final int DEV_BLE_HEADSET = 26;
+    private static final int DEV_BLE_SPEAKER = 27;
+    private static final int DEV_BLE_BROADCAST = 30;
+    private android.media.AudioDeviceCallback callRouteWatcher = null;
+    private volatile boolean scoStarted = false;
+
+    private static boolean isBluetoothType(int t) {
+        return t == DEV_BLUETOOTH_SCO || t == DEV_BLUETOOTH_A2DP || t == DEV_HEARING_AID
+                || t == DEV_BLE_HEADSET || t == DEV_BLE_SPEAKER || t == DEV_BLE_BROADCAST;
+    }
+
+    private static boolean isWiredType(int t) {
+        return t == DEV_WIRED_HEADSET || t == DEV_WIRED_HEADPHONES || t == DEV_USB_DEVICE
+                || t == DEV_USB_ACCESSORY || t == DEV_USB_HEADSET;
+    }
+
+    /* つながっている出力機器を見て、スピーカーを使うかどうかと Bluetooth の通話用接続を決める */
+    private void applyCallRoute(AudioManager am) {
+        if (Build.VERSION.SDK_INT < 23) return;   // AudioDeviceInfo は API 23 から(21〜22 では NoClassDefFoundError になる)
+        try {
+            boolean btOut = false, wiredOut = false;
+            android.media.AudioDeviceInfo[] outs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS);
+            for (int i = 0; outs != null && i < outs.length; i++) {
+                int t = outs[i].getType();
+                if (isBluetoothType(t)) btOut = true;
+                else if (isWiredType(t)) wiredOut = true;
+            }
+            if (btOut) {
+                // Bluetooth は通話用(SCO)につなぐ。つながるまでの間はスピーカーを切って待つ
+                am.setSpeakerphoneOn(false);
+                try {
+                    if (!scoStarted) {
+                        am.startBluetoothSco();
+                        scoStarted = true;
+                    }
+                    am.setBluetoothScoOn(true);
+                } catch (Exception ig) {
+                }
+            } else {
+                stopBluetoothScoSafe(am);
+                am.setSpeakerphoneOn(!wiredOut); // 有線/USBがあればそちら、何も無ければスピーカー
+            }
+        } catch (Exception e) {
+            try { am.setSpeakerphoneOn(true); } catch (Exception ig) {}
+        }
+    }
+
+    private void stopBluetoothScoSafe(AudioManager am) {
+        try {
+            if (scoStarted) {
+                am.setBluetoothScoOn(false);
+                am.stopBluetoothSco();
+                scoStarted = false;
+            }
+        } catch (Exception ig) {
+        }
+    }
+
+    /* 通話中にイヤホンの抜き差しやBluetoothの接続・切断があったら、出口を選び直す */
+    private void registerCallRouteWatcher(final AudioManager am) {
+        if (Build.VERSION.SDK_INT < 23) return;
+        try {
+            if (callRouteWatcher != null) return;
+            callRouteWatcher = new android.media.AudioDeviceCallback() {
+                private final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+                private final Runnable again = new Runnable() { public void run() { if (callAudioActive) applyCallRoute(am); } };
+
+                // 接続・切断の通知は短い間に何度も来て、機器が使える状態になるのも少し遅れる。
+                // まとめて選び直し、落ち着いたころにもう一度選び直す(途中の切り替えで音が出なくなるのを防ぐ)。
+                private void settle() {
+                    h.removeCallbacks(again);
+                    h.postDelayed(again, 400);
+                    h.postDelayed(again, 2500);
+                }
+
+                public void onAudioDevicesAdded(android.media.AudioDeviceInfo[] added) {
+                    settle();
+                }
+
+                public void onAudioDevicesRemoved(android.media.AudioDeviceInfo[] removed) {
+                    boolean btGone = false;
+                    try {
+                        for (android.media.AudioDeviceInfo d : removed) {
+                            int t = d.getType();
+                            if (isBluetoothType(t)) btGone = true;
+                        }
+                    } catch (Exception ig) { btGone = true; }
+                    if (btGone) {
+                        try { am.setBluetoothScoOn(false); am.stopBluetoothSco(); } catch (Exception ig) {}   // 切れたBluetoothの接続要求を残さない
+                    }
+                    if (btGone) scoStarted = false;
+                    settle();
+                }
+            };
+            am.registerAudioDeviceCallback(callRouteWatcher, new android.os.Handler(android.os.Looper.getMainLooper()));
+        } catch (Exception e) {
+            callRouteWatcher = null;
+        }
+    }
+
+    private void unregisterCallRouteWatcher(AudioManager am) {
+        try {
+            if (callRouteWatcher != null) am.unregisterAudioDeviceCallback(callRouteWatcher);
+        } catch (Exception ig) {
+        }
+        callRouteWatcher = null;
+    }
+
     @JavascriptInterface
     public void startCallAudio() {
         try {
@@ -1429,9 +1712,11 @@ public class KoeApiBridge {
             if (audioManager == null) {
                 return;
             }
-            this.speakerWasOn = audioManager.isSpeakerphoneOn();
+            if (!callAudioActive) this.speakerWasOn = audioManager.isSpeakerphoneOn();   // 二重に呼ばれても元の状態を覚え直さない
+            callAudioActive = true;
             audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
-            audioManager.setSpeakerphoneOn(true);
+            applyCallRoute(audioManager); // ヘッドセット・Bluetooth等があればそちら、無ければスピーカー
+            registerCallRouteWatcher(audioManager);
             int result = audioManager.requestAudioFocus(this.callFocusListener, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
             this.callAudioFocusHeld = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
         } catch (Exception e) {
@@ -1439,11 +1724,14 @@ public class KoeApiBridge {
         try {
             Context context2 = this.webView.getContext();
             PowerManager powerManager = (PowerManager) context2.getSystemService("power");
+            if (powerManager != null && this.callWakeLock != null && !this.callWakeLock.isHeld()) {
+                this.callWakeLock.acquire(4L * 60L * 60L * 1000L);   // 期限切れで外れていたら取り直す
+            }
             if (powerManager != null && this.callWakeLock == null) {
                 PowerManager.WakeLock newWakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "KoeTomo:CallWakeLock");
                 this.callWakeLock = newWakeLock;
                 newWakeLock.setReferenceCounted(false);
-                this.callWakeLock.acquire();
+                this.callWakeLock.acquire(4L * 60L * 60L * 1000L);   // 解除し忘れ対策の保険(通話終了時に release する)
             }
         } catch (Exception e) {
         }
@@ -1461,8 +1749,40 @@ public class KoeApiBridge {
         }
     }
 
+    /* マイクの入り切りで端末側が通話モードや出口を勝手に戻すことがあるため、JSから呼んで選び直す */
+    private final android.os.Handler routeHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private volatile boolean callAudioActive = false;
+
+    boolean isCallAudioActive() {
+        return callAudioActive;
+    }
+
+    @JavascriptInterface
+    public void refreshCallRoute() {
+        final Context c = this.webView.getContext();
+        final AudioManager am = (AudioManager) c.getSystemService("audio");
+        if (am == null) return;
+        final android.os.Handler h = routeHandler;
+        if (!callAudioActive) return;   // 通話中でなければ何もしない(終わった後に通話モードへ戻さない)
+        Runnable fix = new Runnable() {
+            public void run() {
+                try {
+                    if (!callAudioActive) return; // 通話が終わったあとに通話モードへ戻さない
+                    if (am.getMode() != AudioManager.MODE_IN_COMMUNICATION) am.setMode(AudioManager.MODE_IN_COMMUNICATION);
+                    applyCallRoute(am);
+                } catch (Exception ig) {
+                }
+            }
+        };
+        h.post(fix);
+        h.postDelayed(fix, 300);
+        h.postDelayed(fix, 1500);
+    }
+
     @JavascriptInterface
     public void stopCallAudio() {
+        callAudioActive = false;
+        routeHandler.removeCallbacksAndMessages(null); // 予約済みの「通話モードに戻す」を取り消す
         try {
             Context context = this.webView.getContext();
             AudioManager audioManager = (AudioManager) context.getSystemService("audio");
@@ -1473,6 +1793,8 @@ public class KoeApiBridge {
                 audioManager.abandonAudioFocus(this.callFocusListener);
                 this.callAudioFocusHeld = false;
             }
+            unregisterCallRouteWatcher(audioManager);
+            stopBluetoothScoSafe(audioManager);
             audioManager.setMode(AudioManager.MODE_NORMAL);
             audioManager.setSpeakerphoneOn(this.speakerWasOn);
         } catch (Exception e) {
@@ -1704,7 +2026,7 @@ public class KoeApiBridge {
             return;
         }
         try {
-            final Context context = this.webView.getContext();
+            final Context context = this.webView.getContext().getApplicationContext();   // Activity を握らない(破棄後も完了通知を受けられる)
             final android.app.DownloadManager dm = (android.app.DownloadManager) context.getSystemService("download");
             if (dm == null) {
                 toastOnJs("ダウンロードを開始できませんでした");
@@ -1717,6 +2039,10 @@ public class KoeApiBridge {
             req.setNotificationVisibility(1);
             // 共有ダウンロードフォルダに置くと、インストール確認までの間に他アプリが差し替えられる。
             // アプリ専用の外部領域に落とす。
+            try {
+                java.io.File stale = new java.io.File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "KoeTomoPlus-update.apk");
+                if (stale.exists()) stale.delete();   // 前回の残りがあると別名で保存され、検証と実体がずれる
+            } catch (Exception ignored) {}
             req.setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, "KoeTomoPlus-update.apk");
             final long id = dm.enqueue(req);
             toastOnJs("更新をダウンロードしています…");
