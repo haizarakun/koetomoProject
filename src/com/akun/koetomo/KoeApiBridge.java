@@ -424,6 +424,17 @@ public class KoeApiBridge {
         }
     }
 
+    // 業者判定の軽い手掛かり。判定ルールは BotRules にあり、画面側(JS)には置かない。
+    @JavascriptInterface
+    public boolean botHint(String userJson) {
+        try { return BotRules.hint(new org.json.JSONObject(userJson)); } catch (Exception e) { return false; }
+    }
+
+    @JavascriptInterface
+    public int botInvisLevel(String text) {
+        try { return BotRules.invisLevel(text); } catch (Exception e) { return 0; }
+    }
+
     @JavascriptInterface
     public String secureLoad(String key) {
         try {
@@ -573,7 +584,7 @@ public class KoeApiBridge {
      */
     /* 指紋・顔認証。BiometricPrompt の AuthenticationCallback は抽象クラスなので、
        リフレクション+Proxyでは作れない(実機で必ず失敗していた)。直接サブクラスにする。
-       ビルド用の型だけは /tmp/bld/stubcls に置いてあり、APKには含まれない。 */
+       ビルド用の型だけは build-stubs に置いてあり、APKには含まれない。 */
     @JavascriptInterface
     public void authBiometric() {
         final Context context = this.webView.getContext();

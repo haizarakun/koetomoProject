@@ -2198,7 +2198,7 @@ public class KoeSession {
         return -1;
     }
 
-    private static String firstStr(JSONObject jSONObject, String... strArr) {
+    static String firstStr(JSONObject jSONObject, String... strArr) {
         for (String optString : strArr) {
             String optString2 = jSONObject.optString(optString, "");
             if (optString2.length() > 0) {
@@ -5105,7 +5105,7 @@ public class KoeSession {
     }
 
     // 1/0・"1"/"0"・true/false のいずれでも真偽に解釈する(公式は設定値を int で返す)
-    private static boolean truthy(Object v) {
+    static boolean truthy(Object v) {
         if (v == null) return false;
         if (v instanceof Boolean) return ((Boolean) v).booleanValue();
         if (v instanceof Number) return ((Number) v).intValue() != 0;
@@ -7001,7 +7001,7 @@ public class KoeSession {
         protected SimpleDateFormat initialValue() { return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US); }
     };
 
-    private static String nowStr() {
+    static String nowStr() {
         return NOW_FMT.get().format(new Date());
     }
 
@@ -12031,65 +12031,8 @@ public class KoeSession {
     }
 
     // ===================== 業者(bot)自動判定 =====================
-    // 判定はすべてネイティブ側で行い、材料は「その場で API から取り直した生の値」だけを使う。
-    // JS から渡された値は一切採点に使わないので、WebView 側を書き換えても判定・証拠は偽造できない。
-    //
-    //  A: 必須条件(4つ全部を満たさないと自動申請しない)
-    //    A1 アイコンのファイル名が 16文字ランダム英数
-    //    A2 followee / follower / friend / liked すべて 0
-    //    A3 自己紹介が空
-    //    A4 年齢確認なし(age_verification_status = 0)
-    //  B: 加点
-    //    B1 名前が「単語+半角3桁数字」            +3
-    //    B2 既知 bot と user_id が近接連番(±20)   +3
-    //    B3 feature 文字列が既知 bot と完全一致    +2
-    //    B4 ランダムマッチON かつ A2 成立          +1.5
-    //    B5 直近1時間に5件以上投稿                 +2
-    //    B6 直近ログイン(1時間以内)                +0.5
-    //  A全成立 かつ B合計 >= 6.0 → 自動申請 / 3.0以上 → 画面上の「⚠ 業者?」表示のみ
+    // 判定ルールの本体は BotRules.java(リポジトリには含めない)。ここは端末内の記録・流量制限・申請の受け渡しだけを持つ。
     private static final long BOT_APP_START_MS = System.currentTimeMillis();
-    /* ===== 業者判定ルールの文字列難読化 =====
-       正規表現や判定理由をそのまま定数に置くと、APK を展開して strings を眺めるだけで
-       「どう避ければ検知されないか」が分かってしまう。実行時に組み立てて復元する。 */
-    private static final byte[] BK = new byte[]{107,84,43,98,111,116,47,50,48,50,54};
-    private static String dx(String b64) {
-        try {
-            byte[] a = android.util.Base64.decode(b64, android.util.Base64.NO_WRAP);
-            byte[] o = new byte[a.length];
-            for (int i = 0; i < a.length; i++) o[i] = (byte) (a[i] ^ BK[i % BK.length]);
-            return new String(o, "UTF-8");
-        } catch (Exception e) { return ""; }
-    }
-    private static final String R_ICON = dx("NQ9qTzUVAkgAHw82LxpUEigBGkBcURc+WwdQE1NFVVBGQnA=");
-    private static final String R_NAME = dx("NQ91PhwpVAMcAAYWDxtPVilUAU0W");
-    private static final String R_DIGIT = dx("NQ8bT1YpBBY=");
-    private static final String L_ON1 = dx("WrKy4IbivNaLl9Pt0Q==");
-    private static final String L_ON2 = dx("jtythtTRyrS1");
-    private static final String L_ON3 = dx("iNaBgezHzLGZ0bTPt6jR");
-    private static final String N_ICON = dx("gtOkhfvXyqy70bTJt6nGjPac0bOB0/vZ");
-    private static final String N_NOICON = dx("iNaJge3QzLCD0bXYsrfIh9yC156o");
-    private static final String N_ZERO = dx("j+6PhNr1H9Gzid7s/s7V3pObi9SJvYjVgYHu48yxi9eP372WwIjWldqav9Xq/sjj+A==");
-    private static final String N_NAME = dx("jsSmh+b5zLO817vzvIH8REfJk7HUo9uxhvU=");
-    private static final String N_NEAR = dx("jcOJhfDRTV1E0bfDHW+L79fIp5o=");
-    private static final String N_FEAT = dx("jcOJhfDRTV1E0bfDsbvui8yvVFVTQh4mTg==");
-    private static final String N_RM = dx("iNeCgezHzLGw0bXLt6j8jPes0bOzeSV/z9jLkpqzAA==");
-    private static final String N_LOGIN = dx("jM+fitDlzLGd0bTbt6nGjPec");
-    private static final String N_POST = dx("jM+fitDlHtSpsN/9x8jjxA==");
-    private static final String N_POST2 = dx("j++dhOXhyJqP");
-    private static final String R_BIO = dx("QzxfFh8HEAgfHUoHPUUHE5esm9OwkojXmB6AyaPdjbvZ1trE3+oIzLCb0bTAt6nIEx9OWVFdSh89QBYAH1PRs7TV6ffI4eyXrZ3Tsb6I16iB7dtT17md0M75V4fm28q9vtezzijMytOXrqBM1Z7Xt6rsE5Klp9iBsRcyUx6Lz4HUs4Hf687D0McIzLGj0bXot6jqjPac0bKW1ejnV4Hs5MywlNG14beoyBOXrKPTsaeN4JAeh9eg166QSo7wjIbVzsyznk7T4ubI4OWRp7XTsLwXt6j5ivyKTt+PsoTpph4LGcuKu9G3/req5hMQQtGxvdXq9Mjj+peutkxybQp5UVJCTXBvSwEaFihCBjROwI6qb0qN8LeF29bMs6fRt819");
-    private static final String N_BIO = dx("g9OBh9jFyIaJ1o3gt6rJiv+I2pqq1ejvw8j3kZ+807OYg/61h+DR");
-    private static final String N_NEARZERO = dx("j+6PhNr1zLOL0bfXZA==");
-    private static final String N_NAMECLUSTER = dx("jsSnh/H/zLOe16bmsaLvR5GiqtiYqEBnzcPuXcyzvHtyg+u6hOHRzLOX2pLssr7S");
-    private static final String N_CORE3 = dx("gtOkhfvXyqy70bfFs6Lbisqb0bG+BYjVj4bU0cuKug==");
-    private static final String N_ZWSP = dx("jciHhPnzzLOb2pDgt6rqjPWF0bG20P3Tzs/4l62g1ZaRgtOkge7fyYWH0bf3t6rEjPWr0bK5HojXvoHt18yxm9G01Leo3orvsduxjR8=");
-    private static final String N_ZWSP1 = dx("jciHhPnzzLOb2pDgt6rqjPWF0bG20P3Tzs/4l66+1oWBiNW9ge7XzLOW0bfvt6np");
-    private static final String N_NAMEPAIR = dx("jsSnh/H/zLOe16bmsaLvR5GiqtiYqEBnzcPuXcyzvHtyg+u6hOHR");
-
-    private static final int ZW_MIN_POSTS = 2, ZW_MIN_PER_POST = 3;
-
-    private static final double BOT_AUTO_SCORE = 6.0;
-    private static final double BOT_MARK_SCORE = 3.0;
-
     private JSONArray botPrefArr(String key) {
         try { return new JSONArray(this.prefs.getString(key, "[]")); } catch (Exception e) { return new JSONArray(); }
     }
@@ -12102,156 +12045,7 @@ public class KoeSession {
     }
 
     // A を満たした相手を「候補」として端末内に控える。B2/B3 の照合に使うだけで、申請はしない。
-    private void botRemember(long uid, String feature) {
-        try {
-            JSONArray a = botPrefArr("bot_cands");
-            String fh = (feature == null || feature.length() == 0) ? "" : String.valueOf(feature.hashCode());
-            for (int i = 0; i < a.length(); i++) {
-                JSONObject o = a.optJSONObject(i);
-                if (o != null && o.optLong("u") == uid) { o.put("f", fh); o.put("t", System.currentTimeMillis()); botPrefPut("bot_cands", a, 300); return; }
-            }
-            a.put(new JSONObject().put("u", uid).put("f", fh).put("t", System.currentTimeMillis()));
-            botPrefPut("bot_cands", a, 300);
-        } catch (Exception e) {}
-    }
-
-    /* 「単語+3桁数字」型の名前を見かけた ID を覚え、同型の名前が ID 近接(±100)で他に 2 人以上いれば
-       量産アカウント群とみなす(例: 点キーケース074 / マカロニストール194 / アヒルなす713 が連番で出現)。 */
-    private void botRememberNameHit(long uid) {
-        try {
-            JSONArray a = botPrefArr("bot_namehits");
-            for (int i = 0; i < a.length(); i++) if (a.optLong(i, 0) == uid) return;
-            a.put(uid);
-            botPrefPut("bot_namehits", a, 500);
-        } catch (Exception e) {}
-    }
-
-    private int botNameHitNeighbors(long uid) {
-        int n = 0;
-        try {
-            JSONArray a = botPrefArr("bot_namehits");
-            for (int i = 0; i < a.length(); i++) {
-                long v = a.optLong(i, 0);
-                if (v != 0 && v != uid && Math.abs(v - uid) <= 100) n++;
-            }
-        } catch (Exception e) {}
-        return n;
-    }
-
-    private boolean botKnownNear(long uid) {
-        try {
-            JSONArray a = botPrefArr("bot_cands");
-            for (int i = 0; i < a.length(); i++) {
-                JSONObject o = a.optJSONObject(i);
-                if (o == null) continue;
-                long v = o.optLong("u", 0);
-                if (v != 0 && v != uid && Math.abs(v - uid) <= 20) return true;
-            }
-        } catch (Exception e) {}
-        return false;
-    }
-
-    private boolean botKnownFeature(long uid, String feature) {
-        if (feature == null || feature.length() == 0) return false;
-        try {
-            String fh = String.valueOf(feature.hashCode());
-            JSONArray a = botPrefArr("bot_cands");
-            for (int i = 0; i < a.length(); i++) {
-                JSONObject o = a.optJSONObject(i);
-                if (o == null) continue;
-                if (o.optLong("u", 0) != uid && fh.equals(o.optString("f", ""))) return true;
-            }
-        } catch (Exception e) {}
-        return false;
-    }
-
-    /* ---- 画面に表示されない文字 ----
-       幅が 0 で見えない文字。文字列を突き合わせる前に取り除く。
-       絵文字の異体字セレクタ(U+FE0E / U+FE0F)は正当な使い方なので数に入れない。 */
-    private static boolean isInvisibleChar(char c) {
-        return c == '\u00AD' || c == '\u061C' || c == '\u180E' || c == '\uFEFF'
-                || (c >= '\u200B' && c <= '\u200F')
-                || (c >= '\u202A' && c <= '\u202E')
-                || (c >= '\u2060' && c <= '\u2064')
-                || (c >= '\u2066' && c <= '\u206F');
-    }
-
-    /** 目に見えない文字を取り除く。NG ワードや勧誘語句の照合はこの後の文字列で行う。 */
-    static String stripInvisible(String s) {
-        if (s == null || s.length() == 0) return "";
-        StringBuilder sb = new StringBuilder(s.length());
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (!isInvisibleChar(c)) sb.append(c);
-        }
-        return sb.toString();
-    }
-
-    /** 目に見えない文字が何個混ざっているか。 */
-    static int countInvisible(String s) {
-        if (s == null) return 0;
-        int n = 0;
-        for (int i = 0; i < s.length(); i++) if (isInvisibleChar(s.charAt(i))) n++;
-        return n;
-    }
-
-    /* ---- 「フィルター回避」とみなす見えない文字だけを数える ----
-       isInvisibleChar より狭い。絵文字や普通の文章でも自然に出てくる文字は数えない:
-         ZWJ(U+200D)・ZWNJ(U+200C) … 絵文字の連結(👨‍👩‍👧 等)や一部言語の正書法で普通に使う
-         LRM/RLM(U+200E/200F)・異体字セレクタ … 方向指定や絵文字の見た目指定で普通に使う
-       数えるのは、本文に紛れ込ませてNGワード照合を外す目的でしか使われない純粋な詰め物だけ:
-         U+200B(ZWSP)・U+2060〜2064(ワード結合子/不可視演算子)・U+FEFF(BOM)
-         U+00AD(ソフトハイフン)・U+180E・U+061C・双方向制御(U+202A〜202E, U+2066〜2069) */
-    private static boolean isEvasionChar(char c) {
-        return c == '\u00AD' || c == '\u061C' || c == '\u180E'
-                || c == '\u200B'
-                || (c >= '\u202A' && c <= '\u202E')
-                || (c >= '\u2060' && c <= '\u2064')
-                || (c >= '\u2066' && c <= '\u2069')
-                || c == '\uFEFF';
-    }
-
-    /** フィルター回避目的の見えない文字が何個あるか(絵文字などの正当な使用は数えない)。 */
-    static int countEvasion(String s) {
-        if (s == null) return 0;
-        int n = 0;
-        for (int i = 0; i < s.length(); i++) if (isEvasionChar(s.charAt(i))) n++;
-        return n;
-    }
-
-    /**
-     * 直近の投稿をAPIから取り直して、件数と「目に見えない文字」の混入を数える。
-     * 画面(WebView)から渡された値は一切使わないので、表示を書き換えても偽装できない。
-     * 返す形: {"recent":直近windowMs以内の件数, "invis_hits":混入していた投稿数,
-     *          "invis_max":1投稿での最多混入数, "invis_ids":[根拠にした投稿ID…]}
-     */
-    private JSONObject botPostStats(long uid, long windowMs) {
-        JSONObject out = new JSONObject();
-        try {
-            out.put("recent", -1).put("invis_hits", -1).put("invis_max", 0).put("invis_ids", new JSONArray());
-            JSONObject r = new JSONObject(getUserPosts(String.valueOf(uid), ""));
-            JSONArray ps = r.optJSONArray("posts");
-            if (ps == null) return out;
-            long now = System.currentTimeMillis();
-            int recent = 0, hits = 0, max = 0;
-            JSONArray ids = new JSONArray();
-            for (int i = 0; i < ps.length(); i++) {
-                JSONObject post = ps.optJSONObject(i);
-                if (post == null) continue;
-                long t = botParseTime(post.optString("created_at", ""));
-                if (t > 0 && now - t <= windowMs) recent++;
-                int n = countEvasion(firstStr(post, "description", "decodedDescription", "text", "comment", "body"));
-                if (n <= 0) continue;
-                hits++;
-                if (n > max) max = n;
-                if (ids.length() < 10) ids.put(post.opt("id"));
-            }
-            out.put("recent", recent).put("invis_hits", hits).put("invis_max", max).put("invis_ids", ids);
-        } catch (Exception e) {}
-        return out;
-    }
-
-    private static long botParseTime(String s) {
+    static long botParseTime(String s) {
         if (s == null || s.length() < 10) return 0;
         String[] fmts = new String[]{"yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ssZ", "yyyy-MM-dd HH:mm:ss", "yyyy/MM/dd HH:mm:ss"};
         for (int i = 0; i < fmts.length; i++) {
@@ -12285,133 +12079,14 @@ public class KoeSession {
         }
     }
 
+    private final BotRules.Host botHost = new BotRules.Host() {
+        public JSONArray arr(String key) { return botPrefArr(key); }
+        public void put(String key, JSONArray a, int cap) { botPrefPut(key, a, cap); }
+        public String userPosts(String uid) { return getUserPosts(uid, ""); }
+    };
+
     private JSONObject botEval(JSONObject u, long uid, boolean allowPostFetch) {
-        JSONObject out = new JSONObject();
-        try {
-            JSONArray rs = new JSONArray();
-            JSONObject ev = new JSONObject();
-
-            String icon = u.optString("profile_picture_file_path", "");
-            if (icon.length() == 0) icon = u.optString("icon_url", "");
-            String fn = icon;
-            int sl = fn.lastIndexOf('/'); if (sl >= 0) fn = fn.substring(sl + 1);
-            int qm = fn.indexOf('?'); if (qm >= 0) fn = fn.substring(0, qm);
-            /* アイコンが「16文字の自動生成名」だけでなく「未設定」も同じ扱いにする。
-               アイコンを付けないだけで検知を抜けられていたため。 */
-            boolean genIcon = fn.matches(R_ICON);
-            boolean noIcon = (icon.trim().length() == 0);
-            boolean a1 = genIcon || noIcon;
-
-            int fol = u.optInt("follower_count", -1), fee = u.optInt("followee_count", -1), fr = u.optInt("friend_count", -1);
-            long liked = u.optLong("liked_count", -1);
-            boolean a2 = (fol == 0 && fee == 0 && fr == 0 && liked == 0);
-            // 「ほぼ 0」も同じ扱い(1〜2 件だけ交流を作って検知を抜ける量産アカウントがいるため)
-            boolean a2near = !a2 && fol >= 0 && fee >= 0 && fr >= 0 && liked >= 0 && fol <= 2 && fee <= 2 && fr == 0 && liked <= 2;
-
-            // 見えない文字を取り除いてから中身を見る
-            String cm = stripInvisible(u.isNull("comment") ? "" : u.optString("comment", ""));
-            boolean a3 = (cm.trim().length() == 0);
-            // 自己紹介があっても、勧誘・外部誘導の語句なら「怪しい自己紹介」として同等に扱う
-            boolean a3bio = !a3 && cm.toLowerCase(Locale.ROOT).replaceAll("\\s+", "").matches("(?s).*" + R_BIO + ".*");
-
-            int av = (u.has("age_verification_status") && !u.isNull("age_verification_status")) ? u.optInt("age_verification_status", -1) : -1;
-            boolean a4 = (av == 0);
-
-            String nm = stripInvisible(u.optString("name", ""));
-            boolean nameHit = nm.matches(R_NAME) && !nm.matches(R_DIGIT);
-            String feat = u.isNull("feature") ? "" : u.optString("feature", "");
-            boolean near = botKnownNear(uid);
-            /* feature は同じアプリ版なら人間も業者も全く同じ文字列になるため、
-               「既知botと同一feature」は業者の証拠にならない。誤検知の主因だったので判定から外す。 */
-
-            /* 量産型の 4 特徴(アイコン・交流・自己紹介・年齢確認)のうち幾つ当たるか。
-               以前は 4 つ全部が必要で、アイコンか自己紹介を 1 つ付けるだけで抜けられていた。
-               いまは 3 つ + 補強材料(名前の型・既知 bot との連番/同一端末・勧誘文)でも量産型とみなす。 */
-            int core = (a1 ? 1 : 0) + ((a2 || a2near) ? 1 : 0) + ((a3 || a3bio) ? 1 : 0) + (a4 ? 1 : 0);
-            if (nameHit) botRememberNameHit(uid);
-            int nameCluster = nameHit ? botNameHitNeighbors(uid) : 0;
-
-            /* 申請の判定をするときだけ、投稿を API から取り直して数える。
-               画面から渡された値は使わないので、WebView を書き換えても偽装できない。 */
-            int recent = -1, invisHits = -1, invisMax = 0;
-            JSONArray invisIds = new JSONArray();
-            if (allowPostFetch) {
-                JSONObject ps = botPostStats(uid, 3600000L);
-                recent = ps.optInt("recent", -1);
-                invisHits = ps.optInt("invis_hits", -1);
-                invisMax = ps.optInt("invis_max", 0);
-                if (ps.optJSONArray("invis_ids") != null) invisIds = ps.optJSONArray("invis_ids");
-            }
-            boolean zwEvade = (invisHits >= ZW_MIN_POSTS && invisMax >= ZW_MIN_PER_POST);
-
-            boolean hard = core >= 4
-                    || (core >= 3 && (nameHit || near || a3bio))
-                    || (core >= 2 && nameHit) // 「単語+3桁」の名前 + 量産型の特徴 2 つ
-                    || (nameHit && nameCluster >= 2 && core >= 1) // 同型の名前が ID 近接で複数(量産型の特徴が1つも無い人は対象外)
-                    || zwEvade;
-            if (hard) {
-                rs.put(genIcon ? N_ICON : (noIcon ? N_NOICON : N_CORE3));
-                if (a2 && a3 && a4) rs.put(N_ZERO);
-                else if (a2near) rs.put(N_NEARZERO);
-                if (a3bio) rs.put(N_BIO);
-            }
-            ev.put("icon_file", fn).put("follower_count", fol).put("followee_count", fee)
-              .put("friend_count", fr).put("liked_count", liked).put("comment_empty", a3).put("comment_suspicious", a3bio)
-              .put("age_verification_status", av).put("core_hits", core)
-              .put("A1_icon16", a1).put("A2_all_zero", a2).put("A2_near_zero", a2near).put("A3_no_bio", a3).put("A4_no_age_verify", a4)
-              .put("icon_kind", genIcon ? "generated" : (noIcon ? "none" : "normal"));
-
-            double sc = 0;
-            ev.put("name", nm);
-            /* 「単語+3桁数字」は人間のよくある名前(たろう123 等)でもあるので配点は控えめにする。
-               単独では申請に至らせず、業者固有の証拠(下記 discriminating)と重なったときだけ効かせる。 */
-            if (nameHit) { sc += 1.5; rs.put(N_NAME); }
-            if (hard && noIcon) { sc += 1; }
-            if (hard && a3bio) { sc += 2; }
-            if (hard && near) { sc += 3; rs.put(N_NEAR); }
-            ev.put("feature", feat.length() > 120 ? feat.substring(0, 120) : feat);
-            if (hard && nameCluster >= 2) { sc += 3; rs.put(N_NAMECLUSTER); }
-            /* 2 つでも「同型の名前が ID 近接」は十分に不自然なので加点する。
-               (以前は 3 つ以上そろわないと加点されず、先に見つけた 1 人目が取りこぼされていた) */
-            else if (hard && nameCluster == 1) { sc += 2; rs.put(N_NAMEPAIR); }
-            ev.put("name_cluster", nameCluster);
-            if (zwEvade) { sc += 4; rs.put(N_ZWSP); }
-            else if (invisMax >= 3) { sc += 2; rs.put(N_ZWSP1); }
-            ev.put("invis_hits", invisHits).put("invis_max", invisMax).put("invis_post_ids", invisIds);
-            boolean rm = truthy(u.opt("random_match_enabled"));
-            JSONObject st = u.optJSONObject("settings");
-            if (!rm && st != null) rm = truthy(st.opt("random_match_enabled"));
-            ev.put("random_match_enabled", rm);
-            if (rm && (a2 || a2near)) { sc += 1.0; rs.put(N_RM); }
-            String ls = u.optString("login_status_with_unit", "");
-            ev.put("login_status", ls);
-            if (ls.indexOf(L_ON1) >= 0 || ls.indexOf(L_ON2) >= 0 || ls.indexOf(L_ON3) >= 0) { sc += 0.5; rs.put(N_LOGIN); }
-            ev.put("posts_last_hour", recent);
-            if (hard && recent >= 5) { sc += 2; rs.put(N_POST + recent + N_POST2); }
-
-            /* ---- 誤検知対策の要 ----
-               「新規のカジュアル利用者」なら人間でも普通に当たる状況証拠
-               (量産型アイコン・交流0・自己紹介なし・年齢確認なし・単語+3桁の名前・ランダムマッチON・直近ログイン)
-               だけでは自動申請しない。業者に固有の証拠が最低 1 つあるときだけ「申請対象」とする:
-                 near        … 既知業者と ID が連番/同一端末
-                 nameCluster … 同型の名前が ID 近接で複数(量産登録)
-                 zwEvade     … 本文に見えない詰め物を混ぜてフィルター回避(絵文字等の正当な不可視文字は除外済み)
-                 a3bio       … 自己紹介が勧誘・外部誘導
-               証拠が無ければ最大でも「mid(表示のみ・申請しない)」に留める。 */
-            boolean discriminating = near || nameCluster >= 2 || zwEvade || a3bio;
-            ev.put("discriminating", discriminating);
-            boolean report = hard && discriminating && sc >= BOT_AUTO_SCORE;
-            String level = report ? "high" : (hard && sc >= BOT_MARK_SCORE ? "mid" : "");
-            ev.put("score", sc).put("level", level).put("checked_at", nowStr()).put("checked_by", "KoeTomo+ auto");
-            /* 候補として控えるのも業者固有の証拠があるときだけ。
-               以前は hard(=新規カジュアル利用者でも当たる)で控えていたため、
-               近接 ID の無関係な新規利用者どうしが near で誤って反応する連鎖が起きていた。 */
-            if (discriminating && allowPostFetch) botRemember(uid, feat);   // 表示用の評価(画面から渡された値)では候補に記録しない
-            out.put("hard", hard).put("score", sc).put("level", level).put("reasons", rs).put("ev", ev);
-        } catch (Exception e) {
-            try { out.put("hard", false).put("score", 0).put("level", "").put("reasons", new JSONArray()).put("ev", new JSONObject()); } catch (Exception ig) {}
-        }
-        return out;
+        return BotRules.eval(botHost, u, uid, allowPostFetch);
     }
 
     // 自動申請の暴走防止(端末内・ネイティブ側で管理)。
@@ -12541,7 +12216,7 @@ public class KoeSession {
 
     /**
      * BAN サーバーへ送る申請本文。
-     * confidence: "confirmed" = 量産アカウント群としての確証(既知 bot との連番/同一端末、同型名の ID 近接)がある。
+     * confidence: "confirmed" = 複数アカウントにまたがる確証がある。
      *             サーバー側はこの値を信用せず、evidence の生値と自前の再取得で検証する前提(仕様書 docs/banlist-confirmed.md)。
      * evidence.verify: サーバーが koetomo API から取り直して照合するための材料(対象 ID・近接 ID・判定時刻)。
      */
@@ -12550,27 +12225,19 @@ public class KoeSession {
         JSONArray rs = ev.optJSONArray("reasons");
         JSONObject e = ev.optJSONObject("ev") != null ? ev.optJSONObject("ev") : new JSONObject();
         boolean cluster = e.optInt("name_cluster", 0) >= 2;
-        boolean zwEvade = e.optInt("invis_hits", 0) >= ZW_MIN_POSTS && e.optInt("invis_max", 0) >= ZW_MIN_PER_POST;
+        boolean zwEvade = BotRules.zwEvade(e.optInt("invis_hits", 0), e.optInt("invis_max", 0));
         boolean nearKnown = false;
         for (int i = 0; rs != null && i < rs.length(); i++) {
-            if (rs.optString(i).equals(N_NEAR)) nearKnown = true;
+            if (BotRules.isNearReason(rs.optString(i))) nearKnown = true;
         }
-        /* 「確定」は量産登録の確証があるときだけ。feature 一致は同一アプリ版という意味しかなく
-           人間も一致するため確証から外した(誤検知の主因だった)。 */
-        String confidence = (cluster || nearKnown || zwEvade) && sc >= BOT_AUTO_SCORE ? "confirmed" : "high";
-        JSONArray neighbors = new JSONArray();
-        try {
-            JSONArray a = botPrefArr("bot_namehits");
-            for (int i = 0; i < a.length(); i++) { long v = a.optLong(i, 0); if (v != 0 && v != uid && Math.abs(v - uid) <= 100) neighbors.put(v); }
-            a = botPrefArr("bot_cands");
-            for (int i = 0; i < a.length(); i++) { JSONObject o = a.optJSONObject(i); long v = o == null ? 0 : o.optLong("u", 0); if (v != 0 && v != uid && Math.abs(v - uid) <= 20) neighbors.put(v); }
-        } catch (Exception ig) {}
+        String confidence = BotRules.confirmed(cluster, nearKnown, zwEvade, sc) ? "confirmed" : "high";
+        JSONArray neighbors = BotRules.neighbors(botHost, uid);
         /* サーバーが自分で取り直して同じ結論に辿り着けるように、材料と規則を添える。
            invis_post_ids はその投稿を取り直して「見えない文字」を数え直せば検証できる。 */
         e.put("verify", new JSONObject().put("target_uid", uid).put("neighbor_uids", neighbors)
                 .put("checked_at_ms", System.currentTimeMillis())
                 .put("invis_post_ids", e.optJSONArray("invis_post_ids") == null ? new JSONArray() : e.optJSONArray("invis_post_ids"))
-                .put("rules", "auto-report requires score>=6 AND (near|namecluster>=2|invisible>=2posts&>=3chars|solicit-bio); feature-match excluded; invisible-count excludes emoji ZWJ/VS/direction-marks"));
+                .put("rules", BotRules.RULES_TEXT));
         StringBuilder detail = new StringBuilder("[KoeTomo+ 業者自動判定(自動申請) score=" + sc + (confidence.equals("confirmed") ? " 確定" : "") + "] ");
         for (int i = 0; rs != null && i < rs.length(); i++) { if (i > 0) detail.append("・"); detail.append(rs.optString(i)); }
         JSONObject body = new JSONObject();
@@ -12645,7 +12312,7 @@ public class KoeSession {
         return u;
     }
 
-    // 業者(量産アカウント)としての申請。理由・証拠は JS から受け取らず、ネイティブ側でその場で API から
+    // 業者としての申請。理由・証拠は JS から受け取らず、ネイティブ側でその場で API から
     // ユーザー情報を取得して判定する(偽造不可)。判定条件を満たさない相手は申請できない。
     private String moderationReportSpam(String url, String target) {
         String base = modBase(url);
@@ -12668,7 +12335,7 @@ public class KoeSession {
             if (level.length() == 0) {
                 String why = res0.optBoolean("hard", false)
                         ? ("業者判定の条件を満たしていません(スコア " + sc + ")。通常の通報をご利用ください")
-                        : "業者判定の必須条件(量産型アイコン名・フォロー等すべて0・自己紹介なし・年齢確認なし)を満たしていません。通常の通報をご利用ください";
+                        : BotRules.NOT_SPAM_HINT;
                 return new JSONObject().put("ok", false).put("error", "not_spam_like").put("message", why).toString();
             }
             StringBuilder detail = new StringBuilder("[KoeTomo+ 業者自動判定 score=" + sc + "] ");
