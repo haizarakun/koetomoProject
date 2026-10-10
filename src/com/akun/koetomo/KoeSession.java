@@ -1440,6 +1440,11 @@ public class KoeSession {
         }
         try {
             if (r.status >= 200 && r.status < 300) {
+                // 作成の応答に枠の情報が入っているので、持ち主の枠を探し直さずにそのまま入る(失敗したら従来どおり探す)
+                if (r.body != null && r.body.optLong("room_id", 0) > 0) {
+                    String quick = joinRoomObj(r.body, true, String.valueOf(userId()));
+                    if (new JSONObject(quick).optBoolean("ok", false)) return quick;
+                }
                 return joinCall("null");
             }
             String serverMsg = null;
@@ -10117,7 +10122,8 @@ public class KoeSession {
 
     // 公式には「受けたリクエストの一覧」APIは無く、着信の確認は GET /api/cheering_talk/request_checks。
     private String getCheeringRequestReceives() {
-        Resp resp = httpApi2("GET", "/api/cheering_talk/request_checks", (Map<String, String>) null, (Map<String, String>) null);
+        // 呼び出しが無いときは404が返る。別サーバーへ回すと毎回2回送って無駄なので、api2 だけに送る
+        Resp resp = http("GET", BASE_URL2 + "/api/cheering_talk/request_checks", (Map<String, String>) null, (Map<String, String>) null);
         dbgLog(nowStr() + "  [CHEER] request_checks HTTP " + resp.status + " " + truncate(redactLog(resp.body != null ? resp.body.toString() : "(null)"), 400));
         return cheeringDataResult(resp, "requests");
     }
