@@ -207,6 +207,11 @@ const __koeCacheTTL = {
   get_official_links: 120000,
   get_community_categories: 120000,
   get_my_communities: 6000,
+  resolve_users: 3000,
+  get_timeline: 2000,
+  list_group_rooms: 3000,
+  refresh_room_state: 4000,
+  get_my_cheering_receiver: 2000,
 };
 const __koeCache = new Map();
 window.__koeCacheClear = function () {
@@ -1192,7 +1197,7 @@ function __koeRelease() {
 }
 async function callApi(methodName, ...args) {
   // 読み取り専用(get_/resolve_/check_)の同一呼び出しが同時進行中なら、その1本に相乗りして重複通信を防ぐ
-  const isReadOnly = /^(get_|resolve_|check_|inspect_|is_|view_|search_)/.test(methodName);
+  const isReadOnly = /^(get_|resolve_|check_|inspect_|is_|view_|search_|refresh_)/.test(methodName);
   let key = null;
   if (isReadOnly) {
     try {
@@ -1219,7 +1224,7 @@ async function callApi(methodName, ...args) {
   let _t0 = performance.now();
   /* 書き込み後に古いキャッシュを返さない(プロフィール更新→再読込 など)。ただし画面に影響しない裏側の呼び出しでは捨てない */
   const isBg =
-    /^(moderation_auto_spam|js_diag_log|system_arrival|send_registration_id|recording_channel|mark_message_read|update_cheering_receiver_status)$/.test(
+    /^(moderation_auto_spam|js_diag_log|system_arrival|send_registration_id|recording_channel|mark_message_read|update_cheering_receiver_status|room_mute_status)$/.test(
       methodName,
     );
   if (!isReadOnly && !isBg) {
@@ -2558,7 +2563,7 @@ function renderAccounts() {
       ? ((box.innerHTML = a
           .map(
             (x) =>
-              `<div class="account-item ${x.user_id === cur ? "current" : ""}">\n    ${avatarHtml(x.name, x.icon)}\n    <div class="account-info"><div class="account-name">${escapeHtml(x.name || "user " + x.user_id)}${x.user_id === cur ? ' <span class="account-cur">(現在)</span>' : ""}</div><div class="account-id">ID: ${escapeHtml(String(x.user_id))}${x.method ? ' <span class="account-method">' + koeMethodLabel(x.method) + "</span>" : ""}</div>${x.banned ? '<div class="account-ban">BANされました</div>' : ""}</div>\n    ${x.method ? koeMethodIcon(x.method) : ""}${x.user_id === cur ? "" : `<button class="account-switch btn-secondary" data-id="${escAttr(String(x.user_id))}" style="width:auto;">切替</button>`}\n    <button class="account-remove" data-id="${escAttr(String(x.user_id))}" title="削除">✕</button>\n  </div>`,
+              `<div class="account-item ${x.user_id === cur ? "current" : ""}">\n    ${avatarHtml(x.name, x.icon)}\n    <div class="account-info"><div class="account-name">${escapeHtml(x.name || "user " + x.user_id)}${x.user_id === cur ? ' <span class="account-cur">(現在)</span>' : ""}</div><div class="account-id">ID: ${escapeHtml(String(x.user_id))}${x.method ? ' <span class="account-method">' + koeMethodLabel(x.method) + "</span>" : ""}</div>${koeBanPointsHtml(x)}</div>\n    ${x.method ? koeMethodIcon(x.method) : ""}${x.user_id === cur ? "" : `<button class="account-switch btn-secondary" data-id="${escAttr(String(x.user_id))}" style="width:auto;">切替</button>`}\n    <button class="account-remove" data-id="${escAttr(String(x.user_id))}" title="削除">✕</button>\n  </div>`,
           )
           .join("")),
         box
@@ -3914,11 +3919,7 @@ function __initUiExtras() {
       });
   }
   {
-    const bl = document.getElementById("blockedSection");
-    bl &&
-      bl.addEventListener("toggle", function () {
-        this.open && loadBlockedUsers();
-      });
+    /* ブロック一覧の自動読み込みは廃止 */
   }
   {
     const ps = document.getElementById("privacySection");
@@ -6146,7 +6147,11 @@ async function koeBackfillRecordUsers(recs) {
       const r = await callApi("resolve_users", ids.slice(i, i + 20).join(","));
       const byId = {};
       ((r && r.ok && r.users) || []).forEach((u) => {
-        if (u && u.user_id) byId[u.user_id] = u;
+        if (u && u.user_id) {
+          byId[u.user_id] = u;
+          /* 共有キャッシュにも入れて、同じ人への resolve_users を重ねて呼ばない */
+          window.__koeUserInfo && (window.__koeUserInfo[Number(u.user_id)] = window.__koeUserInfo[Number(u.user_id)] || u);
+        }
       });
       recs.forEach((p) => {
         const u = byId[p.user_id];
@@ -6550,7 +6555,7 @@ async function loadTimeline(append) {
     .filter((p) => !isFilteredPost(p) && (!window.__tlKeep || window.__tlKeep(p.id, append)))
     .map(
       (p) =>
-        `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}${p.deco_url ? " has-deco" : ""}" data-pid="${Number(p.id) || 0}" data-likes="${Number(p.likes) || 0}"${p.deco_url ? ` style="--koe-deco:url('${escAttr(koeSafeUrl(p.deco_url))}')"` : ""}>\n      <div class="tl-head">\n        <span class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})'>${koeAdornAvatar(p.name, p.icon_url, p.deco_item, p.badge_url)}</span>\n        <div class="tl-meta" onclick='viewProfile(${Number(p.user_id) || 0})'>\n          <div class="tl-name">${escapeHtml(p.name)} <span class="uid-tag">ID:${Number(p.user_id) || 0}</span>${koeSpamTag(p)}${p.is_talk ? ' <span class="uid-tag koe-feedbadge">通話募集</span>' : ""}${p.is_explicit ? ' <span class="uid-tag koe-regbadge">⚠ 規制対象</span>' : ""}</div>\n          <div class="tl-time" data-ts="${escapeHtml(p.created_at)}" title="${escapeHtml(p.created_at)}">${koeTimeLabel(p.created_at)}</div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : !p.image_url && !p.voice_url ? `<div class="tl-text tl-empty">${p.has_voice || p.play_time ? "\ud83c\udfa7 音声投稿" + (p.play_time ? "（" + Math.round(Number(p.play_time)) + "秒）" : "") : p.is_talk ? "\ud83c\udf99 通話募集の投稿です（本文なし）" : "（本文なし）"}</div>` : ""}\n      ${p.image_url ? `<img class="post-image" loading="lazy" decoding="async" src="${escAttr(koeSafeUrl(p.image_url))}" onclick='event.stopPropagation(); openLightbox(${escAttr(JSON.stringify(p.image_url || ""))})' onerror="this.style.display='none'">` : ""}\n      ${p.voice_url ? VOICE_BADGE + voicePlayerHtml(p.voice_url) : ""}\n      <div class="tl-actions">\n        <span class="comment-btn" onclick='openPostDetail(event, ${Number(p.id) || 0})'><i class="ico kiCmt"></i> ${Number(p.comments) || 0}</span>\n        <span class="like-btn ${postLiked(p) ? "liked" : ""}" onclick='toggleTimelineLike(event, ${Number(p.id) || 0}, ${!!postLiked(p)})'>\n          ${postLiked(p) ? '<i class="ico kiHeartOn" style="color:#ff5a6a"></i>' : '<i class="ico kiHeartOff"></i>'} ${Math.max(p.likes || 0, postLiked(p) ? 1 : 0)}\n        </span>\n        <span class="bookmark-btn ${p.bookmarked || koeBmHas(p.id) ? "marked" : ""}" onclick='toggleBookmark(event, ${Number(p.id) || 0}, ${!!(p.bookmarked || koeBmHas(p.id))}, ${p.is_talk ? 1 : 0})' title="ブックマーク"><i class="ico kiBm"></i></span>\n        ${p.user_id === myUserId ? `<span class="report-btn" onclick='deleteOwnPost(event, ${Number(p.id) || 0}, ${p.is_talk ? 1 : 0})'><i class="ico kiTrash"></i> 削除</span>` : `<span class="report-btn" onclick='promptTimelineReport(event, ${Number(p.user_id) || 0})'><i class="ico kiFlag"></i> 通報</span>`}\n      </div>\n    </div>\n  `,
+        `\n    <div class="timeline-card${p.voice_url ? " has-voice" : ""}${p.is_explicit ? " is-regulated" : ""}${p.deco_url ? " has-deco" : ""}" data-pid="${Number(p.id) || 0}" data-likes="${Number(p.likes) || 0}"${p.deco_url ? ` style="--koe-deco:url('${escAttr(koeSafeUrl(p.deco_url))}')"` : ""}>\n      <div class="tl-head">\n        <span class="tl-avatar" onclick='viewProfile(${Number(p.user_id) || 0})'>${koeAdornAvatar(p.name, p.icon_url, p.deco_item, p.badge_url).replace(/<img /g, '<img fetchpriority="high" ')}</span>\n        <div class="tl-meta" onclick='viewProfile(${Number(p.user_id) || 0})'>\n          <div class="tl-name">${escapeHtml(p.name)} <span class="uid-tag">ID:${Number(p.user_id) || 0}</span>${koeSpamTag(p)}${p.is_talk ? ' <span class="uid-tag koe-feedbadge">通話募集</span>' : ""}${p.is_explicit ? ' <span class="uid-tag koe-regbadge">⚠ 規制対象</span>' : ""}</div>\n          <div class="tl-time" data-ts="${escapeHtml(p.created_at)}" title="${escapeHtml(p.created_at)}">${koeTimeLabel(p.created_at)}</div>\n        </div>\n      </div>\n      ${p.text ? `<div class="tl-text">${linkify(p.text)}</div>` : !p.image_url && !p.voice_url ? `<div class="tl-text tl-empty">${p.has_voice || p.play_time ? "\ud83c\udfa7 音声投稿" + (p.play_time ? "（" + Math.round(Number(p.play_time)) + "秒）" : "") : p.is_talk ? "\ud83c\udf99 通話募集の投稿です（本文なし）" : "（本文なし）"}</div>` : ""}\n      ${p.image_url ? `<img class="post-image koe-defer-img" loading="lazy" decoding="async" data-src="${escAttr(koeSafeUrl(p.image_url))}" onclick='event.stopPropagation(); openLightbox(${escAttr(JSON.stringify(p.image_url || ""))})' onerror="this.style.display='none'">` : ""}\n      ${p.voice_url ? VOICE_BADGE + voicePlayerHtml(p.voice_url) : ""}\n      <div class="tl-actions">\n        <span class="comment-btn" onclick='openPostDetail(event, ${Number(p.id) || 0})'><i class="ico kiCmt"></i> ${Number(p.comments) || 0}</span>\n        <span class="like-btn ${postLiked(p) ? "liked" : ""}" onclick='toggleTimelineLike(event, ${Number(p.id) || 0}, ${!!postLiked(p)})'>\n          ${postLiked(p) ? '<i class="ico kiHeartOn" style="color:#ff5a6a"></i>' : '<i class="ico kiHeartOff"></i>'} ${Math.max(p.likes || 0, postLiked(p) ? 1 : 0)}\n        </span>\n        <span class="bookmark-btn ${p.bookmarked || koeBmHas(p.id) ? "marked" : ""}" onclick='toggleBookmark(event, ${Number(p.id) || 0}, ${!!(p.bookmarked || koeBmHas(p.id))}, ${p.is_talk ? 1 : 0})' title="ブックマーク"><i class="ico kiBm"></i></span>\n        ${p.user_id === myUserId ? `<span class="report-btn" onclick='deleteOwnPost(event, ${Number(p.id) || 0}, ${p.is_talk ? 1 : 0})'><i class="ico kiTrash"></i> 削除</span>` : `<span class="report-btn" onclick='promptTimelineReport(event, ${Number(p.user_id) || 0})'><i class="ico kiFlag"></i> 通報</span>`}\n      </div>\n    </div>\n  `,
     )
     .join("");
   (append
@@ -6572,6 +6577,21 @@ async function loadTimeline(append) {
         "beforeend",
         '<div id="timelineLoadMoreRow" style="padding:8px 0;">\n         <button class="btn-secondary" onclick="loadTimeline(true)">もっと読む</button>\n       </div>',
       ));
+  /* 文字とアイコンを先に出し、投稿の画像は後から4枚ずつ読む */
+  try { koeLoadDeferredImages(list); } catch (e) {}
+}
+/* 投稿画像は data-src のまま置いてあり、描画の後で少しずつ読み込む(アイコン・文字の読み込みを妨げない) */
+function koeLoadDeferredImages(root) {
+  var imgs = Array.prototype.slice.call(root.querySelectorAll("img.koe-defer-img[data-src]"));
+  var i = 0;
+  (function next() {
+    imgs.slice(i, i + 4).forEach(function (im) {
+      im.src = im.getAttribute("data-src");
+      im.removeAttribute("data-src");
+    });
+    i += 4;
+    if (i < imgs.length) setTimeout(next, 150);
+  })();
 }
 let timelineMaxId = "",
   timelineFeed = "all",
@@ -11418,7 +11438,24 @@ function renderApplicants(applicants) {
           .join(""))
     : (box.innerHTML = "");
 }
-async function refreshRoomStateNow() {
+/* 部屋の状態の取り直しは、同じ枠について取得中のものがあればそれを待つ(同時に何本も送らない)。
+   取得が終われば次の依頼は新しく送るので、古い結果を使い回すことはない。 */
+let __rrsInflight = null,
+  __rrsRoom = null;
+function refreshRoomStateNow() {
+  if (!currentRoomId) return Promise.resolve();
+  const rid = String(currentRoomId);
+  if (__rrsInflight && __rrsRoom === rid) return __rrsInflight;
+  __rrsRoom = rid;
+  const p = refreshRoomStateOnce();
+  __rrsInflight = p;
+  const done = () => {
+    if (__rrsInflight === p) __rrsInflight = null;
+  };
+  p.then(done, done);
+  return p;
+}
+async function refreshRoomStateOnce() {
   if (currentRoomId)
     try {
       const __rid = String(currentRoomId);
@@ -11593,12 +11630,9 @@ async function koeBlockedInRoom(ownerUserId, roomId) {
   }
 }
 /* 入室してよければ true */
+/* 入室前のブロック確認は行わない(確認画面・名簿の取得なし)。常に入室してよい */
 async function koeConfirmJoinWithBlocked(ownerUserId, roomId) {
-  var hit = await koeBlockedInRoom(ownerUserId, roomId);
-  if (!hit.length) return true;
-  var names = hit.slice(0, 5).map(function (h) { return h.name; }).join("、") + (hit.length > 5 ? " ほか" + (hit.length - 5) + "人" : "");
-  try { var t = document.getElementById("confirmModalText"); if (t) t.style.whiteSpace = "pre-line"; } catch (e) {}
-  return await showConfirmModal("ちょっとまって！\nブロック中のひと " + names + " が居ます。\nそれでも入室しますか？");
+  return true;
 }
 
 async function doApprove(userId) {
@@ -11680,7 +11714,6 @@ async function joinGroupRoom(ownerUserId) {
     } catch (e) {}
     return;
   }
-  setCallStatus("ブロック中の人が居ないか確認しています...");
   if (!(await koeConfirmJoinWithBlocked(ownerUserId, ""))) {
     setCallStatus("入室をやめました");
     return;
@@ -11713,7 +11746,6 @@ async function joinRoomById(roomId, ownerUserId) {
     } catch (e) {}
     return;
   }
-  setCallStatus("ブロック中の人が居ないか確認しています...");
   if (!(await koeConfirmJoinWithBlocked(ownerUserId || null, roomId))) {
     setCallStatus("入室をやめました");
     return;
@@ -14974,10 +15006,8 @@ async function startInWindowCall(call) {
       try {
         (skRoom.publications || []).forEach(skSubscribeToPublication);
       } catch (e) {}
-      // 参加APIの名簿が古い可能性に備え、最新の名簿も取りに行って取りこぼしを購読する(待たない)
-      try {
-        refreshRoomStateNow().catch(function () {});
-      } catch (e) {}
+      // 入室後の表示は、順番どおりに koeAfterAudioSequence で行う(マイクの取得は待たせない)
+      koeAfterAudioSequence(call, micPromise).catch(function () {});
       skMyPub = null;
       /* ここまでで相手の音声は鳴り始めている。ここからは自分のマイク(取得を待つ) */
       callSetStatus("マイク取得中...(許可を求められたら許可してください)");
@@ -15106,6 +15136,26 @@ async function startInWindowCall(call) {
   else callSetStatus("エラー: SkyWay SDKが読み込まれていません(ネットワーク/CDNを確認)");
 }
 /* 参加APIの応答(participants: role / is_owner 付き)から通話用の名簿を作る */
+/* 入室後の表示の順番:
+   1 枠(入室の応答で取得済み) → 2 音声(購読は済み) → 3 アイコン・名前・装飾 → 4 聞き専か枠主か
+   → 5 自分の表示 → 6 マイクのミュート表示 → 7 チャット → 8 部屋の情報 */
+async function koeAfterAudioSequence(call, micPromise) {
+  const ids = [];
+  (call.participants || []).forEach(function (p) {
+    const id = Number(p.user_id || p.id || 0);
+    if (id) ids.push(id);
+  });
+  const owner = Number(call.owner_user_id || window.__callOwnerUid || 0);
+  if (owner) ids.push(owner);
+  try { await koeResolveUsersCached(ids); } catch (e) {}                         // 3
+  try { renderCallParticipants(call.participants || []); } catch (e) {}
+  try { koeUpdateTrialListeners(); } catch (e) {}                                // 4
+  try { updateCallGrid(); } catch (e) {}                                          // 5
+  try { await micPromise; } catch (e) {}
+  try { koeRenderMuteButton(); } catch (e) {}                                    // 6
+  try { await reloadRoomComments(); } catch (e) {}                               // 7
+  try { await refreshRoomStateNow(); } catch (e) {}                              // 8
+}
 function koeSeedRosterFromJoin(call) {
   try {
     const parts = (call && call.participants) || [];
@@ -24787,9 +24837,7 @@ function koeBootShell(acc) {
     } catch (e) {}
     try {
       var bl = document.getElementById("blockedList");
-      if (bl && bl.offsetParent !== null && typeof loadBlockedUsers === "function") {
-        loadBlockedUsers();
-      }
+      /* ブロック一覧の自動読み込みは廃止 */
     } catch (e) {}
     try {
       var ml = document.getElementById("mutedUsersList") || document.getElementById("mutedList");
@@ -24984,16 +25032,6 @@ function koeBootShell(acc) {
   async function seed() {
     try {
       if (localStorage.getItem(SEED) === "1") return;
-    } catch (e) {}
-    try {
-      var r = await callApi("get_block_list");
-      if (r && r.ok && r.users) {
-        r.users.forEach(function (u) {
-          var id = String(u.user_id != null ? u.user_id : u.id != null ? u.id : "");
-          if (id && id !== "0" && id !== "") doneSet.add(id);
-        });
-        saveSet(DONE, doneSet);
-      }
     } catch (e) {}
     try {
       localStorage.setItem(SEED, "1");
@@ -30286,9 +30324,9 @@ function koeNsBindPresets() {
   /* 末尾に出る「続きを読む」系のボタン */
   var SEL = ".koe-posts-more, #timelineLoadMoreRow button, #roomsMoreBtn";
   /* 画面の下からこの距離まで近づいたら読み始める */
-  var NEAR_PX = 3000;
+  var NEAR_PX = 1200;   /* 近づきすぎたら先読みしない(ログでは数秒で9ページ先まで読んでいた) */
   /* 続けて読みに行くまでの最短の間隔(同じページを二重に取りに行かないための保険) */
-  var STEP_WAIT_MS = 700;
+  var STEP_WAIT_MS = 1500;
   /* 失敗したあと、次に自動で試すまでの待ち時間 */
   var RETRY_WAIT_MS = 5000;
 
@@ -30705,30 +30743,39 @@ window.koeChatVoiceRetry = function (el) {
    「重要」のお知らせに、利用規約違反で利用を制限した旨(または解除した旨)が届いたら、
    いまのアカウントに印を付ける。アカウント一覧に「BANされました」と出し、解除されたら消す。
    ※声とも側に専用の問い合わせ口が無いので、お知らせの文面で判断する。 */
+/* BANポイント: 利用規約違反の制限のお知らせを1件ずつ数える(同じお知らせは二重に数えない)。3回で永ban。
+   解除のお知らせではポイントは減らない。 */
+var KOE_BAN_MAX = 3;
 function koeBanScan(items) {
   var cur = currentAccountId();
   if (!cur || !Array.isArray(items)) return;
-  var ban = 0,
-    lift = 0;
-  items.forEach(function (n) {
-    var t = String((n && (n.message || "")) + " " + (n && (n.name || "")) + " " + (n && (n.title || "")));
-    var ts = Date.parse(String(n && n.created_at || "").replace(" ", "T")) || 0;
-    if (/利用を制限|利用規約違反が確認|アカウントを(永久)?凍結/.test(t) && !/解除/.test(t)) ban = Math.max(ban, ts || 1);
-    if (/制限を解除|凍結を解除|制限は解除|解除されました|解除しました/.test(t)) lift = Math.max(lift, ts || 1);
-  });
-  if (!ban && !lift) return;
-  var banned = ban > lift;
   var a = getAccounts(),
     x = a.find(function (z) { return z.user_id === cur; });
-  if (!x || !!x.banned === banned) return;
-  x.banned = banned;
+  if (!x) return;
+  x.banSeen = Array.isArray(x.banSeen) ? x.banSeen : [];
+  var added = 0;
+  items.forEach(function (n) {
+    var t = String((n && (n.message || "")) + " " + (n && (n.name || "")) + " " + (n && (n.title || "")));
+    if (!/利用を制限|利用規約違反が確認|アカウントを(永久)?凍結/.test(t) || /解除/.test(t)) return;
+    var key = String((n && (n.id || n.created_at)) || t.slice(0, 80));
+    if (x.banSeen.indexOf(key) >= 0) return;
+    x.banSeen.push(key);
+    added++;
+  });
+  if (x.banSeen.length > 50) x.banSeen = x.banSeen.slice(-50);
+  if (!added) { saveAccounts(a); return; }
+  x.banCount = Math.min(KOE_BAN_MAX, (Number(x.banCount) || 0) + added);
   saveAccounts(a);
+  try { renderAccounts(); } catch (e) {}
   try {
-    renderAccounts();
+    toast("BANポイント" + x.banCount + "/" + KOE_BAN_MAX + (x.banCount >= KOE_BAN_MAX ? "：永banされました" : ""), "error");
   } catch (e) {}
-  try {
-    toast(banned ? "このアカウントは利用制限(BAN)を受けています" : "利用制限が解除されました", banned ? "error" : undefined);
-  } catch (e) {}
+}
+/* アカウント一覧に出すBANポイント(🔴=付いた / 🟢=まだ) */
+function koeBanPointsHtml(x) {
+  var n = Math.min(KOE_BAN_MAX, Number(x && x.banCount) || 0), dots = "";
+  for (var i = 0; i < KOE_BAN_MAX; i++) dots += i < n ? "🔴" : "🟢";
+  return '<div class="account-ban">BANポイント' + dots + (n >= KOE_BAN_MAX ? "：永banされました" : "") + "</div>";
 }
 /* 起動してしばらくしたあと、そして30分ごとに、いまのアカウントの重要なお知らせを見に行く */
 (function () {
@@ -30948,6 +30995,7 @@ async function koeRefreshMyReceiver() {
   }
 }
 var koeIncomingGen = 0;   // 作り直すたびに進め、古いループが続かないようにする
+var koeIncomingMiss = 0;   // 続けて呼び出しが無かった回数
 function koeStartIncomingWatch() {
   if (!koeIncomingTimer) {
     var gen = ++koeIncomingGen;
@@ -30957,15 +31005,21 @@ function koeStartIncomingWatch() {
         ((koeIncomingTimer = null),
         koeMyReceiver && "active" === String(koeMyReceiver.status || ""))
       ) {
+        var __delay = 5e3;   // 通常は5秒ごと。呼び出しが無い(404)のが続いたら30秒ごとに減らす
         try {
           var t = await callApi("get_cheering_request_receives"),
             n = (t && (t.requests || t.receives || t.data)) || [];
           if (gen !== koeIncomingGen) return;   // 待つ間に受付を止めた
+          if (t && t.ok === false) koeIncomingMiss++;
+          else koeIncomingMiss = 0;
           Array.isArray(n) && n.length
             ? koeShowIncoming(n[0])
             : koeHideIncoming();
-        } catch (e) {}
-        if (gen === koeIncomingGen) koeIncomingTimer = setTimeout(e, 5e3);
+        } catch (e) {
+          koeIncomingMiss++;
+        }
+        if (koeIncomingMiss >= 3) __delay = 30e3;
+        if (gen === koeIncomingGen) koeIncomingTimer = setTimeout(e, __delay);
       }
     };
     koeIncomingTimer = setTimeout(e, 0);
